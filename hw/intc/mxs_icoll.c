@@ -107,21 +107,28 @@ static int mxs_icoll_pending(MXSIcollState *s, bool fiq)
 {
     int best = -1;
     int best_prio = -1;
-    int i;
+    int w;
 
-    for (i = 0; i < MXS_NUM_IRQS; i++) {
-        int prio;
+    for (w = 0; w < MXS_NUM_IRQS / 32; w++) {
+        uint32_t r = s->raw[w];
 
-        if (!mxs_icoll_asserted(s, i)) {
-            continue;
-        }
-        if (!!(s->intr[i] & ICOLL_INTR_ENFIQ) != fiq) {
-            continue;
-        }
-        prio = s->intr[i] & ICOLL_INTR_PRIORITY;
-        if (prio > best_prio) {
-            best_prio = prio;
-            best = i;
+        for (int b = 0; b < 32; b++) {
+            int i = w * 32 + b;
+
+            if (!(r & (1u << b)) && !(s->intr[i] & ICOLL_INTR_SOFTIRQ)) {
+                continue;
+            }
+            if (!(s->intr[i] & ICOLL_INTR_ENABLE)) {
+                continue;
+            }
+            if (!!(s->intr[i] & ICOLL_INTR_ENFIQ) != fiq) {
+                continue;
+            }
+            int prio = s->intr[i] & ICOLL_INTR_PRIORITY;
+            if (prio > best_prio) {
+                best_prio = prio;
+                best = i;
+            }
         }
     }
     return best;
