@@ -115,12 +115,21 @@ static void brain_kbd_refresh(void *opaque);
 /*
  * EDNA2 MCU attention pulse.  On real hardware the EDNA2 MCU scans
  * the keyboard matrix as well and raises its interrupt line (ICOLL
- * 63) on any key activity; the WinCE keybd_EDNA2 ISTs (ISRMainProc /
+ * 33) on any key activity; the WinCE keybd_EDNA2 ISTs (ISRMainProc /
  * ISRKeyIoProc) are kicked by that interrupt.  The matrix state that
  * brain_kbd drives on the GPIO pins is consumed by the poll scan
  * (0xc0878664), but the interrupt-driven path (hevKey/ThreadProc /
- * SetDirectKey) only advances when ICOLL 63 fires.  Pulse it on any
- * normal key down so both paths see the key.
+ * SetDirectKey) only advances when ICOLL 33 fires.
+ *
+ * The line is HELD asserted for the full key-hold (not a short blip):
+ * the WinCE keybd_EDNA2 IST can be woken from a deep idle (SRAM
+ * clock-switch WFI at 0x327c) only if the ICOLL 33 level is still up
+ * when the CPU gets around to reading the vector.  A 100 us auto-clear
+ * can expire before the guest re-schedules, silently dropping the key
+ * (key tap registered in QEMU but the date dialog never reacts).  The
+ * interrupt is therefore deasserted together with the key release in
+ * the hold timer, matching the real MCU holding its attention line
+ * until the scan confirms the key was read.
  */
 static void brain_kbd_edna2_pulse_tick(void *opaque)
 {
@@ -130,6 +139,17 @@ static void brain_kbd_edna2_pulse_tick(void *opaque)
 }
 
 static void brain_kbd_edna2_pulse(BrainKbdState *s)
+{
+    qemu_set_irq(s->edna2_int, 1);
+}
+
+/*
+ * Timed attention pulse used by the touch path (brain_kbd_edna2_pulse_ext),
+ * which has no matrix key to release the line.  A touch wakes the panel
+ * PDD; a short pulse is enough and the line is auto-cleared so it does
+ * not stay asserted forever.
+ */
+static void brain_kbd_edna2_timed_pulse(BrainKbdState *s)
 {
     qemu_set_irq(s->edna2_int, 1);
     timer_mod(s->edna2_pulse_timer,
@@ -147,7 +167,7 @@ void brain_kbd_edna2_pulse_ext(DeviceState *kbd)
 {
     BrainKbdState *s = BRAIN_KBD(kbd);
 
-    brain_kbd_edna2_pulse(s);
+    brain_kbd_edna2_timed_pulse(s);
 }
 
 /*
@@ -178,6 +198,10 @@ static void brain_kbd_hold_tick(void *opaque)
     }
     if (changed) {
         brain_kbd_refresh(s);
+        /* The key was released: drop the EDNA2 attention line.  It was
+         * held high for the whole key-hold so a deep-idle guest always
+         * has time to service the ICOLL 33 wake. */
+        qemu_set_irq(s->edna2_int, 0);
     }
 }
 
