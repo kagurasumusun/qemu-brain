@@ -281,6 +281,7 @@ static void mxs_timer_diag_clocks(void)
             (long long)qemu_clock_get_ns(QEMU_CLOCK_REALTIME),
             (long long)qemu_clock_get_ns(QEMU_CLOCK_HOST));
 }
+__attribute__((unused)) static void (*p_diag_clocks)(void) = mxs_timer_diag_clocks;
 
 static void mxs_timer_expire(void *opaque)
 {
@@ -341,37 +342,29 @@ static uint64_t mxs_timrot_read(void *opaque, hwaddr offset, unsigned size)
     unsigned idx = MXS_BANK_INDEX(offset);
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     uint32_t val = 0;
-    int i;
 
     if (idx == TIMROT_ROTCTRL) {
         val = s->rotctrl | (0x1fu << 25);   /* ROTARY / TIMn_PRESENT */
     } else if (idx == TIMROT_VERSION) {
         val = 0x02000000;
-    } else {
-        for (i = 0; i < MXS_NUM_TIMERS; i++) {
-            MXSTimer *t = &s->timers[i];
+    } else if (idx >= 0x2 && idx <= 0x11) {
+        int tidx = (idx - 0x2) / 4;
+        int reg = (idx - 0x2) % 4;
+        MXSTimer *t = &s->timers[tidx];
 
-            if (idx == TIMROT_TIMCTRL(i)) {
-                val = t->ctrl;
-            } else if (idx == TIMROT_RUNNING(i)) {
-                static int run_budget = 60;
-
-                val = mxs_timer_count(t, now);
-                if (run_budget > 0 && i == 0) {
-                    mxs_timer_diag_clocks();
-                    fprintf(stderr,
-                            "timrot-run0: count=%08x wall=%lld vnow=%lld "
-                            "base_ns=%lld base=%08x freq=%u run=%d\n",
-                            val, (long long)qemu_clock_get_ns(QEMU_CLOCK_REALTIME),
-                            (long long)now, (long long)t->base_ns,
-                            t->base_count, t->freq, t->running);
-                    run_budget--;
-                }
-            } else if (idx == TIMROT_FIXED(i)) {
-                val = t->fixed;
-            } else if (idx == TIMROT_MATCH(i)) {
-                val = t->match;
-            }
+        switch (reg) {
+        case 0: /* TIMCTRL */
+            val = t->ctrl;
+            break;
+        case 1: /* RUNNING */
+            val = mxs_timer_count(t, now);
+            break;
+        case 2: /* FIXED */
+            val = t->fixed;
+            break;
+        case 3: /* MATCH */
+            val = t->match;
+            break;
         }
     }
 
@@ -383,7 +376,6 @@ static void mxs_timrot_write(void *opaque, hwaddr offset, uint64_t value,
 {
     MXSTimrotState *s = MXS_TIMROT(opaque);
     unsigned idx = MXS_BANK_INDEX(offset);
-    int i;
 
     if (idx == TIMROT_ROTCTRL) {
         s->rotctrl = mxs_bank_sftrst(s->rotctrl,
@@ -392,28 +384,19 @@ static void mxs_timrot_write(void *opaque, hwaddr offset, uint64_t value,
         return;
     }
 
-    for (i = 0; i < MXS_NUM_TIMERS; i++) {
+    if (idx >= 0x2 && idx <= 0x11) {
+        int i = (idx - 0x2) / 4;
+        int reg = (idx - 0x2) % 4;
         MXSTimer *t = &s->timers[i];
 
-        if (idx == TIMROT_TIMCTRL(i)) {
+        switch (reg) {
+        case 0: { /* TIMCTRL */
             uint32_t old = t->ctrl;
             uint32_t written = mxs_bank_shift(offset, value) &
                                mxs_bank_mask(offset, size);
             uint32_t new_ctrl = mxs_bank_apply(old, offset, value, size);
             uint32_t changed;
 
-            /*
-             * TIMCTRLn.IRQ (bit 15) is a write-one-to-clear status bit on
-             * hardware; a plain mxs_bank_apply() would instead store a
-             * written 1 back and latch the interrupt line forever (this
-             * was observed live: TIMCTRL0 stuck at 0xc81f with the timer
-             * IRQ permanently asserted into the ICOLL and the guest
-             * eventually giving up with "InterruptHandle() already
-             * gated").  Model the W1C semantics:
-             *   - plain write:  the bit keeps its value unless written 1
-             *   - set/toggle:   a written 1 clears it
-             *   - clear alias:  already handled by mxs_bank_apply()
-             */
             switch (MXS_BANK_OP(offset)) {
             case MXS_OP_WRITE:
                 new_ctrl = (new_ctrl & ~TIMCTRL_IRQ) |
@@ -438,7 +421,6 @@ static void mxs_timrot_write(void *opaque, hwaddr offset, uint64_t value,
                            TIMCTRL_MATCH_MODE | TIMCTRL_RELOAD)) {
                 if (!(old & TIMCTRL_SELECT_MASK) &&
                     (new_ctrl & TIMCTRL_SELECT_MASK)) {
-                    /* going from NEVER_TICK to a real source */
                     mxs_timer_restart(t, (new_ctrl & TIMCTRL_MATCH_MODE) ?
                                       t->base_count : t->fixed);
                 } else {
@@ -448,18 +430,15 @@ static void mxs_timrot_write(void *opaque, hwaddr offset, uint64_t value,
             mxs_timer_update_irq(t);
             return;
         }
-        if (idx == TIMROT_FIXED(i)) {
+        case 1: /* RUNNING */
+            return; /* read only */
+        case 2: /* FIXED */
             t->fixed = mxs_bank_apply(t->fixed, offset, value, size);
-            /*
-             * Writing FIXED_COUNT (re)loads the down counter unless the
-             * timer free runs in match mode.
-             */
             if (!(t->ctrl & TIMCTRL_MATCH_MODE)) {
                 mxs_timer_restart(t, t->fixed);
             }
             return;
-        }
-        if (idx == TIMROT_MATCH(i)) {
+        case 3: { /* MATCH */
             int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
             uint32_t cur = mxs_timer_count(t, now);
             uint32_t ndelta = (uint32_t)(cur - t->match);
@@ -468,11 +447,6 @@ static void mxs_timrot_write(void *opaque, hwaddr offset, uint64_t value,
             t->fired_match_valid = false;
             brain_log_event(BSTAG('T', 'M', 'T', '0' + i), t->match, cur,
                             ndelta, t->ctrl);
-            /*
-             * BRAIN-DEBUG: any re-arm whose deadline is more than ~2s
-             * away (at 12 MHz, 24M ticks) is anomalous for the WinCE
-             * dynamic tick and worth attributing to a guest PC.
-             */
             if (ndelta > 24000000 && getenv("BRAIN_TIMTRACE")) {
                 fprintf(stderr,
                         "timrot-tmt: t%d match=%08x cur=%08x delta=%u (%dms) "
@@ -483,8 +457,6 @@ static void mxs_timrot_write(void *opaque, hwaddr offset, uint64_t value,
             mxs_timer_resched(t);
             return;
         }
-        if (idx == TIMROT_RUNNING(i)) {
-            return;     /* read only */
         }
     }
 }
