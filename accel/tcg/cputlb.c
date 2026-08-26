@@ -42,6 +42,9 @@
 #include "qemu/atomic.h"
 #include "qemu/atomic128.h"
 #include "tb-internal.h"
+#include "exec/icount.h"
+#include "exec/replay-core.h"
+#include "brain_stats.h"
 #include "trace.h"
 #include "tb-hash.h"
 #include "tb-internal.h"
@@ -1280,7 +1283,22 @@ io_prepare(hwaddr *out_offset, CPUState *cpu, CPUTLBEntryFull *full,
     mr_offset = full->xlat_offset + addr;
     cpu->mem_io_pc = retaddr;
     if (!cpu->neg.can_do_io) {
-        cpu_io_recompile(cpu, retaddr);
+        /*
+         * Mid-TB MMIO is only a correctness problem for deterministic
+         * execution, where I/O must observe an exact instruction
+         * count and sit at the end of a TB.  With icount off and no
+         * record/replay active, the rewind + recompile dance exists
+         * purely to service a mode nobody is using -- and on
+         * MMIO-heavy guests (Brain/WinCE runs whole control loops in
+         * uncached SRAM) it degenerates the entire system into
+         * one-insn-TB mode.  Skip it and let the access happen in
+         * program order like on real hardware.
+         */
+        if (icount_enabled() || replay_mode != REPLAY_MODE_NONE) {
+            cpu_io_recompile(cpu, retaddr);
+        } else {
+            brain_stat_inc(BST_IO_RECOMPILE_SKIPPED);
+        }
     }
 
     *out_offset = mr_offset;

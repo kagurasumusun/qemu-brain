@@ -11,6 +11,8 @@
 #include "trace.h"
 #include "cpu.h"
 #include "internals.h"
+
+#include "brain_stats.h"
 #include "cpu-features.h"
 #include "exec/page-protection.h"
 #include "exec/mmap-lock.h"
@@ -21,6 +23,7 @@
 #include "exec/cputlb.h"
 #include "exec/translation-block.h"
 #include "hw/core/irq.h"
+#include "hw/misc/mxs_bank.h"
 #include "system/cpu-timers.h"
 #include "exec/icount.h"
 #include "system/kvm.h"
@@ -528,6 +531,18 @@ static const ARMCPRegInfo not_v7_cp_reginfo[] = {
     { .name = "ILOCKDOWN", .cp = 15, .crn = 9, .crm = 0, .opc1 = 0, .opc2 = 1,
       .access = PL1_RW, .fieldoffset = offsetof(CPUARMState, cp15.c9_insn),
       .resetvalue = 0 },
+    /*
+     * SHARP Brain OAL "TCM probe" (kernel VA 0x8020edf4) reads CP15
+     * c9 c1 (crm=1) during suspend/resume context save.  The ARM926
+     * TRM only documents c9 c0 (cache lockdown), but the Brain's WinCE
+     * image expects c9 c1 to be readable; on real silicon it returns
+     * RAZ.  Model it as RAZ so the probe does not raise an Undefined
+     * Instruction exception mid-poweroff.
+     */
+    { .name = "TCM9C1_0", .cp = 15, .crn = 9, .crm = 1, .opc1 = 0, .opc2 = 0,
+      .access = PL1_R, .type = ARM_CP_CONST | ARM_CP_NO_RAW, .resetvalue = 0 },
+    { .name = "TCM9C1_1", .cp = 15, .crn = 9, .crm = 1, .opc1 = 0, .opc2 = 1,
+      .access = PL1_R, .type = ARM_CP_CONST | ARM_CP_NO_RAW, .resetvalue = 0 },
     /* v6 doesn't have the cache ID registers but Linux reads them anyway */
     { .name = "DUMMY", .cp = 15, .crn = 0, .crm = 0, .opc1 = 1, .opc2 = CP_ANY,
       .access = PL1_R, .type = ARM_CP_CONST | ARM_CP_NO_RAW,
@@ -3368,10 +3383,144 @@ static void sctlr_write(CPUARMState *env, const ARMCPRegInfo *ri,
         return;
     }
 
+    /*
+     * Brain/WinCE: quirk applies to any SCTLR-family write (the ARM926
+     * alias entry used to slip past the realize-time type patching)
+     * as long as the CPU was created with the property.
+     */
+    if ((ri->type & ARM_CP_SUPPRESS_TB_EXIT) || cpu->mmu_prefetch_quirk) {
+        uint64_t old = raw_read(env, ri);
+        static int sc_budget = 60;
+
+        if (sc_budget > 0) {
+            fprintf(stderr,
+                    "brain-sctlr: wr pc=%08x type=%x old=%08x new=%08x "
+                    "togM=%d dirty\n",
+                    (uint32_t)env->regs[15], (unsigned)ri->type,
+                    (unsigned)old, (unsigned)value,
+                    !!((old ^ value) & SCTLR_M));
+            sc_budget--;
+        }
+        /*
+         * Brain/WinCE MMU-prefetch quirk: the current TB continues to
+         * run under the old translation state (like real prefetch
+         * hardware).  Defer the world change to the natural end of
+         * this TB, where arm_tr_tb_stop() emits a helper applying it
+         * (arm_mmu_prefetch_apply), or to exception entry if the TB
+         * exits early; hflags therefore never change mid-TB, which
+         * both models the hardware and avoids retranslation churn.
+         */
+        raw_write(env, ri, value);
+        if ((old ^ value) & SCTLR_M) {
+            env->mmu_toggle_pending = true;
+            brain_stat_inc(BST_QUIRK_SCTLR_DEFER);
+            brain_log_event(BSTAG('S', 'C', 'T', 'L'), env->regs[15],
+                            (uint32_t)old, (uint32_t)value, env->regs[14]);
+            /*
+             * Do NOT set hflags_dirty_pending for the M-bit toggle.
+             * hflags_dirty_pending makes the translator rebuild hflags
+             * before the *next* instruction, which ends the TB right
+             * after the SCTLR write; the following instruction would
+             * then be fetched/translated under the NEW MMU state.
+             *
+             * Real ARM926 hardware prefetches and decodes the
+             * instruction *following* an SCTLR write under the OLD
+             * state (the pipeline window), so the SHARP Brain WinCE
+             * image keeps running straight-line code across the
+             * toggle (OAL clock-switch at SRAM 0x3350 -> 0x3354).
+             * With hflags_dirty_pending set, QEMU fetches 0x3354
+             * under MMU-on and faults, wedging the boot.
+             *
+             * Instead only mmu_toggle_pending is set; the TB runs on
+             * with the old hflags/MMU state to its natural end, where
+             * arm_mmu_prefetch_apply() flushes the TLB and rebuilds
+             * hflags (it already does when mmu_toggle_pending is
+             * set, see below).
+             */
+        } else {
+            env->hflags_dirty_pending = true;
+        }
+        return;
+    } else if (raw_read(env, ri) != value) {
+        static int sc_budget2 = 60;
+
+        if (sc_budget2 > 0) {
+            fprintf(stderr,
+                    "brain-sctlr: NOSUPPRESS wr pc=%08x type=%x "
+                    "old=%08x new=%08x togM=%d\n",
+                    (uint32_t)env->regs[15], (unsigned)ri->type,
+                    (unsigned)raw_read(env, ri), (unsigned)value,
+                    !!((raw_read(env, ri) ^ value) & SCTLR_M));
+            sc_budget2--;
+        }
+    }
+
     raw_write(env, ri, value);
 
     /* This may enable/disable the MMU, so do a TLB flush.  */
     tlb_flush(CPU(cpu));
+}
+
+/*
+ * Runtime toggle for the MXS MMIO access trace ('brain_trace' HMP
+ * command).  Declared in hw/misc/mxs_bank.h; the storage lives here
+ * because every hw user links against the target code anyway.
+ */
+bool mxs_trace_live;
+
+/* guest PC to annotate live MMIO traces with (0 when not from a vCPU) */
+uint32_t mxs_trace_guest_pc(void)
+{
+    CPUState *cs = current_cpu;
+
+    if (!cs) {
+        return 0;
+    }
+    return (uint32_t)ARM_CPU(cs)->env.regs[15];
+}
+
+/* weak hook used by hw/sd/sd.c (BRAIN_SDTRACE) to annotate reads */
+uint32_t brain_sd_trace_pc(void)
+{
+    return mxs_trace_guest_pc();
+}
+
+void arm_mmu_prefetch_apply(CPUARMState *env, int why)
+{
+    bool flushed = false;
+
+    /*
+     * The canonical application point is the natural end of the TB
+     * that performed the deferred SCTLR write (a helper emitted by
+     * arm_tr_tb_stop, BST_QUIRK_APPLY_TBEND).  arm_get_tb_cpu_state()
+     * (BST_QUIRK_APPLY_LOOKUP) and exception entry
+     * (BST_QUIRK_APPLY_EXCEPTION) are backstops for exits that bypass
+     * TB-end code (helper-raised exceptions, single-insn rewinds).
+     */
+    brain_stat_inc((BrainStat)why);
+    if (unlikely(env->mmu_toggle_pending)) {
+        env->mmu_toggle_pending = false;
+        tlb_flush(env_cpu(env));
+        flushed = true;
+        if (tcg_enabled()) {
+            arm_rebuild_hflags(env);
+        }
+    }
+    if (unlikely(env->hflags_dirty_pending)) {
+        env->hflags_dirty_pending = false;
+        if (tcg_enabled()) {
+            arm_rebuild_hflags(env);
+        }
+    }
+    if (flushed || why == BST_QUIRK_APPLY_TBEND) {
+        if (flushed) {
+            brain_stat_inc(BST_QUIRK_APPLY_PENDING);
+        }
+        brain_log_event(BSTAG('A', 'P', 'L', 'Y'), env->regs[15],
+                        (uint32_t)why | ((uint32_t)flushed << 8),
+                        (uint32_t)arm_sctlr(env, 1),
+                        (uint32_t)env->hflags.flags);
+    }
 }
 
 static void mdcr_el3_write(CPUARMState *env, const ARMCPRegInfo *ri,
@@ -9528,6 +9677,69 @@ void arm_cpu_do_interrupt(CPUState *cs)
     uint64_t last_pc = cs->cc->get_pc(cs);
 
     assert(!arm_feature(env, ARM_FEATURE_M));
+
+    /*
+     * Apply any deferred SCTLR world change before entering the
+     * exception: on real hardware an exception taken around an SCTLR
+     * M bit toggle sees the new control state.
+     */
+    arm_mmu_prefetch_apply(env, BST_QUIRK_APPLY_EXCEPTION);
+
+    switch (cs->exception_index) {
+    case EXCP_UDEF:
+        brain_stat_inc(BST_EXCP_UNDEF);
+        break;
+    case EXCP_SWI:
+        brain_stat_inc(BST_EXCP_SVC);
+        break;
+    case EXCP_PREFETCH_ABORT:
+        brain_stat_inc(BST_EXCP_PABORT);
+        {
+            uint32_t pva = (uint32_t)env->exception.vaddress;
+            /* BRAIN_ABTRACE: dump every abort (with fault status) so the
+             * source of the anomalous pabort storm can be attributed. */
+            if (getenv("BRAIN_ABTRACE")) {
+                static int pab_budget = 500;
+                if (pab_budget > 0) {
+                    pab_budget--;
+                    fprintf(stderr,
+                            "brain-pabort: pc=%08x vaddr=%08x fsr=%08x "
+                            "cpsr=%08x\n",
+                            (uint32_t)last_pc, pva,
+                            (uint32_t)env->exception.fsr,
+                            (uint32_t)cpsr_read(env));
+                }
+            }
+        }
+        break;
+    case EXCP_DATA_ABORT:
+        brain_stat_inc(BST_EXCP_DABORT);
+        if (getenv("BRAIN_ABTRACE")) {
+            static int dab_budget = 300;
+            if (dab_budget > 0) {
+                dab_budget--;
+                fprintf(stderr,
+                        "brain-dabort: pc=%08x addr=%08x fsr=%08x "
+                        "cpsr=%08x\n",
+                        (uint32_t)last_pc,
+                        (uint32_t)env->exception.vaddress,
+                        (uint32_t)env->exception.fsr,
+                        (uint32_t)cpsr_read(env));
+            }
+        }
+        break;
+    case EXCP_IRQ:
+        brain_stat_inc(BST_EXCP_IRQ);
+        break;
+    case EXCP_FIQ:
+        brain_stat_inc(BST_EXCP_FIQ);
+        break;
+    default:
+        if (!excp_is_internal(cs->exception_index)) {
+            brain_stat_inc(BST_EXCP_OTHER);
+        }
+        break;
+    }
 
     arm_log_exception(cs);
     qemu_log_mask(CPU_LOG_INT, "...from EL%d to EL%d\n", arm_current_el(env),

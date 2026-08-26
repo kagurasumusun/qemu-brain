@@ -23,6 +23,7 @@
  */
 
 #include "qemu/osdep.h"
+#include <stdlib.h>
 #include <dirent.h>
 #include "hw/core/qdev.h"
 #include "monitor-internal.h"
@@ -1173,6 +1174,15 @@ void handle_hmp_command(MonitorHMP *mon, const char *cmdline)
     const char *cmd_start = cmdline;
 
     trace_handle_hmp_command(mon, cmdline);
+
+    if (getenv("BRAIN_HMPDBG")) {
+        fprintf(stderr, "[hmpdbg] raw line: [");
+        for (const char *p = cmdline; *p; p++) {
+            unsigned char c = (unsigned char)*p;
+            fprintf(stderr, c >= 32 && c < 127 ? "%c" : "\\x%02x", c);
+        }
+        fprintf(stderr, "]\n");
+    }
 
     cmd = monitor_parse_command(mon, cmdline, &cmdline,
                                 hmp_cmds_for_target(false));

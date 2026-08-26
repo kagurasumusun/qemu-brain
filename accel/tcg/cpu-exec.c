@@ -37,6 +37,7 @@
 #include "exec/log.h"
 #include "qemu/main-loop.h"
 #include "exec/icount.h"
+#include "brain_stats.h"
 #include "exec/replay-core.h"
 #include "system/tcg.h"
 #include "exec/helper-proto-common.h"
@@ -702,7 +703,19 @@ static inline bool cpu_handle_exception(CPUState *cpu, int *ret)
         /* exit request from the cpu execution loop */
         *ret = cpu->exception_index;
         if (*ret == EXCP_DEBUG) {
+            /*
+             * brain_bwatch count>1: keep the vCPU running instead of
+             * stopping on every hit.  The debug_excp_handler already
+             * dumped the registers; *ret = 0 makes cpu_exec_loop
+             * resume as if nothing happened (exception_index is -1).
+             * The flag is sampled *before* the handler because the
+             * final post-step hit clears it but must still resume.
+             */
+            bool brain_ar = brain_bwatch_auto_resume;
             cpu_handle_debug_exception(cpu);
+            if (brain_ar || brain_bwatch_auto_resume) {
+                *ret = 0;
+            }
         }
         cpu->exception_index = -1;
         return true;

@@ -13,6 +13,7 @@
 #include "exec/translation-block.h"
 #include "accel/tcg/cpu-ops.h"
 #include "cpregs.h"
+#include "brain_stats.h"
 
 static inline bool fgt_svc(CPUARMState *env, int el)
 {
@@ -622,6 +623,17 @@ TCGTBCPUState arm_get_tb_cpu_state(CPUState *cs)
     CPUARMState *env = cpu_env(cs);
     CPUARMTBFlags flags;
     vaddr pc;
+
+    /*
+     * Brain/WinCE MMU-prefetch quirk: a deferred SCTLR write applies
+     * its world change (TLB flush, hflags rebuild) exactly here, at
+     * the TB boundary.  env->hflags therefore never changes in the
+     * middle of a TB run, mirroring the hardware prefetch window
+     * without any per-write retranslation churn.
+     */
+    if (unlikely(env->mmu_toggle_pending | env->hflags_dirty_pending)) {
+        arm_mmu_prefetch_apply(env, BST_QUIRK_APPLY_LOOKUP);
+    }
 
     assert_hflags_rebuild_correctly(env);
     flags = env->hflags;

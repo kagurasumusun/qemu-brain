@@ -301,6 +301,16 @@ typedef struct CPUArchState {
     /* Cached TBFLAGS state.  See below for which bits are included.  */
     CPUARMTBFlags hflags;
 
+    /*
+     * Brain/WinCE MMU-prefetch quirk (see ARM_CP_SUPPRESS_TB_EXIT):
+     * set by a deferred SCTLR write; the actual world change (TLB
+     * flush and / or hflags rebuild) is applied at the end of the
+     * containing TB (code emitted by arm_tr_tb_stop), falling back to
+     * arm_get_tb_cpu_state(), or on exception entry.
+     */
+    bool mmu_toggle_pending;
+    bool hflags_dirty_pending;
+
     /* Frequently accessed CPSR bits are stored separately for efficiency.
        This contains all the other bits.  Use cpsr_{read,write} to access
        the whole CPSR.  */
@@ -1152,6 +1162,15 @@ struct ArchCPU {
      * architecture version.
      */
     bool cfgend;
+
+    /*
+     * Brain/WinCE quirk: when true, SCTLR writes (via the AArch32 or
+     * AArch64 SCTLR register) do not end the translation block, so a
+     * sequence that toggles the MMU bit runs under the previous
+     * translation like real ARM9 hardware.  Set by the 'brain' machine.
+     * See ARM_CP_SUPPRESS_TB_EXIT in target/arm/cpregs.h.
+     */
+    bool mmu_prefetch_quirk;
 
     QLIST_HEAD(, ARMELChangeHook) pre_el_change_hooks;
     QLIST_HEAD(, ARMELChangeHook) el_change_hooks;
@@ -2653,6 +2672,16 @@ void arm_register_el_change_hook(ARMCPU *cpu, ARMELChangeHookFn *hook, void
  * Rebuild the cached TBFLAGS for arbitrary changed processor state.
  */
 void arm_rebuild_hflags(CPUARMState *env);
+
+/**
+ * arm_mmu_prefetch_apply:
+ * Apply a deferred SCTLR world change (Brain/WinCE MMU-prefetch
+ * quirk): performs the TLB flush and/or hflags rebuild postponed by
+ * an ARM_CP_SUPPRESS_TB_EXIT SCTLR write.  @why is one of the
+ * BST_QUIRK_APPLY_* event sources (see include/brain_stats.h) and is
+ * only used for statistics.
+ */
+void arm_mmu_prefetch_apply(CPUARMState *env, int why);
 
 /**
  * aa32_vfp_dreg:

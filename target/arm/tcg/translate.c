@@ -26,6 +26,7 @@
 #include "arm_ldst.h"
 #include "semihosting/semihost.h"
 #include "cpregs.h"
+#include "brain_stats.h"
 #include "exec/target_page.h"
 #include "helper.h"
 #include "helper-mve.h"
@@ -1315,7 +1316,17 @@ static void gen_goto_ptr(void)
  */
 static void gen_goto_tb(DisasContext *s, unsigned tb_slot_idx, int64_t diff)
 {
-    if (translator_use_goto_tb(&s->base, s->pc_curr + diff)) {
+    if (unlikely(s->brain_apply_tb_end)) {
+        /*
+         * Brain/WinCE MMU-prefetch quirk: this TB defers a world
+         * change to its natural end.  Never chain out of it and
+         * never use goto_ptr (which would look the next TB up with
+         * the stale pre-apply flags): fall back to the main loop so
+         * the apply helper + TB lookup see the new state.
+         */
+        gen_update_pc(s, diff);
+        tcg_gen_exit_tb(NULL, 0);
+    } else if (translator_use_goto_tb(&s->base, s->pc_curr + diff)) {
         /*
          * For pcrel, the pc must always be up-to-date on entry to
          * the linked TB, so that it can use simple additions for all
@@ -1958,16 +1969,41 @@ static void do_coproc_insn(DisasContext *s, int cpnum, int is64,
 
     if (!isread && !(ri->type & ARM_CP_SUPPRESS_TB_END)) {
         /*
-         * A write to any coprocessor register that ends a TB
-         * must rebuild the hflags for the next TB.
+         * Brain/WinCE: the ARM926 SCTLR is an ARM_CP_ALIAS entry the
+         * realize-time quirk hook used to miss by key.  Treat any
+         * cp15 c1,c0,0,0 (SCTLR) write as suppress-TB-exit when the
+         * CPU was created with the quirk property, regardless of
+         * whether the type flag made it onto this exact reginfo.
          */
-        gen_rebuild_hflags(s, ri->type & ARM_CP_NEWEL);
+        bool brain_sctlr = s->brain_quirk && cpnum == 15 && !is64 &&
+                           crn == 1 && crm == 0 && opc1 == 0 && opc2 == 0;
+
+        if (!(ri->type & ARM_CP_SUPPRESS_TB_EXIT) && !brain_sctlr) {
+            /*
+             * A write to any coprocessor register that ends a TB
+             * must rebuild the hflags for the next TB.
+             */
+            gen_rebuild_hflags(s, ri->type & ARM_CP_NEWEL);
+            /*
+             * We default to ending the TB on a coprocessor register
+             * write, but allow this to be suppressed by the register
+             * definition (usually only necessary to work around guest
+             * bugs).
+             */
+            need_exit_tb = true;
+        }
         /*
-         * We default to ending the TB on a coprocessor register write,
-         * but allow this to be suppressed by the register definition
-         * (usually only necessary to work around guest bugs).
+         * With ARM_CP_SUPPRESS_TB_EXIT the writefn defers the world
+         * change (hflags rebuild, TLB flush) to the natural end of
+         * the current TB via the mmu_toggle_pending /
+         * hflags_dirty_pending CPU flags.  Nothing is emitted here at
+         * all: the current TB runs on with the old state, exactly
+         * like the hardware prefetch window.  Mark the TB so that
+         * arm_tr_tb_stop() applies the pending state in generated
+         * code and forces an exit to the main loop instead of
+         * chaining to the next TB with stale flags.
          */
-        need_exit_tb = true;
+        s->brain_apply_tb_end = true;
     }
     if (need_exit_tb) {
         gen_lookup_tb(s);
@@ -6383,6 +6419,8 @@ static void arm_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
     dc->ss_active = EX_TBFLAG_ANY(tb_flags, SS_ACTIVE);
     dc->pstate_ss = EX_TBFLAG_ANY(tb_flags, PSTATE__SS);
     dc->is_ldex = false;
+    dc->brain_apply_tb_end = false;
+    dc->brain_quirk = cpu->mmu_prefetch_quirk;
 
     dc->page_start = dc->base.pc_first & TARGET_PAGE_MASK;
 
@@ -6396,6 +6434,15 @@ static void arm_tr_init_disas_context(DisasContextBase *dcbase, CPUState *cs)
     if (!dc->thumb) {
         int bound = -(dc->base.pc_first | TARGET_PAGE_MASK) / 4;
         dc->base.max_insns = MIN(dc->base.max_insns, bound);
+    }
+
+    /* Brain: track why a TB was restricted to a single insn. */
+    if (unlikely(dc->base.max_insns == 1)) {
+        if ((tb_cflags(dc->base.tb) & CF_COUNT_MASK) == 1 && !dc->ss_active) {
+            brain_stat_inc(BST_TB_ONE_INSN_CF);
+        } else if (dc->ss_active) {
+            brain_stat_inc(BST_TB_ONE_INSN_SS);
+        }
     }
 }
 
@@ -6743,10 +6790,29 @@ static void arm_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
 {
     DisasContext *dc = container_of(dcbase, DisasContext, base);
 
-    /* At this stage dc->condjmp will only be set when the skipped
-       instruction was a conditional branch or trap, and the PC has
-       already been written.  */
-    gen_set_condexec(dc);
+    /*
+     * Brain/WinCE MMU-prefetch quirk: if this TB performed a deferred
+     * SCTLR write, apply the pending world change (TLB flush + hflags
+     * rebuild) here, at the natural end of the TB, in generated code.
+     * This is deterministic: unlike the previous backstop-only design
+     * (arm_get_tb_cpu_state), it cannot be skipped by goto_tb chains
+     * that keep execution inside generated code -- and all chaining
+     * out of such a TB has already been suppressed in gen_goto_tb().
+     */
+    if (unlikely(dc->brain_apply_tb_end)) {
+        static int ae_budget = 60;
+
+        if (ae_budget > 0) {
+            fprintf(stderr,
+                    "brain-tbend: apply pc_first=%08x pc_next=%08x "
+                    "insns=%d is_jmp=%d cflags=%x\n",
+                    (uint32_t)dc->base.pc_first,
+                    (uint32_t)dc->base.pc_next, dc->base.num_insns,
+                    (int)dc->base.is_jmp, (unsigned)tb_cflags(dc->base.tb));
+            ae_budget--;
+        }
+        gen_helper_brain_mmu_prefetch_apply(tcg_env);
+    }
     if (dc->base.is_jmp == DISAS_BX_EXCRET) {
         /* Exception return branches need some special case code at the
          * end of the TB, which is complex enough that it has to
@@ -6798,9 +6864,19 @@ static void arm_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
             break;
         case DISAS_UPDATE_NOCHAIN:
             gen_update_pc(dc, curr_insn_len(dc));
-            /* fall through */
+            if (!dc->brain_apply_tb_end) {
+                gen_goto_ptr();
+            } else {
+                tcg_gen_exit_tb(NULL, 0);
+            }
+            break;
         case DISAS_JUMP:
-            gen_goto_ptr();
+            if (!dc->brain_apply_tb_end) {
+                gen_goto_ptr();
+            } else {
+                /* pc is already written; exit so lookup sees it */
+                tcg_gen_exit_tb(NULL, 0);
+            }
             break;
         case DISAS_UPDATE_EXIT:
             gen_update_pc(dc, curr_insn_len(dc));

@@ -132,6 +132,14 @@ typedef struct DisasContext {
      * ie A64 LDX*, LDAX*, A32/T32 LDREX*, LDAEX*.
      */
     bool is_ldex;
+    /* Brain/WinCE: this TB wrote an ARM_CP_SUPPRESS_TB_EXIT cp
+     * register (deferred SCTLR world change); arm_tr_tb_stop()
+     * applies it in generated code at the natural TB end and the
+     * TB must exit to the main loop instead of chaining. */
+    bool brain_apply_tb_end;
+    /* Brain/WinCE: CPU was realised with the mmu-prefetch-quirk
+     * property (see ARMCPRegInfo ARM_CP_SUPPRESS_TB_EXIT). */
+    bool brain_quirk;
     /* True if AccType_UNPRIV should be used for LDTR et al */
     bool unpriv;
     /* True if v8.3-PAuth is active.  */

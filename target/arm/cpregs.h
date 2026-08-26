@@ -66,6 +66,21 @@ enum {
      */
     ARM_CP_SUPPRESS_TB_END       = 1 << 6,
     /*
+     * Flag: after a write to this register, rebuild the hflags for the next
+     * TB (so the next TB starts with the corrected CPU state) but keep the
+     * *current* TB running instead of forcing an immediate TB exit.
+     *
+     * This works around guests (e.g. the SHARP Brain WinCE OAL on the
+     * i.MX28 / ARM926EJ-S) that toggle the MMU enable bit with a code
+     * sequence which, on real hardware, executes under the *old* MMU
+     * translation for the instructions already prefetched at the time the
+     * SCTLR M-bit write retires.  Forcing an immediate TB exit here would
+     * re-fetch the following instruction under the wrong translation and
+     * abort; with this flag the remaining instructions of the TB run with
+     * the previous translation and the next TB is rebuilt correctly.
+     */
+    ARM_CP_SUPPRESS_TB_EXIT      = 1 << 26,
+    /*
      * Flag: Permit a register definition to override a previous definition
      * for the same (cp, is64, crn, crm, opc1, opc2) tuple: either the new
      * or the old must have the ARM_CP_OVERRIDE bit set.

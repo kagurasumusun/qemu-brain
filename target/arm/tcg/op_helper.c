@@ -26,6 +26,7 @@
 #include "accel/tcg/cpu-ldst.h"
 #include "accel/tcg/probe.h"
 #include "cpregs.h"
+#include "brain_stats.h"
 
 #define SIGNBIT (uint32_t)0x80000000
 #define SIGNBIT64 ((uint64_t)1 << 63)
@@ -1024,6 +1025,20 @@ void HELPER(set_cp_reg)(CPUARMState *env, const void *rip, uint32_t value)
     } else {
         ri->writefn(env, ri, value);
     }
+}
+
+/*
+ * Brain/WinCE MMU-prefetch quirk: apply the deferred SCTLR world
+ * change at the natural end of the TB that performed the write.
+ * Emitted by arm_tr_tb_stop(); idempotent with the exception-entry
+ * and TB-lookup backstops, and takes the BQL because tlb_flush()
+ * may kick other CPUs under MTTCG.
+ */
+void HELPER(brain_mmu_prefetch_apply)(CPUARMState *env)
+{
+    bql_lock();
+    arm_mmu_prefetch_apply(env, BST_QUIRK_APPLY_TBEND);
+    bql_unlock();
 }
 
 uint32_t HELPER(get_cp_reg)(CPUARMState *env, const void *rip)

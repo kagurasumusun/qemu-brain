@@ -2161,6 +2161,49 @@ static void arm_cpu_realizefn(DeviceState *dev, Error **errp)
     arm_cpu_register_gdb_regs_for_features(cpu);
     arm_cpu_register_gdb_commands(cpu);
 
+    /*
+     * Brain/WinCE workaround for the i.MX28 (ARM926EJ-S) OAL, which
+     * disables and re-enables the MMU from on-chip SRAM with a sequence
+     * that must execute under the *old* MMU translation for the
+     * already-prefetched instructions (real hardware applies the SCTLR
+     * M-bit write only after those retire).  Mark SCTLR so that a write
+     * rebuilds hflags but does not end the TB; the next TB is then
+     * translated with the corrected MMU state.  See ARM_CP_SUPPRESS_TB_EXIT.
+     */
+    if (cpu->mmu_prefetch_quirk) {
+        /*
+         * Mark *every* cp15 c1,c0,0,0 reginfo (the ARM926 SCTLR is an
+         * ARM_CP_ALIAS entry, and the naive single-key lookup by
+         * ENCODE_CP_REG() misses it): walk the hash and flag the whole
+         * SCTLR family so both the translate-time check and
+         * sctlr_write() see ARM_CP_SUPPRESS_TB_EXIT.
+         */
+        GHashTableIter iter;
+        gpointer key, value;
+        int marked = 0;
+
+        g_hash_table_iter_init(&iter, cpu->cp_regs);
+        while (g_hash_table_iter_next(&iter, &key, &value)) {
+            ARMCPRegInfo *ri = value;
+
+            if (ri->cp == 15 && ri->crn == 1 && ri->crm == 0 &&
+                ri->opc1 == 0 && ri->opc2 == 0 &&
+                !(ri->type & ARM_CP_64BIT)) {
+                ri->type |= ARM_CP_SUPPRESS_TB_EXIT;
+                fprintf(stderr,
+                        "qemu: arm_cpu_realize: mmu-prefetch-quirk marked "
+                        "cpreg key=%08x name=%s type=%x\n",
+                        (unsigned)(uintptr_t)key, ri->name,
+                        (unsigned)ri->type);
+                marked++;
+            }
+        }
+        if (!marked) {
+            fprintf(stderr, "qemu: arm_cpu_realize: mmu-prefetch-quirk "
+                    "requested but SCTLR reginfo not found!\n");
+        }
+    }
+
     arm_init_cpreg_list(cpu);
 
 #ifndef CONFIG_USER_ONLY
@@ -2258,6 +2301,12 @@ static const Property arm_cpu_properties[] = {
     DEFINE_PROP_BOOL("backcompat-cntfrq", ARMCPU, backcompat_cntfrq, false),
     DEFINE_PROP_BOOL("backcompat-pauth-default-use-qarma5", ARMCPU,
                       backcompat_pauth_default_use_qarma5, false),
+    /*
+     * Brain/WinCE workaround: keep the TB running across an SCTLR write
+     * (MMU toggle) so the guest OAL code that disables/re-enables the MMU
+     * in on-chip SRAM behaves as on real ARM9 hardware.
+     */
+    DEFINE_PROP_BOOL("mmu-prefetch-quirk", ARMCPU, mmu_prefetch_quirk, false),
 };
 
 static const gchar *arm_gdb_arch_name(CPUState *cs)

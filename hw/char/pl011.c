@@ -19,6 +19,7 @@
  */
 
 #include "qemu/osdep.h"
+extern uint32_t mxs_trace_guest_pc(void);
 #include "qapi/error.h"
 #include "hw/char/pl011.h"
 #include "hw/core/irq.h"
@@ -226,6 +227,16 @@ static void pl011_loopback_tx(PL011State *s, uint32_t value)
 
 static void pl011_write_txdata(PL011State *s, uint8_t data)
 {
+    /* BRAIN-DEBUG: attribute serial output to guest code (env-gated) */
+    if (getenv("BRAIN_SERTRACE")) {
+        static int trace_budget = 2000;
+        if (trace_budget > 0) {
+            trace_budget--;
+            fprintf(stderr, "[brain-serial] pc=0x%08x '%c'\n",
+                    (unsigned)mxs_trace_guest_pc(),
+                    (data >= 0x20 && data < 0x7f) ? data : '.');
+        }
+    }
     if (!(s->cr & CR_UARTEN)) {
         /*
          * Only log this message once, not every time the guest outputs:

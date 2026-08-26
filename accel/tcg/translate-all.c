@@ -30,6 +30,7 @@
 #include "exec/log.h"
 #include "exec/icount.h"
 #include "accel/tcg/cpu-ops.h"
+#include "accel/tcg/cpu-mmu-index.h"
 #include "tb-jmp-cache.h"
 #include "tb-hash.h"
 #include "tb-context.h"
@@ -37,6 +38,7 @@
 #include "internal-common.h"
 #include "tcg/perf.h"
 #include "tcg/insn-start-words.h"
+#include "brain_stats.h"
 
 TBContext tb_ctx;
 
@@ -276,6 +278,26 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
     if (phys_pc == -1) {
         /* Generate a one-shot TB with 1 insn in it */
         s.cflags = (s.cflags & ~CF_COUNT_MASK) | 1;
+        brain_stat_inc(BST_TB_ONE_INSN_MMIO_PAGE);
+        {
+            static uint64_t os_count;
+
+            os_count++;
+            if (os_count <= 20 || os_count % 10000000 == 0) {
+                hwaddr dbg_pa;
+                int dbg_idx = cpu_mmu_index(cpu, true);
+
+                dbg_pa = cpu_get_phys_page_debug(cpu, s.pc);
+                brain_log_event(BSTAG('O', 'N', 'E', 'S'), (uint32_t)s.pc,
+                                (uint32_t)dbg_pa, (uint32_t)dbg_idx,
+                                (uint32_t)(dbg_pa == (hwaddr)-1));
+                fprintf(stderr,
+                        "brain-tbgen: one-shot #%llu pc=%08x pa=%08llx "
+                        "mmu_idx=%d\n",
+                        (unsigned long long)os_count, (uint32_t)s.pc,
+                        (unsigned long long)dbg_pa, dbg_idx);
+            }
+        }
     }
 
     max_insns = s.cflags & CF_COUNT_MASK;
@@ -388,6 +410,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
         }
     }
     tcg_ctx->gen_tb = NULL;
+    brain_stat_inc(BST_TB_TRANSLATED);
 
     search_size = encode_search(tb, (void *)gen_code_buf + gen_code_size);
     if (unlikely(search_size < 0)) {
@@ -579,6 +602,7 @@ void cpu_io_recompile(CPUState *cpu, uintptr_t retaddr)
     CPUClass *cc;
     uint32_t n;
 
+    brain_stat_inc(BST_IO_RECOMPILE);
     tb = tcg_tb_lookup(retaddr);
     if (!tb) {
         cpu_abort(cpu, "cpu_io_recompile: could not find TB for pc=%p",

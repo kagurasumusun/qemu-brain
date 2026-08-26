@@ -91,3 +91,6 @@ endif
 system_ss.add(when: ['CONFIG_USB', 'CONFIG_XEN_BUS', libusb], if_true: files('xen-usb.c'))
 
 modules += { 'hw-usb': hw_usb_modules }
+
+# Freescale i.MX28 (MXS) OTG controller
+system_ss.add(when: 'CONFIG_MXS', if_true: files('mxs_usbctrl.c'))

@@ -271,6 +271,234 @@ ERST
 #endif
 
     {
+        .name       = "brain_lilo",
+        .args_type  = "",
+        .params     = "",
+        .help       = "scan the SD card for a Brain launcher and jump to it"
+                      " (the QEMU equivalent of pressing 'Launch Linux' in the"
+                      " WinCE menu).",
+        .cmd        = hmp_brain_lilo,
+    },
+
+SRST
+``brain_lilo``
+  Trigger the SHARP Brain 'Launch Linux' interrupt: scan the microSD
+  card for a launcher (``edsh6exe.bin`` / ``nk/edsH6EXE.BIN`` /
+  ``u-boot.sb``) and jump to the address it ends up at, exactly like
+  the real ``brainlilo.exe`` does.
+ERST
+
+    {
+        .name       = "brain_touch",
+        .args_type  = "x:i,y:i,down:i",
+        .params     = "x y down",
+        .help       = "inject a touch event into the LRADC controller:"
+                      " 0 <= x,y <= 0x7fff, down is 0/1.",
+        .cmd        = hmp_brain_touch,
+    },
+    {
+        .name       = "brain_lcdfb",
+        .args_type  = "path:s,base:i,width:i,height:i,bpp:i",
+        .params     = "path [base width height bpp]",
+        .help       = "dump the current LCDIF framebuffer to a binary PPM file"
+                      " (for headless runs where the console isn't visible)."
+                      "  With base/width/height/bpp dump that window directly.",
+        .cmd        = hmp_brain_lcdfb,
+    },
+
+SRST
+``brain_lcdfb`` *path*
+  Write the guest's current LCD framebuffer (as latched by the LCDIF
+  model) to a binary P6 PPM file at *path*.  Used to verify what the
+  WinCE guest is displaying (splash / desktop / menu) when QEMU is run
+  without an SDL or VNC console.
+ERST
+
+SRST
+``brain_touch`` *x* *y* *down*
+  Set the LRADC touch position to (*x*,*y*).  Set *down* to 1 to
+  register a press, 0 to register a release.  Useful for headless
+  QEMU runs where the SDL mouse cannot reach the resistive
+  touchscreen.
+ERST
+
+    {
+        .name       = "brain_pread",
+        .args_type  = "addr:l",
+        .params     = "addr",
+        .help       = "dump 256 bytes of guest physical memory at 'addr'",
+        .cmd        = hmp_brain_pread,
+    },
+
+SRST
+``brain_pread`` *addr*
+  Dump 256 bytes of guest physical memory at *addr*.  Used to peek
+  at the WinCE NK image at runtime (e.g. to locate symbols like
+  ``g_bPwmInit``, ``BSP_PRESENT_CH_MASK`` and ``g_BklData`` that
+  we want to patch on the fly to make ``BSPBacklightInitialize``
+  succeed).
+ERST
+
+    {
+        .name       = "brain_vread",
+        .args_type  = "va:l,len:i?",
+        .params     = "va [len]",
+        .help       = "dump guest virtual memory at 'va' (MMU translated)",
+        .cmd        = hmp_brain_vread,
+    },
+
+SRST
+``brain_vread`` *va* [*len*]
+  Dump guest *virtual* memory at *va* by walking the guest MMU
+  (``arm_cpu_get_phys_page_attrs_debug``).  WinCE CopySection data
+  (e.g. keybd_EDNA2 .rdata) is backed by a RAM copy at a different
+  physical address than the XIP ROM image, so ``brain_pread`` on the
+  ROM offset reads stale bytes; ``brain_vread`` reads what the guest
+  actually sees.
+ERST
+
+    {
+        .name       = "brain_bwatch",
+        .args_type  = "va:l,count:i?",
+        .params     = "va [count]",
+        .help       = "execution breakpoint at guest VA (count>1 auto-resume)",
+        .cmd        = hmp_brain_bwatch,
+    },
+
+SRST
+``brain_bwatch`` *va* [*count*]
+  Insert an execution breakpoint at guest virtual address *va*.
+  When the guest PC reaches *va* the registers are dumped to stderr
+  and the breakpoint is removed so the guest continues.  With *count*
+  greater than 1 the guest keeps running and the breakpoint stays
+  armed for *count* hits.  Used to prove whether a specific guest
+  routine is reached (e.g. keybd_EDNA2 SetDirectKey at 0xc0878b10
+  after ``sendkey y``).
+ERST
+
+    {
+        .name       = "brain_pmemsave",
+        .args_type  = "addr:l,size:l,filename:s",
+        .params     = "addr size filename",
+        .help       = "save guest physical memory range [addr, addr+size) "
+                      "to a file (workaround for this fork's broken "
+                      "'pmemsave' argument parsing)",
+        .cmd        = hmp_brain_pmemsave,
+    },
+    {
+        .name       = "brain_watch",
+        .args_type  = "addr:l,len:l",
+        .params     = "addr len",
+        .help       = "guest-VA data watchpoint (dumps regs+stack on hit)",
+        .cmd        = hmp_brain_watch,
+    },
+    {
+        .name       = "brain_wwatch",
+        .args_type  = "addr:l,len:l",
+        .params     = "addr [len]",
+        .help       = "write-only guest-VA watchpoint (fires on stores only)",
+        .cmd        = hmp_brain_wwatch,
+    },
+
+    {
+        .name       = "brain_unwatch",
+        .args_type  = "addr:l,len:l",
+        .params     = "addr len",
+        .help       = "remove a brain_watch data watchpoint",
+        .cmd        = hmp_brain_unwatch,
+    },
+
+SRST
+``brain_pmemsave`` *addr* *size* *filename*
+  Save *size* bytes of guest physical memory starting at *addr* to the
+  host file *filename*.  Equivalent of ``pmemsave`` with an argument
+  format that parses reliably in this tree.
+ERST
+
+    {
+        .name       = "brain_pwrite",
+        .args_type  = "addr:l,value:l,size:i?",
+        .params     = "addr value [size]",
+        .help       = "write to guest physical memory at 'addr'."
+                      " size defaults to 4 (bytes); 1 and 2 are also supported.",
+        .cmd        = hmp_brain_pwrite,
+    },
+
+SRST
+``brain_pwrite`` *addr* *value* [*size*]
+  Write *value* of *size* bytes to guest physical address *addr*.
+  Use this in combination with ``brain_pread`` to flip bits in the
+  WinCE NK's ``.data`` / ``.bss`` section at runtime - e.g. once
+  you have located ``g_bPwmInit``, this command sets it to 1
+  (``brain_pwrite <addr> 1 4``) so the splash auto-dismisses.
+ERST
+
+    {
+        .name       = "brain_stats",
+        .args_type  = "",
+        .params     = "",
+        .help       = "dump Brain bring-up runtime statistics (TB health, "
+                      "SCTLR quirk application, exceptions, ICOLL matching, "
+                      "timer expiry)",
+        .cmd        = hmp_brain_stats,
+    },
+
+SRST
+``brain_stats``
+  Dump the Brain bring-up statistics counters: TB translation health
+  (one-insn TB classes, flushes, io-recompile counts), deferred-SCTLR
+  quirk application sites, exception mix, ICOLL IRQ/LEVELACK matching
+  and TIMROT expiry counts.
+ERST
+
+    {
+        .name       = "brain_events",
+        .args_type  = "last:i?",
+        .params     = "[last]",
+        .help       = "dump the tail of the Brain event ring (VECTOR ack, "
+                      "LEVELACK, suppressions, SCTLR defer/apply); "
+                      "'last' entries (default 32, max 256)",
+        .cmd        = hmp_brain_events,
+    },
+
+SRST
+``brain_events`` [*last*]
+  Dump the *last* entries of the Brain runtime event ring (default 32,
+  at most 256).  Each entry is a (tag, a, b, c, d) tuple logged from
+  the ICOLL/SCTLR-quirk paths, e.g. ``VECR`` VECTOR read acks and
+  ``LACK`` LEVELACK writes - matching pairs confirm the tick ISR is
+  healthy; ``SCTL``/``APLY`` follow the deferred-MMU quirk.
+ERST
+
+    {
+        .name       = "brain_trace",
+        .args_type  = "arg:s?",
+        .params     = "[on|off]",
+        .help       = "toggle live tracing of every MXS MMIO access "
+                      "(with guest PC) to stderr; no argument prints "
+                      "the current state",
+        .cmd        = hmp_brain_trace,
+    },
+
+    {
+        .name       = "brain_mbtrace",
+        .args_type  = "arg:s?",
+        .params     = "[on|off]",
+        .help       = "toggle live tracing of EDNA2 mailbox accesses "
+                      "(with guest PC) to stderr; no argument prints "
+                      "the current state",
+        .cmd        = hmp_brain_mbtrace,
+    },
+
+SRST
+``brain_trace`` [``on``|``off``]
+  Toggle live tracing of every MXS MMIO register access to stderr,
+  annotated with the accessing guest PC.  No argument prints the state.
+  Extremely useful to watch which registers a driver/ISR path touches
+  (and therefore what a wake decision depends on).
+ERST
+
+    {
         .name       = "logfile",
         .args_type  = "filename:F",
         .params     = "filename",

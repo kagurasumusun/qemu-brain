@@ -174,6 +174,28 @@ struct SDState {
     int32_t state;    /* current card state, one of SDCardStates */
     uint32_t vhs;
     bool wp_switch;
+    /*
+     * BRAIN (SHARP PW-SH6): when set, sector reads/writes in the FMD
+     * "Region 4" default window [0xf6800, 0x18c809) are redirected to
+     * the real FAT32 user partition at [0x18c809, ...).  See
+     * sd_blk_read()/sd_blk_write().
+     */
+    bool brain_region4_remap;
+    /*
+     * BRAIN fault-zone experiment aid (verification-only, default off).
+     * Used to reproduce the real unit's "しばらくお待ちください" hang in
+     * QEMU by giving the guest's reads of the fault-erased head sectors
+     * (Nand2 LBA 0x27800.., Nand4 LBA 0x47800..) a faulty response.
+     *   mode 0 = off (strict-HW default)
+     *   mode 1 = read error: CMD17/18 touching the zone complete with
+     *            ADDRESS_ERROR in R1, like the address_in_range() path
+     *   mode 3 = trace only: log each zone read, behave normally
+     * mode 2 (virtual-time read delay) is implemented in hw/sd/mxs_ssp.c.
+     * This is an *experiment* aid, not a model of the real silicon.
+     */
+    uint32_t exp_fault_start;   /* first sector of the fault zone */
+    uint32_t exp_fault_len;     /* sectors in the zone (0 = disabled) */
+    uint32_t exp_fault_mode;    /* 0=off 1=read-error 3=trace */
     unsigned long *wp_group_bmap;
     int32_t wp_group_bits;
     uint64_t size;
@@ -1112,9 +1134,114 @@ static const VMStateDescription sd_vmstate = {
     },
 };
 
+/*
+ * BRAIN (SHARP PW-SH6) eMMC region-4 remap.
+ *
+ * The FMD NAND driver's built-in default region table (used when the
+ * EBOOT configuration file EDSH6CFG.BIN is absent) says Region 4 -- the
+ * user FAT32 volume exposed as "\\Nand" -- starts at sector 0xf6800.
+ * In the emmc.img provided, the FAT32 partition actually starts at
+ * sector 0x18c809 (MBR partition 0, type 0x0b); the 0xf6800..0x18c808
+ * window is unrelated data, so the driver's BPB/geometry reads there
+ * return garbage and the volume never mounts.
+ *
+ * On a factory device EBOOT's stored configuration supplies the real
+ * region start, so the driver sees the FAT32 at its expected window.
+ * Emulate that here: alias the real partition over the default window.
+ * A guest read/write of sector S in [0xf6800, 0x18c809) is served from
+ * sector S + 0x96009 (i.e. from the real partition); once the guest
+ * offset reaches 0x18c809 the two windows meet and access continues on
+ * the real partition naturally.
+ */
+#define BRAIN_EMMC_R4_DEFAULT_START   0xf6800u   /* FMD default table */
+#define BRAIN_EMMC_R4_REAL_START      0x18c809u  /* MBR part0 / BPB */
+#define BRAIN_EMMC_R4_DELTA           (BRAIN_EMMC_R4_REAL_START - \
+                                       BRAIN_EMMC_R4_DEFAULT_START)
+
+static uint64_t sd_brain_region4_adjust(SDState *sd, uint64_t addr)
+{
+    uint64_t sec;
+
+    if (!sd->brain_region4_remap) {
+        return addr;
+    }
+    sec = addr >> HWBLOCK_SHIFT;
+    if (sec >= BRAIN_EMMC_R4_DEFAULT_START &&
+        sec < BRAIN_EMMC_R4_REAL_START) {
+        return (sec + BRAIN_EMMC_R4_DELTA) << HWBLOCK_SHIFT;
+    }
+    return addr;
+}
+
+/* ---- BRAIN fault-zone experiment aid (verification-only) ---- */
+static bool sd_exp_fault_hit(SDState *sd, uint64_t addr)
+{
+    uint64_t sec;
+
+    if (sd->exp_fault_mode == 0 || sd->exp_fault_len == 0) {
+        return false;
+    }
+    sec = addr >> HWBLOCK_SHIFT;
+    return sec >= sd->exp_fault_start &&
+           sec < (uint64_t)sd->exp_fault_start + sd->exp_fault_len;
+}
+
+static void sd_exp_fault_note(SDState *sd, const char *cmdname, uint64_t addr)
+{
+    const char *label = sd->exp_fault_mode == 1 ? "ERROR(ADDRESS_ERROR)"
+                       : sd->exp_fault_mode == 3 ? "TRACE(no change)"
+                       : "DELAY-HANDLED-BY-SSP(no change)";
+    fprintf(stderr,
+            "[brain-exp] zone read %s sec=%llu vnow=%" PRIu64 " us -> %s\n",
+            cmdname, (unsigned long long)(addr >> HWBLOCK_SHIFT),
+            qemu_clock_get_us(QEMU_CLOCK_VIRTUAL), label);
+}
+
+/* returns true if the read must fail (mode 1) */
+static bool sd_exp_fault_fail(SDState *sd, const char *cmdname, uint64_t addr)
+{
+    if (!sd_exp_fault_hit(sd, addr)) {
+        return false;
+    }
+    sd_exp_fault_note(sd, cmdname, addr);
+    if (sd->exp_fault_mode == 1) {
+        sd->card_status |= ADDRESS_ERROR;
+        return true;
+    }
+    return false;
+}
+
+
+/* guest PC for the BRAIN_SDTRACE annotation (defined in target/arm/helper.c).
+ * Declared locally to avoid pulling hw/misc/mxs_bank.h (which needs hwaddr)
+ * into this device file. */
+uint32_t brain_sd_trace_pc(void) __attribute__((weak));
+
 static void sd_blk_read(SDState *sd, uint64_t addr, uint32_t len)
 {
     trace_sdcard_read_block(addr, len);
+    {
+        /* BRAIN_SDTRACE: log every block read (sector) so we can confirm
+         * whether the guest filesystem actually mounts the \Nand volume
+         * (Region 4, BPB sector 0x18c809) after DSK_Init. */
+        if (getenv("BRAIN_SDTRACE")) {
+            uint32_t pc = brain_sd_trace_pc ? brain_sd_trace_pc() : 0;
+            static int sdt_budget = 60000;
+            /* Only log reads that are NOT part of the EBOOT NK image copy:
+             * the kernel / FMD / filesystem accesses come from VA >= 0x80200000
+             * (or a driver address).  EBOOT's contiguous NK read happens at
+             * 0x80070b78/0x800713b8 and would otherwise drown the trace. */
+            bool kernelish = (pc >= 0x80200000) ||
+                             (addr >> HWBLOCK_SHIFT) > 0x92000;
+            if (sdt_budget > 0 && kernelish) {
+                sdt_budget--;
+                fprintf(stderr,
+                        "brain-sdread: sec=%llu len=%u pc=0x%08x\n",
+                        (unsigned long long)(addr >> HWBLOCK_SHIFT), len, pc);
+            }
+        }
+    }
+    addr = sd_brain_region4_adjust(sd, addr);
     addr += sd_part_offset(sd);
     if (!sd->blk || blk_pread(sd->blk, addr, len, sd->data, 0) < 0) {
         fprintf(stderr, "sd_blk_read: read error on host side\n");
@@ -1124,6 +1251,7 @@ static void sd_blk_read(SDState *sd, uint64_t addr, uint32_t len)
 static void sd_blk_write(SDState *sd, uint64_t addr, uint32_t len)
 {
     trace_sdcard_write_block(addr, len);
+    addr = sd_brain_region4_adjust(sd, addr);
     addr += sd_part_offset(sd);
     if (!sd->blk || blk_pwrite(sd->blk, addr, len, sd->data, 0) < 0) {
         fprintf(stderr, "sd_blk_write: write error on host side\n");
@@ -1980,11 +2108,24 @@ static sd_rsp_type_t sd_cmd_READ_SINGLE_BLOCK(SDState *sd, SDRequest req)
     }
 
     addr = sd_req_get_address(sd, req);
+    if (sd_exp_fault_fail(sd, "CMD17", addr)) {
+        return sd_r1;
+    }
     if (!address_in_range(sd, "READ_SINGLE_BLOCK", addr, sd->blk_len)) {
         return sd_r1;
     }
 
     sd_blk_read(sd, addr, sd->blk_len);
+    /* BRAIN-DEBUG: show the first bytes returned for low-sector reads */
+    if (getenv("BRAIN_SDTRACE") && addr < (256 << HWBLOCK_SHIFT)) {
+        fprintf(stderr, "[brain-sdio] CMD17 sec=%llu data=%02x%02x%02x%02x "
+                "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                (unsigned long long)(addr >> HWBLOCK_SHIFT),
+                sd->data[0], sd->data[1], sd->data[2], sd->data[3],
+                sd->data[4], sd->data[5], sd->data[6], sd->data[7],
+                sd->data[8], sd->data[9], sd->data[10], sd->data[11],
+                sd->data[12], sd->data[13], sd->data[14], sd->data[15]);
+    }
     return sd_cmd_to_sendingdata(sd, req, addr, NULL, sd->blk_len);
 }
 
@@ -2343,6 +2484,13 @@ static sd_rsp_type_t sd_normal_command(SDState *sd, SDRequest req)
                                     req.arg,
                                     sd_mode_name(sd_mode(sd)),
                                     sd_state_name(sd->state));
+        /* BRAIN-DEBUG: env-gated SD/MMC command trace for watching
+         * which regions of the eMMC image the WinCE storage stack
+         * touches (mounting / launcher file access analysis). */
+        if (getenv("BRAIN_SDTRACE")) {
+            fprintf(stderr, "[brain-sdio] CMD%d arg=0x%08x state=%d\n",
+                    req.cmd, req.arg, (int)sd->state);
+        }
     }
 
     /* Not interpreting this as an app command */
@@ -2371,6 +2519,9 @@ static sd_rsp_type_t sd_normal_command(SDState *sd, SDRequest req)
         switch (sd->state) {
         case sd_transfer_state:
 
+            if (sd_exp_fault_fail(sd, "CMD18", addr)) {
+                return sd_r1;
+            }
             if (!address_in_range(sd, "READ_BLOCK", addr, sd->blk_len)) {
                 return sd_r1;
             }
@@ -3156,6 +3307,14 @@ static const Property emmc_properties[] = {
     DEFINE_PROP_UINT64("boot-partition-size", SDState, boot_part_size, 0),
     DEFINE_PROP_UINT8("boot-config", SDState, boot_config, 0x0),
     DEFINE_PROP_UINT64("rpmb-partition-size", SDState, rpmb_part_size, 0),
+    /* BRAIN: alias the real FAT32 user partition over the FMD default
+     * Region-4 window (see sd_brain_region4_adjust). */
+    DEFINE_PROP_BOOL("brain-region4-remap", SDState,
+                     brain_region4_remap, false),
+    /* BRAIN fault-zone experiment aid (verification-only, default off) */
+    DEFINE_PROP_UINT32("exp-fault-start", SDState, exp_fault_start, 0),
+    DEFINE_PROP_UINT32("exp-fault-len", SDState, exp_fault_len, 0),
+    DEFINE_PROP_UINT32("exp-fault-mode", SDState, exp_fault_mode, 0),
 };
 
 static void sdmmc_common_class_init(ObjectClass *klass, const void *data)

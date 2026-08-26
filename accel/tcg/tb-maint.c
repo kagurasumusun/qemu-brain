@@ -34,6 +34,7 @@
 #include "tb-context.h"
 #include "tb-internal.h"
 #include "internal-common.h"
+#include "brain_stats.h"
 #ifdef CONFIG_USER_ONLY
 #include "user/page-protection.h"
 #define runstate_is_running()  true
@@ -788,6 +789,7 @@ void tb_flush__exclusive_or_serial(void)
     /* XXX: flush processor icache at this point if cache flush is expensive */
     qatomic_inc(&tb_ctx.tb_flush_count);
     qemu_plugin_flush_cb();
+    brain_stat_inc(BST_TB_FLUSH);
 }
 
 static void do_tb_flush(CPUState *cpu, run_on_cpu_data tb_flush_count)

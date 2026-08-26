@@ -691,3 +691,13 @@ config ARMSSE
     select UNIMP
     select SSE_COUNTER
     select SSE_TIMER
+
+config MXS
+    bool
+    default y
+    depends on TCG && ARM
+    select PTIMER
+    select PL011
+    select SD
+    select FRAMEBUFFER
+    select UNIMP

@@ -5,6 +5,7 @@ endif
 tcg_ss = ss.source_set()
 
 tcg_ss.add(files(
+  'brain_stats.c',
   'cpu-exec.c',
   'cpu-exec-common.c',
   'tcg-runtime.c',
