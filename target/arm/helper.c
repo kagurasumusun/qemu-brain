@@ -3480,6 +3480,7 @@ uint32_t mxs_trace_guest_pc(void)
 }
 
 /* weak hook used by hw/sd/sd.c (BRAIN_SDTRACE) to annotate reads */
+uint32_t brain_sd_trace_pc(void);
 uint32_t brain_sd_trace_pc(void)
 {
     return mxs_trace_guest_pc();
@@ -3488,6 +3489,11 @@ uint32_t brain_sd_trace_pc(void)
 void arm_mmu_prefetch_apply(CPUARMState *env, int why)
 {
     bool flushed = false;
+
+    if (likely(!env->mmu_toggle_pending && !env->hflags_dirty_pending &&
+               why != BST_QUIRK_APPLY_TBEND)) {
+        return;
+    }
 
     /*
      * The canonical application point is the natural end of the TB
