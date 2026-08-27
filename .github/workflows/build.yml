@@ -25,18 +25,46 @@ jobs:
             libglib2.0-dev \
             libpixman-1-dev \
             libsdl2-dev \
+            libsdl2-image-dev \
             libgtk-3-dev \
+            libvte-2.91-dev \
+            libslirp-dev \
+            libgnutls28-dev \
+            libcurl4-gnutls-dev \
+            libusb-1.0-0-dev \
+            libusbredirhost-dev \
+            libcapstone-dev \
+            libzstd-dev \
+            libjpeg-dev \
+            libpng-dev \
+            liblzo2-dev \
+            libsnappy-dev \
+            libbzip2-dev \
             python3 \
             python3-venv \
             flex \
-            bison
+            bison \
+            diffutils
 
       - name: Configure QEMU
         run: |
           ./configure \
             --target-list=arm-softmmu \
             --enable-sdl \
+            --enable-sdl-image \
             --enable-gtk \
+            --enable-vte \
+            --enable-slirp \
+            --enable-vnc \
+            --enable-vnc-jpeg \
+            --enable-curl \
+            --enable-gnutls \
+            --enable-libusb \
+            --enable-usb-redir \
+            --enable-capstone \
+            --enable-zstd \
+            --enable-lzo \
+            --enable-snappy \
             --disable-docs
 
       - name: Build qemu-system-arm
@@ -71,6 +99,9 @@ jobs:
             git
             make
             zip
+            diffutils
+            bison
+            flex
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-ninja
             mingw-w64-x86_64-meson
@@ -78,14 +109,21 @@ jobs:
             mingw-w64-x86_64-glib2
             mingw-w64-x86_64-pixman
             mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-SDL2_image
             mingw-w64-x86_64-gtk3
+            mingw-w64-x86_64-vte3
+            mingw-w64-x86_64-libslirp
+            mingw-w64-x86_64-gnutls
+            mingw-w64-x86_64-curl
+            mingw-w64-x86_64-libusb
+            mingw-w64-x86_64-usbredir
+            mingw-w64-x86_64-capstone
             mingw-w64-x86_64-zstd
             mingw-w64-x86_64-libjpeg-turbo
             mingw-w64-x86_64-libpng
+            mingw-w64-x86_64-lzo2
+            mingw-w64-x86_64-snappy
             mingw-w64-x86_64-python
-            bison
-            flex
-            diffutils
 
       - name: Configure QEMU
         shell: msys2 {0}
@@ -93,7 +131,20 @@ jobs:
           ./configure \
             --target-list=arm-softmmu \
             --enable-sdl \
+            --enable-sdl-image \
             --enable-gtk \
+            --enable-vte \
+            --enable-slirp \
+            --enable-vnc \
+            --enable-vnc-jpeg \
+            --enable-curl \
+            --enable-gnutls \
+            --enable-libusb \
+            --enable-usb-redir \
+            --enable-capstone \
+            --enable-zstd \
+            --enable-lzo \
+            --enable-snappy \
             --disable-docs
 
       - name: Build qemu-system-arm
