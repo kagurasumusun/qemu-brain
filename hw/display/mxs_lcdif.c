@@ -153,6 +153,17 @@ static void mxs_lcdif_latch_frame(MXSLcdifState *s)
         return;         /* a command word, not a picture */
     }
 
+    /*
+     * Ignore transient command frames or MPU panel parameter transfers
+     * that do not match the expected display dimensions (854x480) when
+     * a valid panel width/height has already been established.
+     */
+    if (s->fb_width >= 16 && s->default_width >= 16 &&
+        (w != s->default_width || h != s->default_height) &&
+        (w != s->default_height || h != s->default_width)) {
+        return;
+    }
+
     s->fb_addr = base;
     s->fb_width = w;
     s->fb_height = h;
@@ -393,54 +404,73 @@ static void mxs_lcdif_update_display(void *opaque)
     src_stride = src_w * (bpp / 8);
     line = g_malloc(src_stride);
 
-    for (y = 0; y < src_h; y++) {
-        address_space_read(&address_space_memory, base + (hwaddr)y * src_stride,
-                           MEMTXATTRS_UNSPECIFIED, line, src_stride);
-        for (x = 0; x < src_w; x++) {
-            uint32_t pix;
-            int dx, dy;
+    uint8_t *surf_data = (uint8_t *)surface_data(surface);
+    int surf_stride = surface_stride(surface);
 
-            switch (bpp) {
-            case 16:
-                pix = mxs_lcdif_pix16(s, lduw_le_p(line + x * 2));
-                break;
-            case 8: {
-                uint8_t v = line[x];
-                pix = rgb_to_pixel32(v, v, v);
-                break;
-            }
-            default: {
+    if (s->rotate == 0 && bpp == 32) {
+        /* Direct fast-path for unrotated 32bpp framebuffer */
+        for (y = 0; y < src_h; y++) {
+            dest = (uint32_t *)(surf_data + y * surf_stride);
+            address_space_read(&address_space_memory, base + (hwaddr)y * src_stride,
+                               MEMTXATTRS_UNSPECIFIED, line, src_stride);
+            for (x = 0; x < src_w; x++) {
                 uint32_t v = ldl_le_p(line + x * 4);
-                pix = rgb_to_pixel32((v >> 16) & 0xff, (v >> 8) & 0xff,
-                                     v & 0xff);
-                break;
+                dest[x] = rgb_to_pixel32((v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff);
             }
+        }
+    } else if (s->rotate == 0 && bpp == 16) {
+        /* Direct fast-path for unrotated 16bpp framebuffer */
+        for (y = 0; y < src_h; y++) {
+            dest = (uint32_t *)(surf_data + y * surf_stride);
+            address_space_read(&address_space_memory, base + (hwaddr)y * src_stride,
+                               MEMTXATTRS_UNSPECIFIED, line, src_stride);
+            for (x = 0; x < src_w; x++) {
+                dest[x] = mxs_lcdif_pix16(s, lduw_le_p(line + x * 2));
             }
+        }
+    } else {
+        /* Generic path with rotated / other bpp formats */
+        for (y = 0; y < src_h; y++) {
+            address_space_read(&address_space_memory, base + (hwaddr)y * src_stride,
+                               MEMTXATTRS_UNSPECIFIED, line, src_stride);
+            for (x = 0; x < src_w; x++) {
+                uint32_t pix;
+                int dx, dy;
 
-            switch (s->rotate) {
-            case 90:
-                dx = src_h - 1 - y;
-                dy = x;
-                break;
-            case 180:
-                dx = src_w - 1 - x;
-                dy = src_h - 1 - y;
-                break;
-            case 270:
-                dx = y;
-                dy = src_w - 1 - x;
-                break;
-            default:
-                dx = x;
-                dy = y;
-                break;
+                if (bpp == 16) {
+                    pix = mxs_lcdif_pix16(s, lduw_le_p(line + x * 2));
+                } else if (bpp == 8) {
+                    uint8_t v = line[x];
+                    pix = rgb_to_pixel32(v, v, v);
+                } else {
+                    uint32_t v = ldl_le_p(line + x * 4);
+                    pix = rgb_to_pixel32((v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff);
+                }
+
+                switch (s->rotate) {
+                case 90:
+                    dx = src_h - 1 - y;
+                    dy = x;
+                    break;
+                case 180:
+                    dx = src_w - 1 - x;
+                    dy = src_h - 1 - y;
+                    break;
+                case 270:
+                    dx = y;
+                    dy = src_w - 1 - x;
+                    break;
+                default:
+                    dx = x;
+                    dy = y;
+                    break;
+                }
+                if (dx < 0 || dy < 0 || dx >= out_w || dy >= out_h) {
+                    continue;
+                }
+                dest = (uint32_t *)(surf_data + (size_t)dy * surf_stride);
+                dest[dx] = pix;
             }
-            if (dx < 0 || dy < 0 || dx >= out_w || dy >= out_h) {
-                continue;
-            }
-            dest = (uint32_t *)((uint8_t *)surface_data(surface) +
-                                (size_t)dy * surface_stride(surface));
-            dest[dx] = pix;
         }
     }
 
