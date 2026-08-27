@@ -53,6 +53,7 @@ typedef struct MXSPinctrlState {
 
     MemoryRegion iomem;
     qemu_irq irq[MXS_PINCTRL_BANKS];
+    uint8_t irq_out[MXS_PINCTRL_BANKS];
 
     uint32_t regs[MXS_PINCTRL_REGS];
     /* value driven onto the pins from outside the SoC */
@@ -72,8 +73,14 @@ static void mxs_pinctrl_update_bank_irq(MXSPinctrlState *s, int b)
     uint32_t stat = s->regs[PIN_IRQSTAT_IDX + b] &
                     s->regs[PIN_IRQEN_IDX + b] &
                     s->regs[PIN_PIN2IRQ_IDX + b];
+    bool level = (stat != 0);
 
-    qemu_set_irq(s->irq[b], stat ? 1 : 0);
+    if (level == !!s->irq_out[b]) {
+        return;
+    }
+
+    s->irq_out[b] = level;
+    qemu_set_irq(s->irq[b], level ? 1 : 0);
 }
 
 __attribute__((unused)) static void mxs_pinctrl_update_irq(MXSPinctrlState *s)
@@ -313,6 +320,7 @@ static void mxs_pinctrl_reset(DeviceState *dev)
     int i;
 
     memset(s->regs, 0, sizeof(s->regs));
+    memset(s->irq_out, 0, sizeof(s->irq_out));
     /*
      * After reset every pin is muxed to its ALT0 function (GPIO) and
      * pulled up: MUXSEL fields are 0.  The BSP reconfigures the pins it
@@ -341,11 +349,12 @@ static void mxs_pinctrl_init(Object *obj)
 
 static const VMStateDescription vmstate_mxs_pinctrl = {
     .name = "mxs-pinctrl",
-    .version_id = 1,
-    .minimum_version_id = 1,
+    .version_id = 2,
+    .minimum_version_id = 2,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, MXSPinctrlState, MXS_PINCTRL_REGS),
         VMSTATE_UINT32_ARRAY(ext, MXSPinctrlState, MXS_PINCTRL_BANKS),
+        VMSTATE_UINT8_ARRAY(irq_out, MXSPinctrlState, MXS_PINCTRL_BANKS),
         VMSTATE_END_OF_LIST()
     }
 };
