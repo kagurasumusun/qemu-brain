@@ -6567,12 +6567,12 @@ static void arm_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
     unsigned int insn;
 
     /* Singlestep exceptions have the highest priority. */
-    if (arm_check_ss_active(dc)) {
+    if (unlikely(dc->ss_active) && arm_check_ss_active(dc)) {
         dc->base.pc_next = pc + 4;
         return;
     }
 
-    if (pc & 3) {
+    if (unlikely(pc & 3)) {
         /*
          * PC alignment fault.  This has priority over the instruction abort
          * that we would receive from a translation fault via arm_ldl_code
