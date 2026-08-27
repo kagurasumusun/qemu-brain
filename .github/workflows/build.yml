@@ -39,7 +39,7 @@ jobs:
             libpng-dev \
             liblzo2-dev \
             libsnappy-dev \
-            libbzip2-dev \
+            libbz2-dev \
             python3 \
             python3-venv \
             flex \
@@ -111,7 +111,6 @@ jobs:
             mingw-w64-x86_64-SDL2
             mingw-w64-x86_64-SDL2_image
             mingw-w64-x86_64-gtk3
-            mingw-w64-x86_64-vte3
             mingw-w64-x86_64-libslirp
             mingw-w64-x86_64-gnutls
             mingw-w64-x86_64-curl
@@ -133,7 +132,6 @@ jobs:
             --enable-sdl \
             --enable-sdl-image \
             --enable-gtk \
-            --enable-vte \
             --enable-slirp \
             --enable-vnc \
             --enable-vnc-jpeg \
