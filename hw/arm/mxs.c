@@ -1239,6 +1239,7 @@ void hmp_brain_mbtrace(Monitor *mon, const QDict *qdict)
  */
 void hmp_brain_stats(Monitor *mon, const QDict *qdict)
 {
+#ifndef _WIN32
     char *buf = NULL;
     size_t len = 0;
     FILE *f = open_memstream(&buf, &len);
@@ -1251,6 +1252,22 @@ void hmp_brain_stats(Monitor *mon, const QDict *qdict)
     fclose(f);
     monitor_printf(mon, "%s", buf);
     g_free(buf);
+#else
+    g_autofree char *filename = NULL;
+    FILE *f = g_file_open_tmp("brain_stats_XXXXXX", &filename, NULL);
+    if (!f) {
+        monitor_printf(mon, "brain_stats: g_file_open_tmp failed\n");
+        return;
+    }
+    brain_stats_dump(f);
+    fclose(f);
+
+    g_autofree char *contents = NULL;
+    if (g_file_get_contents(filename, &contents, NULL, NULL)) {
+        monitor_printf(mon, "%s", contents);
+    }
+    g_unlink(filename);
+#endif
 }
 
 /*
@@ -1311,6 +1328,7 @@ void hmp_brain_pmemsave(Monitor *mon, const QDict *qdict)
 void hmp_brain_events(Monitor *mon, const QDict *qdict)
 {
     unsigned last = qdict_get_try_int(qdict, "last", 32);
+#ifndef _WIN32
     char *buf = NULL;
     size_t len = 0;
     FILE *f = open_memstream(&buf, &len);
@@ -1323,6 +1341,22 @@ void hmp_brain_events(Monitor *mon, const QDict *qdict)
     fclose(f);
     monitor_printf(mon, "%s", buf);
     g_free(buf);
+#else
+    g_autofree char *filename = NULL;
+    FILE *f = g_file_open_tmp("brain_events_XXXXXX", &filename, NULL);
+    if (!f) {
+        monitor_printf(mon, "brain_events: g_file_open_tmp failed\n");
+        return;
+    }
+    brain_events_dump(f, last);
+    fclose(f);
+
+    g_autofree char *contents = NULL;
+    if (g_file_get_contents(filename, &contents, NULL, NULL)) {
+        monitor_printf(mon, "%s", contents);
+    }
+    g_unlink(filename);
+#endif
 }
 
 /*
