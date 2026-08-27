@@ -638,7 +638,17 @@ TCGTBCPUState arm_get_tb_cpu_state(CPUState *cs)
     assert_hflags_rebuild_correctly(env);
     flags = env->hflags;
 
-    if (EX_TBFLAG_ANY(flags, AARCH64_STATE)) {
+    if (likely(!EX_TBFLAG_ANY(flags, AARCH64_STATE) &&
+               !arm_feature(env, ARM_FEATURE_M))) {
+        pc = env->regs[15];
+        DP_TBFLAG_A32(flags, VECLEN, env->vfp.vec_len);
+        DP_TBFLAG_A32(flags, VECSTRIDE, env->vfp.vec_stride);
+        if (env->vfp.xregs[ARM_VFP_FPEXC] & (1 << 30)) {
+            DP_TBFLAG_A32(flags, VFPEN, 1);
+        }
+        DP_TBFLAG_AM32(flags, THUMB, env->thumb);
+        DP_TBFLAG_AM32(flags, CONDEXEC, env->condexec_bits);
+    } else if (EX_TBFLAG_ANY(flags, AARCH64_STATE)) {
         pc = env->pc;
         if (cpu_isar_feature(aa64_bti, env_archcpu(env))) {
             DP_TBFLAG_A64(flags, BTYPE, env->btype);
@@ -646,40 +656,26 @@ TCGTBCPUState arm_get_tb_cpu_state(CPUState *cs)
     } else {
         pc = env->regs[15];
 
-        if (arm_feature(env, ARM_FEATURE_M)) {
-            if (arm_feature(env, ARM_FEATURE_M_SECURITY) &&
-                FIELD_EX32(env->v7m.fpccr[M_REG_S], V7M_FPCCR, S)
-                != env->v7m.secure) {
-                DP_TBFLAG_M32(flags, FPCCR_S_WRONG, 1);
-            }
+        if (arm_feature(env, ARM_FEATURE_M_SECURITY) &&
+            FIELD_EX32(env->v7m.fpccr[M_REG_S], V7M_FPCCR, S)
+            != env->v7m.secure) {
+            DP_TBFLAG_M32(flags, FPCCR_S_WRONG, 1);
+        }
 
-            if ((env->v7m.fpccr[env->v7m.secure] & R_V7M_FPCCR_ASPEN_MASK) &&
-                (!(env->v7m.control[M_REG_S] & R_V7M_CONTROL_FPCA_MASK) ||
-                 (env->v7m.secure &&
-                  !(env->v7m.control[M_REG_S] & R_V7M_CONTROL_SFPA_MASK)))) {
-                /*
-                 * ASPEN is set, but FPCA/SFPA indicate that there is no
-                 * active FP context; we must create a new FP context before
-                 * executing any FP insn.
-                 */
-                DP_TBFLAG_M32(flags, NEW_FP_CTXT_NEEDED, 1);
-            }
+        if ((env->v7m.fpccr[env->v7m.secure] & R_V7M_FPCCR_ASPEN_MASK) &&
+            (!(env->v7m.control[M_REG_S] & R_V7M_CONTROL_FPCA_MASK) ||
+             (env->v7m.secure &&
+              !(env->v7m.control[M_REG_S] & R_V7M_CONTROL_SFPA_MASK)))) {
+            DP_TBFLAG_M32(flags, NEW_FP_CTXT_NEEDED, 1);
+        }
 
-            bool is_secure = env->v7m.fpccr[M_REG_S] & R_V7M_FPCCR_S_MASK;
-            if (env->v7m.fpccr[is_secure] & R_V7M_FPCCR_LSPACT_MASK) {
-                DP_TBFLAG_M32(flags, LSPACT, 1);
-            }
+        bool is_secure = env->v7m.fpccr[M_REG_S] & R_V7M_FPCCR_S_MASK;
+        if (env->v7m.fpccr[is_secure] & R_V7M_FPCCR_LSPACT_MASK) {
+            DP_TBFLAG_M32(flags, LSPACT, 1);
+        }
 
-            if (mve_no_pred(env)) {
-                DP_TBFLAG_M32(flags, MVE_NO_PRED, 1);
-            }
-        } else {
-            /* Note that VECLEN+VECSTRIDE are RES0 for M-profile. */
-            DP_TBFLAG_A32(flags, VECLEN, env->vfp.vec_len);
-            DP_TBFLAG_A32(flags, VECSTRIDE, env->vfp.vec_stride);
-            if (env->vfp.xregs[ARM_VFP_FPEXC] & (1 << 30)) {
-                DP_TBFLAG_A32(flags, VFPEN, 1);
-            }
+        if (mve_no_pred(env)) {
+            DP_TBFLAG_M32(flags, MVE_NO_PRED, 1);
         }
 
         DP_TBFLAG_AM32(flags, THUMB, env->thumb);
