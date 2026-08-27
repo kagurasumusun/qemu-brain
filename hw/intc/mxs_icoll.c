@@ -112,6 +112,19 @@ static int mxs_icoll_pending(MXSIcollState *s, bool fiq)
     for (w = 0; w < MXS_NUM_IRQS / 32; w++) {
         uint32_t r = s->raw[w];
 
+        if (!r) {
+            bool has_softirq = false;
+            for (int b = 0; b < 32; b++) {
+                if (s->intr[w * 32 + b] & ICOLL_INTR_SOFTIRQ) {
+                    has_softirq = true;
+                    break;
+                }
+            }
+            if (!has_softirq) {
+                continue;
+            }
+        }
+
         for (int b = 0; b < 32; b++) {
             int i = w * 32 + b;
 

@@ -409,22 +409,26 @@ static void mxs_lcdif_update_display(void *opaque)
 
     if (s->rotate == 0 && bpp == 32) {
         /* Direct fast-path for unrotated 32bpp framebuffer */
-        for (y = 0; y < src_h; y++) {
+        int max_y = MIN(src_h, out_h);
+        int max_x = MIN(src_w, out_w);
+        for (y = 0; y < max_y; y++) {
             dest = (uint32_t *)(surf_data + y * surf_stride);
             address_space_read(&address_space_memory, base + (hwaddr)y * src_stride,
                                MEMTXATTRS_UNSPECIFIED, line, src_stride);
-            for (x = 0; x < src_w; x++) {
+            for (x = 0; x < max_x; x++) {
                 uint32_t v = ldl_le_p(line + x * 4);
                 dest[x] = rgb_to_pixel32((v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff);
             }
         }
     } else if (s->rotate == 0 && bpp == 16) {
         /* Direct fast-path for unrotated 16bpp framebuffer */
-        for (y = 0; y < src_h; y++) {
+        int max_y = MIN(src_h, out_h);
+        int max_x = MIN(src_w, out_w);
+        for (y = 0; y < max_y; y++) {
             dest = (uint32_t *)(surf_data + y * surf_stride);
             address_space_read(&address_space_memory, base + (hwaddr)y * src_stride,
                                MEMTXATTRS_UNSPECIFIED, line, src_stride);
-            for (x = 0; x < src_w; x++) {
+            for (x = 0; x < max_x; x++) {
                 dest[x] = mxs_lcdif_pix16(s, lduw_le_p(line + x * 2));
             }
         }

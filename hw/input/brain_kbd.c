@@ -182,6 +182,16 @@ void brain_kbd_edna2_pulse_ext(DeviceState *kbd)
  */
 #define BRAIN_KBD_POWER_PIN  16   /* GPIO0 pin 16 */
 
+static bool brain_kbd_has_keys(BrainKbdState *s)
+{
+    for (int c = 0; c < BRAIN_KBD_COLS; c++) {
+        if (s->state[c] || s->want[c]) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void brain_kbd_hold_tick(void *opaque)
 {
     BrainKbdState *s = opaque;
@@ -198,10 +208,9 @@ static void brain_kbd_hold_tick(void *opaque)
     }
     if (changed) {
         brain_kbd_refresh(s);
-        /* The key was released: drop the EDNA2 attention line.  It was
-         * held high for the whole key-hold so a deep-idle guest always
-         * has time to service the ICOLL 33 wake. */
-        qemu_set_irq(s->edna2_int, 0);
+        if (!brain_kbd_has_keys(s)) {
+            qemu_set_irq(s->edna2_int, 0);
+        }
     }
 }
 
@@ -334,7 +343,9 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
                 s->want[c] &= ~(1u << r);
                 s->state[c] &= ~(1u << r);
                 brain_kbd_refresh(s);
-                qemu_set_irq(s->edna2_int, 0);
+                if (!brain_kbd_has_keys(s)) {
+                    qemu_set_irq(s->edna2_int, 0);
+                }
             }
             return;
         }
