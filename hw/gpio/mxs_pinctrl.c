@@ -236,11 +236,64 @@ static void mxs_pinctrl_write(void *opaque, hwaddr offset, uint64_t value,
         }
     }
     if (idx >= PIN_IRQSTAT_IDX && idx < PIN_IRQSTAT_IDX + MXS_PINCTRL_BANKS) {
-        mxs_pinctrl_update_bank_irq(s, idx - PIN_IRQSTAT_IDX);
+        int b = idx - PIN_IRQSTAT_IDX;
+        uint32_t inputs = ~s->regs[PIN_DOE_IDX + b];
+        uint32_t din = mxs_pinctrl_din(s, b);
+        uint32_t sel = s->regs[PIN_PIN2IRQ_IDX + b];
+        uint32_t lvl = s->regs[PIN_IRQLEVEL_IDX + b];
+        uint32_t pol = s->regs[PIN_IRQPOL_IDX + b];
+        uint32_t dir_match = (din & pol) | (~din & ~pol);
+
+        /* level-sensitive pins re-assert IRQSTAT if input level is active */
+        s->regs[PIN_IRQSTAT_IDX + b] =
+            (s->regs[PIN_IRQSTAT_IDX + b] & ~(lvl & sel & inputs)) |
+            (dir_match & lvl & sel & inputs);
+
+        mxs_pinctrl_update_bank_irq(s, b);
     } else if (idx >= PIN_IRQEN_IDX && idx < PIN_IRQEN_IDX + MXS_PINCTRL_BANKS) {
         mxs_pinctrl_update_bank_irq(s, idx - PIN_IRQEN_IDX);
     } else if (idx >= PIN_PIN2IRQ_IDX && idx < PIN_PIN2IRQ_IDX + MXS_PINCTRL_BANKS) {
-        mxs_pinctrl_update_bank_irq(s, idx - PIN_PIN2IRQ_IDX);
+        int b = idx - PIN_PIN2IRQ_IDX;
+        uint32_t inputs = ~s->regs[PIN_DOE_IDX + b];
+        uint32_t din = mxs_pinctrl_din(s, b);
+        uint32_t sel = s->regs[PIN_PIN2IRQ_IDX + b];
+        uint32_t lvl = s->regs[PIN_IRQLEVEL_IDX + b];
+        uint32_t pol = s->regs[PIN_IRQPOL_IDX + b];
+        uint32_t dir_match = (din & pol) | (~din & ~pol);
+
+        s->regs[PIN_IRQSTAT_IDX + b] =
+            (s->regs[PIN_IRQSTAT_IDX + b] & ~(lvl & sel & inputs)) |
+            (dir_match & lvl & sel & inputs);
+
+        mxs_pinctrl_update_bank_irq(s, b);
+    } else if (idx >= PIN_IRQLEVEL_IDX && idx < PIN_IRQLEVEL_IDX + MXS_PINCTRL_BANKS) {
+        int b = idx - PIN_IRQLEVEL_IDX;
+        uint32_t inputs = ~s->regs[PIN_DOE_IDX + b];
+        uint32_t din = mxs_pinctrl_din(s, b);
+        uint32_t sel = s->regs[PIN_PIN2IRQ_IDX + b];
+        uint32_t lvl = s->regs[PIN_IRQLEVEL_IDX + b];
+        uint32_t pol = s->regs[PIN_IRQPOL_IDX + b];
+        uint32_t dir_match = (din & pol) | (~din & ~pol);
+
+        s->regs[PIN_IRQSTAT_IDX + b] =
+            (s->regs[PIN_IRQSTAT_IDX + b] & ~(lvl & sel & inputs)) |
+            (dir_match & lvl & sel & inputs);
+
+        mxs_pinctrl_update_bank_irq(s, b);
+    } else if (idx >= PIN_IRQPOL_IDX && idx < PIN_IRQPOL_IDX + MXS_PINCTRL_BANKS) {
+        int b = idx - PIN_IRQPOL_IDX;
+        uint32_t inputs = ~s->regs[PIN_DOE_IDX + b];
+        uint32_t din = mxs_pinctrl_din(s, b);
+        uint32_t sel = s->regs[PIN_PIN2IRQ_IDX + b];
+        uint32_t lvl = s->regs[PIN_IRQLEVEL_IDX + b];
+        uint32_t pol = s->regs[PIN_IRQPOL_IDX + b];
+        uint32_t dir_match = (din & pol) | (~din & ~pol);
+
+        s->regs[PIN_IRQSTAT_IDX + b] =
+            (s->regs[PIN_IRQSTAT_IDX + b] & ~(lvl & sel & inputs)) |
+            (dir_match & lvl & sel & inputs);
+
+        mxs_pinctrl_update_bank_irq(s, b);
     }
 }
 
