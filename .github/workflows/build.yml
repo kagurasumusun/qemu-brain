@@ -99,7 +99,7 @@ jobs:
       - name: Build qemu-system-arm
         shell: msys2 {0}
         run: |
-          ninja -C build qemu-system-arm
+          ninja -C build qemu-system-arm.exe
 
       - name: Package Windows Binary and DLLs
         shell: msys2 {0}
