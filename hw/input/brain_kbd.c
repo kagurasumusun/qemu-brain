@@ -327,12 +327,15 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
                 brain_kbd_refresh(s);
                 /* kick the EDNA2 interrupt-driven path (ICOL 33) */
                 brain_kbd_edna2_pulse(s);
+                timer_mod(s->hold_timer,
+                          qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                          BRAIN_KBD_MIN_HOLD_NS);
             } else {
                 s->want[c] &= ~(1u << r);
+                s->state[c] &= ~(1u << r);
+                brain_kbd_refresh(s);
+                qemu_set_irq(s->edna2_int, 0);
             }
-            timer_mod(s->hold_timer,
-                      qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                      BRAIN_KBD_MIN_HOLD_NS);
             return;
         }
     }
