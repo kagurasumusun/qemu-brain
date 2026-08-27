@@ -1254,9 +1254,15 @@ void hmp_brain_stats(Monitor *mon, const QDict *qdict)
     g_free(buf);
 #else
     g_autofree char *filename = NULL;
-    FILE *f = g_file_open_tmp("brain_stats_XXXXXX", &filename, NULL);
-    if (!f) {
+    int fd = g_file_open_tmp("brain_stats_XXXXXX", &filename, NULL);
+    if (fd < 0) {
         monitor_printf(mon, "brain_stats: g_file_open_tmp failed\n");
+        return;
+    }
+    FILE *f = fdopen(fd, "w");
+    if (!f) {
+        close(fd);
+        monitor_printf(mon, "brain_stats: fdopen failed\n");
         return;
     }
     brain_stats_dump(f);
@@ -1343,9 +1349,15 @@ void hmp_brain_events(Monitor *mon, const QDict *qdict)
     g_free(buf);
 #else
     g_autofree char *filename = NULL;
-    FILE *f = g_file_open_tmp("brain_events_XXXXXX", &filename, NULL);
-    if (!f) {
+    int fd = g_file_open_tmp("brain_events_XXXXXX", &filename, NULL);
+    if (fd < 0) {
         monitor_printf(mon, "brain_events: g_file_open_tmp failed\n");
+        return;
+    }
+    FILE *f = fdopen(fd, "w");
+    if (!f) {
+        close(fd);
+        monitor_printf(mon, "brain_events: fdopen failed\n");
         return;
     }
     brain_events_dump(f, last);

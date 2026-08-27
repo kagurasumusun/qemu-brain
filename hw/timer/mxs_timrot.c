@@ -224,23 +224,14 @@ static void mxs_timer_resched(MXSTimer *t)
                  * guest has not programmed a new one since.  Hardware
                  * equality can only recur after the counter wraps the
                  * full 32 bits, and @delta already holds precisely that
-                 * modular wrap distance, so keep it.  Re-firing at once
-                 * instead would spin the virtual timer at full host speed
-                 * (~400k expiries/s observed) while the guest believes
-                 * no interrupt should be pending at all.
+                 * modular wrap distance, so keep it.
                  */
             } else {
                 /*
                  * The match lies "in the past" (mod 2^32): the down
-                 * counter has already counted through it.  On real
-                 * hardware the guest never runs into this (re-arm
-                 * latency is bounded in real time) but under emulation
-                 * the ISR can easily be late relative to the virtual
-                 * counter, and an equality-only match would then only be
-                 * reached after a full ~358 second wrap -- which is
-                 * exactly the multi-minute stall the WinCE tick was
-                 * exhibiting.  Treat it like hardware that reports
-                 * "deadline already crossed": fire as soon as possible.
+                 * counter has already counted through it.  Treat it
+                 * like hardware that reports "deadline already crossed":
+                 * fire as soon as possible.
                  */
                 delta = 1;
             }
