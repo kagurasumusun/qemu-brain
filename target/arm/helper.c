@@ -9757,25 +9757,22 @@ void arm_cpu_do_interrupt(CPUState *cs)
                       env->exception.syndrome);
     }
 
-    if (tcg_enabled() && arm_is_psci_call(cpu, cs->exception_index)) {
-        arm_handle_psci_call(cpu);
-        qemu_log_mask(CPU_LOG_INT, "...handled as PSCI call\n");
-        qemu_plugin_vcpu_hostcall_cb(cs, last_pc);
-        return;
-    }
-
-    /*
-     * Semihosting semantics depend on the register width of the code
-     * that caused the exception, not the target exception level, so
-     * must be handled here.
-     */
+    if (unlikely(cs->exception_index == EXCP_SEMIHOST ||
+                 (tcg_enabled() && arm_is_psci_call(cpu, cs->exception_index)))) {
+        if (tcg_enabled() && arm_is_psci_call(cpu, cs->exception_index)) {
+            arm_handle_psci_call(cpu);
+            qemu_log_mask(CPU_LOG_INT, "...handled as PSCI call\n");
+            qemu_plugin_vcpu_hostcall_cb(cs, last_pc);
+            return;
+        }
 #ifdef CONFIG_TCG
-    if (cs->exception_index == EXCP_SEMIHOST) {
-        tcg_handle_semihosting(cs);
-        qemu_plugin_vcpu_hostcall_cb(cs, last_pc);
-        return;
-    }
+        if (cs->exception_index == EXCP_SEMIHOST) {
+            tcg_handle_semihosting(cs);
+            qemu_plugin_vcpu_hostcall_cb(cs, last_pc);
+            return;
+        }
 #endif
+    }
 
     /*
      * Hooks may change global state so BQL should be held, also the
