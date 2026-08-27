@@ -1158,14 +1158,12 @@ static const VMStateDescription sd_vmstate = {
 #define BRAIN_EMMC_R4_DELTA           (BRAIN_EMMC_R4_REAL_START - \
                                        BRAIN_EMMC_R4_DEFAULT_START)
 
-static uint64_t sd_brain_region4_adjust(SDState *sd, uint64_t addr)
+static inline uint64_t sd_brain_region4_adjust(SDState *sd, uint64_t addr)
 {
-    uint64_t sec;
-
-    if (!sd->brain_region4_remap) {
+    if (likely(!sd->brain_region4_remap)) {
         return addr;
     }
-    sec = addr >> HWBLOCK_SHIFT;
+    uint64_t sec = addr >> HWBLOCK_SHIFT;
     if (sec >= BRAIN_EMMC_R4_DEFAULT_START &&
         sec < BRAIN_EMMC_R4_REAL_START) {
         return (sec + BRAIN_EMMC_R4_DELTA) << HWBLOCK_SHIFT;
