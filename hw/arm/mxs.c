@@ -1932,32 +1932,16 @@ static void brain_edna2_seed_status(BrainMachineState *bms)
     if (!bms->aid_edna2_status) {
         return;
     }
+    for (i = 0; i < (int)sizeof(pat); i += 4) {
+        stl_le_p(pat + i, 1);
+    }
     if (bms->aid_edna2_uninit) {
         /*
          * "Uninitialized" MCU status block (experimental fidelity aid).
-         *
-         * The WCEPRJ.EXE launcher (SJIS "\u3057\u3070\u3089\u304f\u304a\u5f85\u3061\u304f\u3060\u3055\u3044")
-         * decides whether it must show the "please wait" screen by calling
-         * 0x129c3c, which reads the EDNA2 MCU status block and treats
-         * the unit as *initialized* only when buf[0] == 1, or when
-         * buf[1] & 0x86 == 0.  The default all-ones seed makes buf[0]=1
-         * so the launcher skips the wait screen and goes straight to
-         * the "initialize?" dialog -- which is NOT what the broken real
-         * unit does (it hangs on "please wait").
-         *
-         * With this aid enabled we post buf[0]=0 and buf[1]=0x02, i.e.
-         * "not initialized", which makes 0x129c3c return 0 and the
-         * launcher show the wait screen exactly like the real unit.
-         * This is a hypothesis-driven aid: the exact byte pattern the
-         * real EDNA2 MCU reports on a failed/never-initialized unit is
-         * not yet captured from hardware.
+         * Sets buf[0]=0 and buf[1]=0x02 to simulate uninitialized unit.
          */
-        memset(pat, 0, sizeof(pat));
-        stl_le_p(pat + 1, 0x02);   /* buf[1] |= 0x02  (bit1 of 0x86 mask) */
-    } else {
-        for (i = 0; i < (int)sizeof(pat); i += 4) {
-            stl_le_p(pat + i, 1);
-        }
+        stl_le_p(pat, 0);
+        stl_le_p(pat + 1, 0x02);
     }
     address_space_write(&address_space_memory,
                         MXS_DRAM_BASE + BRAIN_EDNA2_STATUS_OFF,
@@ -2884,7 +2868,7 @@ static void brain_instance_init(Object *obj)
      * 'aid-edna2-status=on' reproduces the historic diagnostic-menu
      * behaviour for comparison.
      */
-    bms->aid_edna2_status = false;    /* QEMU-only injection, off by default */
+    bms->aid_edna2_status = true;     /* Mailbox status block seeded on reset */
     bms->aid_edna2_uninit = false;    /* hypothesis aid, off by default */
     bms->aid_edna2_resp = false;     /* heuristic, off by default */
     bms->aid_region4_remap = false;  /* QEMU-only sector remap */

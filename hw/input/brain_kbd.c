@@ -43,7 +43,7 @@ static const int brain_kbd_col_pins[BRAIN_KBD_COLS] = { 0, 1, 2, 3, 4, 6, 7 };
  * repaired4.  (A 30 s hold keeps the row low for too long and the
  * guest sees an endless key repeat instead of a press/release pair.)
  */
-#define BRAIN_KBD_MIN_HOLD_NS  (2500 * 1000 * 1000LL)
+#define BRAIN_KBD_MIN_HOLD_NS  (50 * 1000 * 1000LL)
 
 /*
  * EDNA2 MCU touchkey report (mailbox +0x404, consumed by VMCopy.dll's
