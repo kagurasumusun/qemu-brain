@@ -444,6 +444,17 @@ static int mxs_ssp_dma_xfer(void *opaque, uint8_t *buf, int len, bool to_device)
     } else {
         int done = 0;
 
+        /*
+         * Fast path: if the internal FIFO is empty, pull data directly
+         * into the target DMA buffer, bypassing intermediate staging.
+         */
+        if (s->fifo_pos >= s->fifo_len && s->data_read && s->data_remaining) {
+            uint32_t direct = MIN((uint32_t)len, s->data_remaining);
+            sdbus_read_data(&s->sdbus, buf, direct);
+            s->data_remaining -= direct;
+            done += direct;
+        }
+
         while (done < len) {
             uint32_t avail;
 
