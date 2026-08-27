@@ -64,25 +64,22 @@ typedef struct MXSPinctrlState {
 
 OBJECT_DECLARE_SIMPLE_TYPE(MXSPinctrlState, MXS_PINCTRL)
 
-static void mxs_pinctrl_update_irq(MXSPinctrlState *s)
+static void mxs_pinctrl_update_bank_irq(MXSPinctrlState *s, int b)
 {
-    int b;
+    if (b < 0 || b >= MXS_PINCTRL_BANKS) {
+        return;
+    }
+    uint32_t stat = s->regs[PIN_IRQSTAT_IDX + b] &
+                    s->regs[PIN_IRQEN_IDX + b] &
+                    s->regs[PIN_PIN2IRQ_IDX + b];
 
-    for (b = 0; b < MXS_PINCTRL_BANKS; b++) {
-        /*
-         * i.MX28: the pin detector is selected by PIN2IRQ, armed by
-         * IRQEN, and latched in IRQSTAT.  OEMInterruptHandler for
-         * GPIO2 (ICOLL 125) does IRQSTAT & PIN2IRQ; if PIN2IRQ is 0
-         * it prints "undefined IRQ" and never clears STAT.  Live
-         * repaired4: IRQEN2=0x003f0000, PIN2IRQ2=0, so bank 2 must
-         * not raise ICOLL 125 (measured STAT=0x7d + 61-storm when
-         * we raised on IRQSTAT&IRQEN alone).
-         */
-        uint32_t stat = s->regs[PIN_IRQSTAT_IDX + b] &
-                        s->regs[PIN_IRQEN_IDX + b] &
-                        s->regs[PIN_PIN2IRQ_IDX + b];
+    qemu_set_irq(s->irq[b], stat ? 1 : 0);
+}
 
-        qemu_set_irq(s->irq[b], stat ? 1 : 0);
+__attribute__((unused)) static void mxs_pinctrl_update_irq(MXSPinctrlState *s)
+{
+    for (int b = 0; b < MXS_PINCTRL_BANKS; b++) {
+        mxs_pinctrl_update_bank_irq(s, b);
     }
 }
 
@@ -147,7 +144,7 @@ void mxs_pinctrl_set_din(DeviceState *dev, int bank, uint32_t value)
                             s->regs[PIN_IRQSTAT_IDX + bank],
                             s->regs[PIN_IRQEN_IDX + bank]);
         }
-        mxs_pinctrl_update_irq(s);
+        mxs_pinctrl_update_bank_irq(s, bank);
     }
 }
 
@@ -239,21 +236,11 @@ static void mxs_pinctrl_write(void *opaque, hwaddr offset, uint64_t value,
         }
     }
     if (idx >= PIN_IRQSTAT_IDX && idx < PIN_IRQSTAT_IDX + MXS_PINCTRL_BANKS) {
-        mxs_pinctrl_update_irq(s);
-    }
-    if (idx >= PIN_IRQEN_IDX && idx < PIN_IRQEN_IDX + MXS_PINCTRL_BANKS) {
-        mxs_pinctrl_update_irq(s);
-    }
-    /*
-     * PIN2IRQ selects which pins feed the IRQ detectors; toggling it
-     * re-arms/disarms the bank interrupt.  Without this the GPIO IRQ
-     * line stays asserted after the guest clears PIN2IRQ (observed on
-     * repaired4: keybd_EDNA2/cspddk clears PIN2IRQ2 while servicing,
-     * ICOLL 125 stayed raw and OEMInterruptHandler re-entered in an
-     * endless "undefined IRQ (61)" loop).
-     */
-    if (idx >= PIN_PIN2IRQ_IDX && idx < PIN_PIN2IRQ_IDX + MXS_PINCTRL_BANKS) {
-        mxs_pinctrl_update_irq(s);
+        mxs_pinctrl_update_bank_irq(s, idx - PIN_IRQSTAT_IDX);
+    } else if (idx >= PIN_IRQEN_IDX && idx < PIN_IRQEN_IDX + MXS_PINCTRL_BANKS) {
+        mxs_pinctrl_update_bank_irq(s, idx - PIN_IRQEN_IDX);
+    } else if (idx >= PIN_PIN2IRQ_IDX && idx < PIN_PIN2IRQ_IDX + MXS_PINCTRL_BANKS) {
+        mxs_pinctrl_update_bank_irq(s, idx - PIN_PIN2IRQ_IDX);
     }
 }
 
