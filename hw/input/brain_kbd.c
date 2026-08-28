@@ -134,51 +134,80 @@ static void brain_kbd_touchkey_update(BrainKbdState *s, QKeyCode qcode,
  *
  * 変換 is スペース/変換, not 記号.  ひらがな/英数 are left to the host IME.
  */
-static uint8_t brain_qcode_to_set1(QKeyCode q)
+/*
+ * PC QKeyCode -> GPIO column index / row.  The guest looks up
+ * keybd_EDNA2's 7x7 at this cell; we do not invent extra Set-1 bytes.
+ *
+ * Column index matches brain_kbd_col_pins[] (pin 5 = index 5).
+ * Letter cells are the dump positions of those keycaps (Q is pin 6
+ * row 0, not "whatever 0x10 means").  Photo numbers live on Q..P, so
+ * PC 1..0 use the same cells.  決定/戻る/削除/シフト/ー/記号/変換
+ * match the photo, not AC_/F13 codes.
+ */
+static bool brain_qcode_to_cell(QKeyCode q, int *col, int *row)
 {
+    int c = -1, r = -1;
+
     switch (q) {
-    case Q_KEY_CODE_1: case Q_KEY_CODE_KP_1: return 0x10; /* Q¹ */
-    case Q_KEY_CODE_2: case Q_KEY_CODE_KP_2: return 0x11;
-    case Q_KEY_CODE_3: case Q_KEY_CODE_KP_3: return 0x12;
-    case Q_KEY_CODE_4: case Q_KEY_CODE_KP_4: return 0x13;
-    case Q_KEY_CODE_5: case Q_KEY_CODE_KP_5: return 0x14;
-    case Q_KEY_CODE_6: case Q_KEY_CODE_KP_6: return 0x15;
-    case Q_KEY_CODE_7: case Q_KEY_CODE_KP_7: return 0x16;
-    case Q_KEY_CODE_8: case Q_KEY_CODE_KP_8: return 0x17;
-    case Q_KEY_CODE_9: case Q_KEY_CODE_KP_9: return 0x18;
-    case Q_KEY_CODE_0: case Q_KEY_CODE_KP_0: return 0x19; /* P⁰ */
-    case Q_KEY_CODE_RET:
-    case Q_KEY_CODE_KP_ENTER:     return 0x1c; /* 決定 */
-    case Q_KEY_CODE_ESC:          return 0x01; /* 戻る */
-    case Q_KEY_CODE_BACKSPACE:
-    case Q_KEY_CODE_DELETE:       return 0x0e; /* 削除 */
-    case Q_KEY_CODE_SPC:
-    case Q_KEY_CODE_HENKAN:       return 0x39; /* スペース/変換 */
+    case Q_KEY_CODE_Q: case Q_KEY_CODE_1: case Q_KEY_CODE_KP_1: c = 6; r = 0; break;
+    case Q_KEY_CODE_W: case Q_KEY_CODE_2: case Q_KEY_CODE_KP_2: c = 3; r = 5; break;
+    case Q_KEY_CODE_E: case Q_KEY_CODE_3: case Q_KEY_CODE_KP_3: c = 7; r = 2; break;
+    case Q_KEY_CODE_R: case Q_KEY_CODE_4: case Q_KEY_CODE_KP_4: c = 7; r = 5; break;
+    case Q_KEY_CODE_T: case Q_KEY_CODE_5: case Q_KEY_CODE_KP_5: c = 4; r = 2; break;
+    case Q_KEY_CODE_Y: case Q_KEY_CODE_6: case Q_KEY_CODE_KP_6: c = 2; r = 2; break;
+    case Q_KEY_CODE_U: case Q_KEY_CODE_7: case Q_KEY_CODE_KP_7: c = 0; r = 0; break;
+    case Q_KEY_CODE_I: case Q_KEY_CODE_8: case Q_KEY_CODE_KP_8: c = 6; r = 5; break;
+    case Q_KEY_CODE_O: case Q_KEY_CODE_9: case Q_KEY_CODE_KP_9: c = 2; r = 5; break;
+    case Q_KEY_CODE_P: case Q_KEY_CODE_0: case Q_KEY_CODE_KP_0: c = 0; r = 2; break;
+    case Q_KEY_CODE_A: c = 6; r = 6; break;
+    case Q_KEY_CODE_S: c = 7; r = 6; break;
+    case Q_KEY_CODE_D: c = 5; r = 0; break;
+    case Q_KEY_CODE_F: c = 1; r = 2; break;
+    case Q_KEY_CODE_G: c = 6; r = 2; break;
+    case Q_KEY_CODE_H: c = 5; r = 1; break;
+    case Q_KEY_CODE_J: c = 6; r = 3; break;
+    case Q_KEY_CODE_K: c = 0; r = 3; break;
+    case Q_KEY_CODE_L: c = 3; r = 3; break;
+    case Q_KEY_CODE_Z: c = 4; r = 0; break;
+    case Q_KEY_CODE_X: c = 4; r = 4; break;
+    case Q_KEY_CODE_C: c = 3; r = 2; break;
+    case Q_KEY_CODE_V: c = 7; r = 3; break;
+    case Q_KEY_CODE_B: c = 7; r = 4; break;
+    case Q_KEY_CODE_N: c = 2; r = 4; break;
+    case Q_KEY_CODE_M: c = 5; r = 2; break;
+    case Q_KEY_CODE_SHIFT: case Q_KEY_CODE_SHIFT_R: c = 1; r = 4; break;
+    case Q_KEY_CODE_SPC: case Q_KEY_CODE_HENKAN: c = 5; r = 3; break;
+    case Q_KEY_CODE_RET: case Q_KEY_CODE_KP_ENTER: c = 4; r = 6; break;
+    case Q_KEY_CODE_ESC: c = 4; r = 5; break;
+    case Q_KEY_CODE_BACKSPACE: case Q_KEY_CODE_DELETE: c = 3; r = 0; break;
+    case Q_KEY_CODE_MINUS: c = 7; r = 1; break;
     case Q_KEY_CODE_GRAVE_ACCENT:
     case Q_KEY_CODE_MUHENKAN:
-    case Q_KEY_CODE_INSERT:       return 0x29; /* 記号 */
-    case Q_KEY_CODE_MINUS:        return 0x0c; /* 長音 */
-    case Q_KEY_CODE_HOME:         return 0x47;
-    case Q_KEY_CODE_F4:           return 0x3e; /* 履歴 (no matrix cell) */
-    case Q_KEY_CODE_F5:           return 0x3f; /* 一覧から選ぶ */
+    case Q_KEY_CODE_INSERT: c = 4; r = 3; break;
+    case Q_KEY_CODE_TAB: c = 6; r = 1; break;
+    case Q_KEY_CODE_UP: c = 5; r = 5; break;
+    case Q_KEY_CODE_DOWN: c = 2; r = 6; break;
+    case Q_KEY_CODE_LEFT: c = 5; r = 4; break;
+    case Q_KEY_CODE_RIGHT: c = 0; r = 6; break;
+    case Q_KEY_CODE_HOME: c = 5; r = 6; break;
     default:
-        if (q < qemu_input_map_qcode_to_atset1_len) {
-            return qemu_input_map_qcode_to_atset1[q] & 0xff;
-        }
-        return 0;
+        return false;
     }
+    *col = c;
+    *row = r;
+    return true;
 }
 
-/* MAIN NK VA 0xc0872cc0.  [column][row], Set 1.  Y=0x15 r2, N=0x31 r4 */
+/* MAIN NK VA 0xc0872cc0 / 0xc08a2cc0, 7x7 Set-1 dump plus pin5. */
 static const uint8_t brain_keymap[BRAIN_KBD_COLS][BRAIN_KBD_ROWS] = {
-    { 0x16, 0x08, 0x19, 0x25, 0x03, 0x04, 0x4d }, /* U 7 P K 2 3 Right */
-    { 0x0d, 0x0b, 0x21, 0x27, 0x2a, 0x06, 0x05 }, /* = 0 F ; Shift 5 4 */
-    { 0x02, 0x0a, 0x15, 0x28, 0x31, 0x18, 0x50 }, /* 1 9 Y ' N O Down */
-    { 0x0e, 0x09, 0x2e, 0x26, 0x2b, 0x11, 0x1d }, /* BS 8 C L \\ W Ctrl */
-    { 0x2c, 0x07, 0x14, 0x29, 0x2d, 0x01, 0x1c }, /* Z 6 T 記号 X 戻る 決定 */
-    { 0x20, 0x23, 0x32, 0x39, 0x4b, 0x48, 0x47 }, /* D H M Space Left Up Home */
-    { 0x10, 0x0f, 0x22, 0x24, 0x1a, 0x17, 0x1e }, /* Q Tab G J [ I A */
-    { 0x1b, 0x0c, 0x12, 0x2f, 0x30, 0x13, 0x1f }, /* ] — E V B R S */
+    { 0x16, 0x08, 0x19, 0x25, 0x03, 0x04, 0x4d },
+    { 0x0d, 0x0b, 0x21, 0x27, 0x2a, 0x06, 0x05 },
+    { 0x02, 0x0a, 0x15, 0x28, 0x31, 0x18, 0x50 },
+    { 0x0e, 0x09, 0x2e, 0x26, 0x2b, 0x11, 0x1d },
+    { 0x2c, 0x07, 0x14, 0x29, 0x2d, 0x01, 0x1c },
+    { 0x20, 0x23, 0x32, 0x39, 0x4b, 0x48, 0x47 },
+    { 0x10, 0x0f, 0x22, 0x24, 0x1a, 0x17, 0x1e },
+    { 0x1b, 0x0c, 0x12, 0x2f, 0x30, 0x13, 0x1f },
 };
 
 static void brain_kbd_refresh(void *opaque);
@@ -363,7 +392,6 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
     BrainKbdState *s = BRAIN_KBD(dev);
     InputKeyEvent *key;
     QKeyCode qcode;
-    uint16_t scancode;
     int c, r;
 
     if (evt->type != INPUT_EVENT_KIND_KEY) {
@@ -377,7 +405,8 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
      * (that suspends the PC).  Pause/Break is on JIS and US boards;
      * AC_Bookmarks is not a keycap on a JIS 106.
      */
-    if (qcode == Q_KEY_CODE_PAUSE || qcode == Q_KEY_CODE_STOP) {
+    if (qcode == Q_KEY_CODE_F12 ||
+        qcode == Q_KEY_CODE_PAUSE || qcode == Q_KEY_CODE_STOP) {
         s->power = key->down;
         brain_kbd_refresh(s);
         qemu_set_irq(s->edna2_int, key->down ? 1 : 0);
@@ -385,23 +414,22 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
         return;
     }
 
-    scancode = brain_qcode_to_set1(qcode);
-    if (!scancode) {
+    if (!brain_qcode_to_cell(qcode, &c, &r)) {
         brain_kbd_touchkey_update(s, qcode, key->down);
         return;
     }
 
     if (brain_kbd_debug()) {
-        fprintf(stderr, "[brain-kbd] event qcode=%d scancode=0x%02x down=%d\n",
-                qcode, scancode, key->down);
+        fprintf(stderr, "[brain-kbd] event qcode=%d cell=%d,%d down=%d\n",
+                qcode, c, r, key->down);
     }
 
     qemu_system_wakeup_request(QEMU_WAKEUP_REASON_OTHER, NULL);
 
-    for (c = 0; c < BRAIN_KBD_COLS; c++) {
-        for (r = 0; r < BRAIN_KBD_ROWS; r++) {
-            if (brain_keymap[c][r] != scancode) {
-                continue;
+    {
+        {
+            if (c < 0 || c >= BRAIN_KBD_COLS || r < 0 || r >= BRAIN_KBD_ROWS) {
+                return;
             }
             if (key->down) {
                 s->want[c] |= 1u << r;
