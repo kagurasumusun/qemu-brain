@@ -292,7 +292,7 @@ static void mxs_timer_expire(void *opaque)
     int64_t vdelta = last_fire[t->index] < 0 ? 0 : now - last_fire[t->index];
 
     nfire[t->index]++;
-    if (nfire[t->index] <= 40 || nfire[t->index] % 100 == 0) {
+    if (getenv("BRAIN_TIMTRACE") && nfire[t->index] <= 40) {
         fprintf(stderr,
                 "timrot-expire: t%d #%llu vnow=%lld wall=%lld dy=%lldms "
                 "ctrl=%04x freq=%u match=%08x\n",

@@ -264,12 +264,8 @@ static uint64_t mxs_icoll_read(void *opaque, hwaddr offset, unsigned size)
             if (s->ctrl & ICOLL_CTRL_ARM_RSE_MODE) {
                 unsigned p = s->intr[s->current] & ICOLL_INTR_PRIORITY;
 
-                if (s->current == 63) {
-                    fprintf(stderr, "[brain] VECTOR read -> irq63 (prio %u) "
-                            "pc=0x%08x\n", p, mxs_trace_guest_pc());
-                }
-                if ((s->current == 125 || s->current == 61) &&
-                    getenv("BRAIN_PIN_DEBUG")) {
+                if ((s->current == 63 || s->current == 125 ||
+                     s->current == 61) && getenv("BRAIN_PIN_DEBUG")) {
                     fprintf(stderr, "[brain] VECTOR read -> irq%d (prio %u) "
                             "intr125=%08x raw3=%08x pc=0x%08x vnow=%lld\n",
                             s->current, p, s->intr[125], s->raw[3],
@@ -327,29 +323,12 @@ static void mxs_icoll_write(void *opaque, hwaddr offset, uint64_t value,
     if (idx >= ICOLL_INTERRUPT0 && idx < ICOLL_INTERRUPT0 + MXS_NUM_IRQS) {
         unsigned n = idx - ICOLL_INTERRUPT0;
 
-        if (n == 63) {
-            fprintf(stderr, "[brain] W INTR63 off=0x%03x val=0x%08x "
-                    "pc=0x%08x (was 0x%x)\n", (unsigned)offset,
-                    (uint32_t)value, mxs_trace_guest_pc(), s->intr[63]);
-        }
-        if (n == 61) {
-            static int wr61 = 60;
-            if (wr61 > 0) {
-                wr61--;
-                fprintf(stderr, "[brain] W INTR61 off=0x%03x val=0x%08x "
-                        "pc=0x%08x (was 0x%x)\n", (unsigned)offset,
-                        (uint32_t)value, mxs_trace_guest_pc(), s->intr[61]);
-            }
-        }
         if (getenv("BRAIN_PIN_DEBUG")) {
             fprintf(stderr, "[brain] W INTR%-3d off=0x%03x val=0x%08x "
                     "pc=0x%08x (was 0x%x)\n", n, (unsigned)offset,
                     (uint32_t)value, mxs_trace_guest_pc(), s->intr[n]);
         }
         s->intr[n] = mxs_bank_apply(s->intr[n], offset, value, size);
-        if (n == 63) {
-            fprintf(stderr, "[brain]   INTR63 -> 0x%x\n", s->intr[63]);
-        }
         mxs_icoll_update(s);
         return;
     }

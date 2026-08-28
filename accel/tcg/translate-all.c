@@ -279,25 +279,6 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
         /* Generate a one-shot TB with 1 insn in it */
         s.cflags = (s.cflags & ~CF_COUNT_MASK) | 1;
         brain_stat_inc(BST_TB_ONE_INSN_MMIO_PAGE);
-        {
-            static uint64_t os_count;
-
-            os_count++;
-            if (os_count <= 20 || os_count % 10000000 == 0) {
-                hwaddr dbg_pa;
-                int dbg_idx = cpu_mmu_index(cpu, true);
-
-                dbg_pa = cpu_get_phys_page_debug(cpu, s.pc);
-                brain_log_event(BSTAG('O', 'N', 'E', 'S'), (uint32_t)s.pc,
-                                (uint32_t)dbg_pa, (uint32_t)dbg_idx,
-                                (uint32_t)(dbg_pa == (hwaddr)-1));
-                fprintf(stderr,
-                        "brain-tbgen: one-shot #%llu pc=%08x pa=%08llx "
-                        "mmu_idx=%d\n",
-                        (unsigned long long)os_count, (uint32_t)s.pc,
-                        (unsigned long long)dbg_pa, dbg_idx);
-            }
-        }
     }
 
     max_insns = s.cflags & CF_COUNT_MASK;

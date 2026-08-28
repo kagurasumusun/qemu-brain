@@ -401,16 +401,23 @@ void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
     }
 
     /*
-     * Only assert the touch IRQ when the guest has actually
-     * enabled it (CTRL0.TOUCH_DETECT_ENABLE +
-     * CTRL1.TOUCH_DETECT_IRQ_EN).  Real silicon does not
-     * raise an interrupt that the CPU has not asked for, so
-     * asserting it here would race with the IST setup and
-     * trigger "InterruptHandle() already gated" as soon as
-     * the WinCE touch panel driver tries to attach.
+     * Latch the touch-detect status whenever the analog detector is
+     * enabled (CTRL0.TOUCH_DETECT_ENABLE), exactly like real silicon:
+     * the comparator that flags a touch is independent of whether the
+     * CPU currently has the interrupt unmasked.  Real touch drivers
+     * mask CTRL1.TOUCH_DETECT_IRQ_EN while they poll/settle a sample
+     * and unmask it again afterwards; previously this status bit was
+     * only set when IRQ_EN *also* happened to be on at the exact
+     * instant of the touch-down edge, so a tap landing during that
+     * masked window was silently lost -- the driver would only learn
+     * about the touch on a *subsequent* tap that happened to land
+     * while IRQ_EN was set, i.e. it took two taps to register one.
+     * mxs_lradc_update_irq() already gates the actual interrupt line
+     * on IRQ_EN, so asserting it unconditionally here does not cause
+     * a spurious interrupt when the guest has the line masked -- it
+     * just makes sure the edge is not lost, matching real hardware.
      */
-    if ((s->regs[LRADC_CTRL0] & CTRL0_TOUCH_DETECT_ENABLE) &&
-        (s->regs[LRADC_CTRL1] & CTRL1_TOUCH_DETECT_IRQ_EN)) {
+    if (s->regs[LRADC_CTRL0] & CTRL0_TOUCH_DETECT_ENABLE) {
         s->regs[LRADC_CTRL1] |= CTRL1_TOUCH_DETECT_IRQ;
         mxs_lradc_update_irq(s);
     }
