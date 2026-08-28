@@ -71,26 +71,19 @@ static const int brain_kbd_col_pins[BRAIN_KBD_COLS] = { 0, 1, 2, 3, 4, 5, 6, 7 }
  * the APPMAIN menu behaviour.
  */
 #define BRAIN_TOUCHKEY_VALID    0x10u
+/* Photo top-row / 音声: MCU bits, PC F1..F6 (JIS にある普通のキー). */
 static const uint32_t brain_touchkey_bits[] = {
-    0x2, 0x4, 0x8, 0x20, 0x40,
-    0x100, 0x200, 0x400, 0x800,
-    /* aliases: ホーム / 国語漢字 / 英和和英 / My辞書 */
-    0x100, 0x400, 0x800, 0x400,
+    0x2, 0x4, 0x8, 0x20,
+    0x100, 0x200, 0x400, 0x800, 0x40,
 };
 
 static const QKeyCode brain_touchkey_qcodes[] = {
     Q_KEY_CODE_UP, Q_KEY_CODE_DOWN, Q_KEY_CODE_LEFT, Q_KEY_CODE_RIGHT,
-    Q_KEY_CODE_HOME, Q_KEY_CODE_ESC,
-    Q_KEY_CODE_F1, Q_KEY_CODE_F2,
-    Q_KEY_CODE_AC_HOME,      /* ホーム */
-    Q_KEY_CODE_AC_BACK,      /* 国語 漢字 */
-    Q_KEY_CODE_AC_FORWARD,   /* 英和 和英 */
-    Q_KEY_CODE_AC_REFRESH,   /* My 辞書 */
-    Q_KEY_CODE_F13,          /* 履歴 */
-    Q_KEY_CODE_F14,          /* 一覧から選ぶ */
-    Q_KEY_CODE_F15,          /* 音声 */
-    Q_KEY_CODE_F16,          /* 文字小 */
-    Q_KEY_CODE_F17,          /* 文字大 */
+    Q_KEY_CODE_HOME,          /* ホーム */
+    Q_KEY_CODE_F1,            /* 国語 漢字 */
+    Q_KEY_CODE_F2,            /* 英和 和英 */
+    Q_KEY_CODE_F3,            /* My 辞書 */
+    Q_KEY_CODE_F6,            /* 音声 */
 };
 
 typedef struct BrainKbdState {
@@ -126,28 +119,48 @@ static void brain_kbd_touchkey_update(BrainKbdState *s, QKeyCode qcode,
                                       bool down);
 
 /*
- * Host key -> firmware Set-1.  Letters and digits use the standard
- * AT Set-1 byte (JIS and US QWERTY share A-Z / 1-0 positions), so a
- * JIS 106 keyboard types the same letter as the keycap.  Do not remap
- * 1-0 onto Q-P: that made JIS number-row input look like a scrambled
- * alphabet.  Do not steal henkan/muhenkan/hiragana; those are ordinary
- * JIS keys, not Brain symbol.
+ * PW-SH6 photo vs JIS 106 notebook (same QWERTY letter row):
+ *
+ *   PC Q..P / A..L / Z..M  ->  Brain Q..P / A..L / Z..M
+ *   PC 1..0 (and keypad)   ->  same cells as Q¹..P⁰ (no dedicated number row)
+ *   Enter                  ->  決定
+ *   Esc                    ->  戻る
+ *   Backspace / Delete     ->  削除/クリア
+ *   Shift                  ->  シフト
+ *   Space / 変換           ->  スペース/変換
+ *   Minus                  ->  長音 ー
+ *   半角/全角 / Insert / 無変換 -> 記号
+ *   arrows / Home          ->  矢印 / ホーム
+ *
+ * 変換 is スペース/変換, not 記号.  ひらがな/英数 are left to the host IME.
  */
 static uint8_t brain_qcode_to_set1(QKeyCode q)
 {
     switch (q) {
-    case Q_KEY_CODE_KP_ENTER:     return 0x1c;
-    case Q_KEY_CODE_KP_1:         return 0x02;
-    case Q_KEY_CODE_KP_2:         return 0x03;
-    case Q_KEY_CODE_KP_3:         return 0x04;
-    case Q_KEY_CODE_KP_4:         return 0x05;
-    case Q_KEY_CODE_KP_5:         return 0x06;
-    case Q_KEY_CODE_KP_6:         return 0x07;
-    case Q_KEY_CODE_KP_7:         return 0x08;
-    case Q_KEY_CODE_KP_8:         return 0x09;
-    case Q_KEY_CODE_KP_9:         return 0x0a;
-    case Q_KEY_CODE_KP_0:         return 0x0b;
-    case Q_KEY_CODE_DELETE:       return 0x0e;
+    case Q_KEY_CODE_1: case Q_KEY_CODE_KP_1: return 0x10; /* Q¹ */
+    case Q_KEY_CODE_2: case Q_KEY_CODE_KP_2: return 0x11;
+    case Q_KEY_CODE_3: case Q_KEY_CODE_KP_3: return 0x12;
+    case Q_KEY_CODE_4: case Q_KEY_CODE_KP_4: return 0x13;
+    case Q_KEY_CODE_5: case Q_KEY_CODE_KP_5: return 0x14;
+    case Q_KEY_CODE_6: case Q_KEY_CODE_KP_6: return 0x15;
+    case Q_KEY_CODE_7: case Q_KEY_CODE_KP_7: return 0x16;
+    case Q_KEY_CODE_8: case Q_KEY_CODE_KP_8: return 0x17;
+    case Q_KEY_CODE_9: case Q_KEY_CODE_KP_9: return 0x18;
+    case Q_KEY_CODE_0: case Q_KEY_CODE_KP_0: return 0x19; /* P⁰ */
+    case Q_KEY_CODE_RET:
+    case Q_KEY_CODE_KP_ENTER:     return 0x1c; /* 決定 */
+    case Q_KEY_CODE_ESC:          return 0x01; /* 戻る */
+    case Q_KEY_CODE_BACKSPACE:
+    case Q_KEY_CODE_DELETE:       return 0x0e; /* 削除 */
+    case Q_KEY_CODE_SPC:
+    case Q_KEY_CODE_HENKAN:       return 0x39; /* スペース/変換 */
+    case Q_KEY_CODE_GRAVE_ACCENT:
+    case Q_KEY_CODE_MUHENKAN:
+    case Q_KEY_CODE_INSERT:       return 0x29; /* 記号 */
+    case Q_KEY_CODE_MINUS:        return 0x0c; /* 長音 */
+    case Q_KEY_CODE_HOME:         return 0x47;
+    case Q_KEY_CODE_F4:           return 0x3e; /* 履歴 (no matrix cell) */
+    case Q_KEY_CODE_F5:           return 0x3f; /* 一覧から選ぶ */
     default:
         if (q < qemu_input_map_qcode_to_atset1_len) {
             return qemu_input_map_qcode_to_atset1[q] & 0xff;
