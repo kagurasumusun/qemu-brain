@@ -426,10 +426,12 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
     key = evt->u.key.data;
     qcode = qemu_input_key_value_to_qcode(key->key);
 
-    if (qcode == Q_KEY_CODE_POWER) {
+    /* Host Power suspends the PC; Brain 電源 is AC_Bookmarks. */
+    if (qcode == Q_KEY_CODE_AC_BOOKMARKS) {
         s->power = key->down;
         brain_kbd_refresh(s);
         qemu_set_irq(s->edna2_int, key->down ? 1 : 0);
+        qemu_system_wakeup_request(QEMU_WAKEUP_REASON_OTHER, NULL);
         return;
     }
 

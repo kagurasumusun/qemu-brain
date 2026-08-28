@@ -411,17 +411,23 @@ static void mxs_lcdif_update_display(void *opaque)
     mxs_lcdif_out_size(s, src_w, src_h, &out_w, &out_h);
 
     /*
-     * Never shrink the window on a menu/dialog TRANSFER_COUNT.  That
-     * clipped the right edge and made the screen jump smaller on every
-     * UI transition.  Grow to fit the frame, but keep at least the
-     * board panel size.
+     * Never shrink below the viewed panel (PW-SH6: 854x480 landscape,
+     * 5.5" 121.1mm x 68.0mm).  Realize used to size the console to the
+     * unrotated 480x854 scan, then never-shrink kept height 854 and
+     * clipped the right edge of a landscape blit.  Grow only.
      */
     {
         int pw, ph, need_w, need_h;
 
         mxs_lcdif_out_size(s, s->default_width, s->default_height, &pw, &ph);
-        need_w = MAX(out_w, MAX(s->cols, pw));
-        need_h = MAX(out_h, MAX(s->rows, ph));
+        need_w = MAX(out_w, pw);
+        need_h = MAX(out_h, ph);
+        if (need_w < s->cols) {
+            need_w = s->cols;
+        }
+        if (need_h < s->rows) {
+            need_h = s->rows;
+        }
         if (need_w != s->cols || need_h != s->rows) {
             s->cols = need_w;
             s->rows = need_h;
@@ -686,8 +692,9 @@ static void mxs_lcdif_realize(DeviceState *dev, Error **errp)
     sysbus_init_irq(sbd, &s->irq_error);
 
     s->con = graphic_console_init(dev, 0, &mxs_lcdif_gfx_ops, s);
-    s->cols = s->default_width;
-    s->rows = s->default_height;
+    /* Viewed panel: 480x854 scan + 270° = 854x480 landscape. */
+    mxs_lcdif_out_size(s, s->default_width, s->default_height,
+                       &s->cols, &s->rows);
     qemu_console_resize(s->con, s->cols, s->rows);
 
     s->vsync = timer_new_ns(QEMU_CLOCK_VIRTUAL, mxs_lcdif_vsync_tick, s);

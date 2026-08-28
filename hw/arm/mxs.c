@@ -1586,13 +1586,13 @@ static void brain_edna2_mcu_execute(BrainMachineState *bms)
      * The calibration then reads mb[0x0c] as two 16-bit touch-area
      * centre coordinates (low = x, high = y) and expands them by
      * +/-0x23 into the touch rectangle it hands back to the MCU
-     * (0xc07c282c: ldrh/ldr/lsr + sub/add #0x23).  On the 800x480
-     * panel the centre is (400, 240) = 0x00F00190.
+     * (0xc07c282c: ldrh/ldr/lsr + sub/add #0x23).  PW-SH6 panel is
+     * 854x480 (5.5", 121.1mm x 68.0mm); centre (427, 240) = 0x00F001AB.
      */
     stl_le_p(bms->edna2_mb + 0x00, 0x00000000u);
     stl_le_p(bms->edna2_mb + 0x04, 0x00000000u);
-    stl_le_p(bms->edna2_mb + 0x08, 0x0000031Fu);
-    stl_le_p(bms->edna2_mb + 0x0c, 0x00F00190u);
+    stl_le_p(bms->edna2_mb + 0x08, 0x00000355u);
+    stl_le_p(bms->edna2_mb + 0x0c, 0x00F001ABu);
 
     /*
      * Touchkey calibration result block (mailbox +0x800..+0x824).
@@ -1634,6 +1634,10 @@ static void brain_edna2_mcu_execute(BrainMachineState *bms)
          */
         stl_le_p(bms->edna2_mb + BRAIN_EDNA2_MCU_TOUCHKEY_OFF,
                  0x00000010u | bms->edna2_touchkey);
+        /* Factory affine so taps are not discarded / mapped off-panel. */
+        brain_inject_touch_cal(bms);
+        brain_inject_touch_area_flag(bms);
+        brain_inject_touch_affine(bms);
         break;
     default:
         break;
