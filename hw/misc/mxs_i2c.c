@@ -77,7 +77,7 @@ static bool brain_i2c_debug(void)
     static int on = -1;
 
     if (on < 0) {
-        const char *e = brain_i2c_debug();
+        const char *e = getenv("BRAIN_I2C_DEBUG");
 
         on = e && *e && *e != '0';
     }
