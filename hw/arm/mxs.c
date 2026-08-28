@@ -144,8 +144,10 @@ typedef struct BrainMachineState {
      * re-enable a single aid for analysis.
      *
      *   strict_hw           master switch
-     *   aid_edna2_status    EDNA2 MCU mailbox status block seeding
-     *   aid_edna2_resp      EDNA2 MCU command-response heuristics
+     *   aid_edna2_status    Do not enable: sending a fake MCU-present
+     *                       status makes the main OS take the wrong
+     *                       boot path and it will not start correctly.
+     *   aid_edna2_resp      Same class of QEMU-only MCU spoof; leave off.
      *   aid_region4_remap   FMD Region 4 sector-window remap
      *   aid_sd_launcher     EBOOT-equivalent SD launcher auto-boot
      *   aid_ignore_bus_err  ignore unmapped / aborted memory transactions
@@ -154,6 +156,7 @@ typedef struct BrainMachineState {
     bool aid_edna2_status;
     bool aid_edna2_uninit;
     bool aid_edna2_resp;
+    bool touch_cal_posted;
     bool aid_region4_remap;
     bool aid_sd_launcher;
     bool aid_ignore_bus_err;
@@ -1734,7 +1737,7 @@ static void brain_edna2_mcu_kick(BrainMachineState *bms)
  */
 #define BRAIN_TOUCH_CAL_VA   0xc07c71c8u
 #define BRAIN_TOUCH_CAL_PAGE 0xc07c7000u
-static void brain_inject_touch_cal(BrainMachineState *bms)
+static bool brain_inject_touch_cal(BrainMachineState *bms)
 {
     static const uint16_t cal[8] = {
         0x0063, 0x0100, 0xfea9, 0x003a, 0x0100, 0xff34, 0x0000, 0xffff,
@@ -1745,12 +1748,13 @@ static void brain_inject_touch_cal(BrainMachineState *bms)
     int i;
 
     if (page == (hwaddr)-1) {
-        return;
+        return false;
     }
     for (i = 0; i < 8; i++) {
         stw_le_phys(&address_space_memory,
                     page + (BRAIN_TOUCH_CAL_VA & 0xfff) + i * 2, cal[i]);
     }
+    return true;
 }
 
 /*
@@ -1777,22 +1781,23 @@ static void brain_inject_touch_cal(BrainMachineState *bms)
  */
 #define BRAIN_TOUCH_AREA_VA   0xc07c71f0u
 #define BRAIN_TOUCH_AREA_PAGE 0xc07c7000u
-static void brain_inject_touch_area_flag(BrainMachineState *bms)
+static bool brain_inject_touch_area_flag(BrainMachineState *bms)
 {
     MemTxAttrs attrs = {};
     hwaddr page = arm_cpu_get_phys_page_attrs_debug(
         CPU(bms->cpu), BRAIN_TOUCH_AREA_PAGE, &attrs);
 
     if (page == (hwaddr)-1) {
-        return;
+        return false;
     }
     stl_le_phys(&address_space_memory,
                 page + (BRAIN_TOUCH_AREA_VA & 0xfff), 1);
+    return true;
 }
 
 #define BRAIN_TOUCH_AFF_VA   0xc07c71f4u
 #define BRAIN_TOUCH_AFF_PAGE 0xc07c7000u
-static void brain_inject_touch_affine(BrainMachineState *bms)
+static bool brain_inject_touch_affine(BrainMachineState *bms)
 {
     static const uint32_t aff[8] = {
         200, 0, (uint32_t)-177600, 0, 120,
@@ -1804,12 +1809,13 @@ static void brain_inject_touch_affine(BrainMachineState *bms)
     int i;
 
     if (page == (hwaddr)-1) {
-        return;
+        return false;
     }
     for (i = 0; i < 8; i++) {
         stl_le_phys(&address_space_memory,
                     page + (BRAIN_TOUCH_AFF_VA & 0xfff) + i * 4, aff[i]);
     }
+    return true;
 }
 
 static uint64_t brain_edna2_mb_read(void *opaque, hwaddr offset, unsigned size)
@@ -1817,21 +1823,16 @@ static uint64_t brain_edna2_mb_read(void *opaque, hwaddr offset, unsigned size)
     BrainMachineState *bms = opaque;
 
     /*
-     * The OAL polls the mailbox every 100 ms from boot, which makes
-     * this a reliable injection point for the touch affine (the GWES
-     * MDD applies its own - wrong - coefficients once at boot).
+     * Post calibration once.  Repeating MMU walks + stores on every
+     * 100 ms mailbox poll stalls the guest for no extra benefit after
+     * the first successful write.
      */
-    brain_inject_touch_affine(bms);
-    brain_inject_touch_cal(bms);
-    brain_inject_touch_area_flag(bms);
-
-    /*
-     * The OAL polls the mailbox every 100 ms from boot, so this is a
-     * reliable injection point for the touch calibration: the PDD's
-     * TouchPanelEnable may rewrite its .data with the (missing)
-     * registry values after the last MCU command, and the periodic
-     * re-post here wins over any such overwrite.
-     */
+    if (!bms->touch_cal_posted) {
+        brain_inject_touch_affine(bms);
+        brain_inject_touch_cal(bms);
+        brain_inject_touch_area_flag(bms);
+        bms->touch_cal_posted = true;
+    }
     uint64_t v = 0;
 
     memcpy(&v, bms->edna2_mb + offset, size);
@@ -2061,6 +2062,7 @@ static void brain_cpu_reset(void *opaque)
 
     bms->edna2_mcu_busy = false;
     bms->edna2_mcu_latched = false;
+    bms->touch_cal_posted = false;
     timer_del(bms->edna2_mcu_timer);
 
     /*
@@ -2070,8 +2072,8 @@ static void brain_cpu_reset(void *opaque)
      * non-zero battery/charger status block (+0x30..+0x73).  This is
      * real hardware behaviour (the MCU is alive even when the main OS is
      * wedged -- SD/diag boot proves it), not a QEMU compensation, so it
-     * is always modelled.  The 'aid-edna2-status' switch only exists to
-     * suppress it for controlled experiments.
+     * is always modelled.  Do not turn 'aid-edna2-status' on: that
+     * fake MCU-present injection makes the main OS boot incorrectly.
      */
     memset(bms->edna2_mb, 0, sizeof(bms->edna2_mb));
     bms->edna2_touchkey = 0;
@@ -2747,8 +2749,9 @@ static void brain_set_strict_hw(Object *obj, bool value, Error **errp)
 
     bms->strict_hw = value;
     if (!value) {
-        /* Re-enable the QEMU-only guest aids.  aid_edna2_status is left on
-         * unconditionally because it models real MCU behaviour. */
+        /* Re-enable the QEMU-only guest aids.  Do not turn
+         * aid-edna2-status on: that spoof makes the guest fail to
+         * boot the normal main OS. */
         bms->aid_edna2_resp = true;
         bms->aid_region4_remap = true;
         bms->aid_sd_launcher = true;
@@ -2829,15 +2832,10 @@ static void brain_instance_init(Object *obj)
      */
     bms->strict_hw = true;
     /*
-     * The EDNA2 MCU status-block + doorbell seeding (aid-edna2-status)
-     * is OFF by default.  Empirically (2026-08-26, A/B on emmc_repaired4)
-     * this QEMU-side injection is read by the main OS boot control
-     * (WCEPRJ/EdAppCtrl) as "MCU initialized/present" and routes the
-     * guest into the DiagApp factory-Selftest path instead of the normal
-     * main OS first-run setup (the yellow date/time dialog).  With it off
-     * the main OS boots to the date/time setup and is keyboard-interactive.
-     * 'aid-edna2-status=on' reproduces the historic diagnostic-menu
-     * behaviour for comparison.
+     * aid-edna2-status / aid-edna2-uninit / aid-edna2-resp are OFF.
+     * Enabling them injects a fake EDNA2 MCU-present / handshake
+     * block.  The main OS then takes the DiagApp selftest path and
+     * does not boot the normal first-run UI.  Leave them off.
      */
     bms->aid_edna2_status = false;    /* QEMU-only injection, off by default */
     bms->aid_edna2_uninit = false;    /* hypothesis aid, off by default */
@@ -2879,21 +2877,18 @@ static void brain_instance_init(Object *obj)
     brain_add_aid_prop(obj, "aid-edna2-status",
                        brain_get_aid_edna2_status,
                        brain_set_aid_edna2_status,
-                       "Seed the EDNA2 mailbox MCU status block on reset "
-                       "(off in strict-HW mode)");
+                       "Do not enable: fake MCU-present status makes the "
+                       "main OS boot incorrectly");
     brain_add_aid_prop(obj, "aid-edna2-uninit",
                        brain_get_aid_edna2_uninit,
                        brain_set_aid_edna2_uninit,
-                       "Seed the EDNA2 MCU status block as 'not "
-                       "initialized' (buf[0]=0, buf[1]&0x86!=0) so the "
-                       "WCEPRJ launcher shows the real unit's "
-                       "'please wait' screen (hypothesis aid, off by "
-                       "default)");
+                       "Do not enable: fake 'MCU not initialized' status "
+                       "makes the main OS boot incorrectly");
     brain_add_aid_prop(obj, "aid-edna2-resp",
                        brain_get_aid_edna2_resp,
                        brain_set_aid_edna2_resp,
-                       "Emulate EDNA2 MCU command-response handshakes "
-                       "(heuristic; off in strict-HW mode)");
+                       "Do not enable: fake MCU handshakes make the "
+                       "main OS boot incorrectly");
     brain_add_aid_prop(obj, "aid-region4-remap",
                        brain_get_aid_region4_remap,
                        brain_set_aid_region4_remap,
@@ -2982,4 +2977,13 @@ static const TypeInfo brain_machine_types[] = {
 };
 
 DEFINE_TYPES(brain_machine_types)
+
+_class_init,
+        .interfaces     = arm_machine_interfaces,
+    },
+};
+
+DEFINE_TYPES(brain_machine_types)
+
+achine_types)
 

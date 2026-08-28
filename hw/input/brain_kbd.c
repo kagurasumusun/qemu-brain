@@ -28,6 +28,7 @@
 #include "qom/object.h"
 #include "ui/console.h"
 #include "ui/input.h"
+#include "system/runstate.h"
 
 #define BRAIN_KBD_COLS  7
 #define BRAIN_KBD_ROWS  7
@@ -44,12 +45,14 @@ static const int brain_kbd_col_pins[BRAIN_KBD_COLS] = { 0, 1, 2, 3, 4, 6, 7 };
  * guest sees an endless key repeat instead of a press/release pair.)
  */
 /*
- * Guest column walk needs the row held low for at least one poll.
- * 80 ms virtual is enough once the CPU is not stuck in WFI; the old
- * 2.5 s floor made every SDL keystroke stick and feel "dead".
- * Instant HMP sendkey (down+up in one tick) still gets this floor.
+ * PS/2 (hw/input/ps2.c) applies make/break immediately.  The matrix
+ * has no scancode queue, so a same-tick HMP sendkey (down+up before
+ * the guest scans) would vanish.  Hold the row only until the next
+ * 1 ms virtual slice — the same order as i8042's kbd-throttle
+ * (pckbd.c: 1000 us) — then release.  Real SDL up events after the
+ * guest has had time to poll are applied at once, like PS/2.
  */
-#define BRAIN_KBD_MIN_HOLD_NS  (80 * 1000 * 1000LL)
+#define BRAIN_KBD_MIN_HOLD_NS  (1000 * 1000LL)
 
 /*
  * EDNA2 MCU touchkey report (mailbox +0x404, consumed by VMCopy.dll's
@@ -339,15 +342,18 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
                 s->want[c] |= 1u << r;
                 s->state[c] |= 1u << r;
                 brain_kbd_refresh(s);
-                /* kick the EDNA2 interrupt-driven path (ICOL 33) */
                 brain_kbd_edna2_pulse(s);
                 s->hold_until_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
                                    BRAIN_KBD_MIN_HOLD_NS;
-                timer_mod(s->hold_timer, s->hold_until_ns);
             } else {
                 s->want[c] &= ~(1u << r);
-                timer_mod(s->hold_timer, s->hold_until_ns);
+                if (qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) >=
+                    s->hold_until_ns) {
+                    brain_kbd_hold_tick(s);
+                    return;
+                }
             }
+            timer_mod(s->hold_timer, s->hold_until_ns);
             return;
         }
     }
