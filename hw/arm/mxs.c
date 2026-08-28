@@ -2978,12 +2978,3 @@ static const TypeInfo brain_machine_types[] = {
 
 DEFINE_TYPES(brain_machine_types)
 
-_class_init,
-        .interfaces     = arm_machine_interfaces,
-    },
-};
-
-DEFINE_TYPES(brain_machine_types)
-
-achine_types)
-
