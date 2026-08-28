@@ -129,7 +129,6 @@ static void mxs_i2c_kick(MXSI2CState *s)
     bool is_read = ctrl0 & CTRL0_DIRECTION;
     bool start   = ctrl0 & CTRL0_PRE_SEND_START;
     bool stop    = ctrl0 & CTRL0_POST_SEND_STOP;
-    bool pio     = ctrl0 & CTRL0_PIO_MODE;
 
     if (!count) {
         mxs_i2c_finish(s, CTRL1_DATA_ENGINE_CMPLT);
