@@ -30,10 +30,10 @@
 #include "ui/input.h"
 #include "system/runstate.h"
 
-#define BRAIN_KBD_COLS  7
+#define BRAIN_KBD_COLS  8
 #define BRAIN_KBD_ROWS  7
 
-static const int brain_kbd_col_pins[BRAIN_KBD_COLS] = { 0, 1, 2, 3, 4, 6, 7 };
+static const int brain_kbd_col_pins[BRAIN_KBD_COLS] = { 0, 1, 2, 3, 4, 5, 6, 7 };
 #define BRAIN_KBD_ROW0_GPIO2_PIN   16
 #define BRAIN_KBD_ROW6_GPIO4_PIN   8
 
@@ -129,20 +129,25 @@ static void brain_kbd_touchkey_update(BrainKbdState *s, QKeyCode qcode,
 static uint8_t brain_qcode_to_set1(QKeyCode q)
 {
     switch (q) {
-    case Q_KEY_CODE_ESC:          return 0x01;
-    case Q_KEY_CODE_1: case Q_KEY_CODE_KP_1: return 0x02;
-    case Q_KEY_CODE_2: case Q_KEY_CODE_KP_2: return 0x03;
-    case Q_KEY_CODE_3: case Q_KEY_CODE_KP_3: return 0x04;
-    case Q_KEY_CODE_4: case Q_KEY_CODE_KP_4: return 0x05;
-    case Q_KEY_CODE_5: case Q_KEY_CODE_KP_5: return 0x06;
-    case Q_KEY_CODE_6: case Q_KEY_CODE_KP_6: return 0x07;
-    case Q_KEY_CODE_7: case Q_KEY_CODE_KP_7: return 0x08;
-    case Q_KEY_CODE_8: case Q_KEY_CODE_KP_8: return 0x09;
-    case Q_KEY_CODE_9: case Q_KEY_CODE_KP_9: return 0x0a;
-    case Q_KEY_CODE_0: case Q_KEY_CODE_KP_0: return 0x0b;
-    case Q_KEY_CODE_MINUS:        return 0x0c;
+    case Q_KEY_CODE_ESC:          return 0x01; /* 戻る */
+    /*
+     * Brain prints 1..0 on Q..P.  PC digit keys and keypad digits
+     * hit those same cells (Q¹ W² … P⁰).
+     */
+    case Q_KEY_CODE_1: case Q_KEY_CODE_KP_1: return 0x10;
+    case Q_KEY_CODE_2: case Q_KEY_CODE_KP_2: return 0x11;
+    case Q_KEY_CODE_3: case Q_KEY_CODE_KP_3: return 0x12;
+    case Q_KEY_CODE_4: case Q_KEY_CODE_KP_4: return 0x13;
+    case Q_KEY_CODE_5: case Q_KEY_CODE_KP_5: return 0x14;
+    case Q_KEY_CODE_6: case Q_KEY_CODE_KP_6: return 0x15;
+    case Q_KEY_CODE_7: case Q_KEY_CODE_KP_7: return 0x16;
+    case Q_KEY_CODE_8: case Q_KEY_CODE_KP_8: return 0x17;
+    case Q_KEY_CODE_9: case Q_KEY_CODE_KP_9: return 0x18;
+    case Q_KEY_CODE_0: case Q_KEY_CODE_KP_0: return 0x19;
+    case Q_KEY_CODE_MINUS:        return 0x0c; /* 長音 — */
     case Q_KEY_CODE_EQUAL:        return 0x0d;
-    case Q_KEY_CODE_BACKSPACE:    return 0x0e;
+    case Q_KEY_CODE_BACKSPACE:
+    case Q_KEY_CODE_DELETE:       return 0x0e; /* 削除/クリア */
     case Q_KEY_CODE_TAB:          return 0x0f;
     case Q_KEY_CODE_Q:            return 0x10;
     case Q_KEY_CODE_W:            return 0x11;
@@ -171,7 +176,6 @@ static uint8_t brain_qcode_to_set1(QKeyCode q)
     case Q_KEY_CODE_L:            return 0x26;
     case Q_KEY_CODE_SEMICOLON:    return 0x27;
     case Q_KEY_CODE_APOSTROPHE:   return 0x28;
-    case Q_KEY_CODE_GRAVE_ACCENT: return 0x29;
     case Q_KEY_CODE_SHIFT:
     case Q_KEY_CODE_SHIFT_R:      return 0x2a;
     case Q_KEY_CODE_BACKSLASH:    return 0x2b;
@@ -185,11 +189,17 @@ static uint8_t brain_qcode_to_set1(QKeyCode q)
     case Q_KEY_CODE_COMMA:        return 0x33;
     case Q_KEY_CODE_DOT:          return 0x34;
     case Q_KEY_CODE_SLASH:        return 0x35;
-    case Q_KEY_CODE_SPC:          return 0x39;
+    case Q_KEY_CODE_SPC:          return 0x39; /* スペース/変換 */
+    case Q_KEY_CODE_HENKAN:
+    case Q_KEY_CODE_MUHENKAN:
+    case Q_KEY_CODE_LANG1:
+    case Q_KEY_CODE_LANG2:
+    case Q_KEY_CODE_GRAVE_ACCENT: return 0x29; /* 記号 */
     case Q_KEY_CODE_UP:           return 0x48;
     case Q_KEY_CODE_LEFT:         return 0x4b;
     case Q_KEY_CODE_RIGHT:        return 0x4d;
     case Q_KEY_CODE_DOWN:         return 0x50;
+    case Q_KEY_CODE_HOME:         return 0x47; /* ホーム → touchkey too */
     default:
         if (q < qemu_input_map_qcode_to_atset1_len) {
             return qemu_input_map_qcode_to_atset1[q] & 0xff;
@@ -200,13 +210,14 @@ static uint8_t brain_qcode_to_set1(QKeyCode q)
 
 /* MAIN NK VA 0xc0872cc0.  [column][row], Set 1.  Y=0x15 r2, N=0x31 r4 */
 static const uint8_t brain_keymap[BRAIN_KBD_COLS][BRAIN_KBD_ROWS] = {
-    { 0x16, 0x08, 0x19, 0x25, 0x03, 0x04, 0x4d },   /* col6 row6 = right (0x4d) */
-    { 0x0d, 0x0b, 0x21, 0x27, 0x2a, 0x06, 0x05 },
-    { 0x02, 0x0a, 0x15, 0x28, 0x31, 0x18, 0x50 },   /* col2 row6 = down  (0x50) */
-    { 0x0e, 0x09, 0x2e, 0x26, 0x2b, 0x11, 0x1d },
-    { 0x2c, 0x07, 0x14, 0x29, 0x2d, 0x01, 0x1c },   /* col4 row6 = enter (0x1c) */
-    { 0x10, 0x0f, 0x22, 0x24, 0x1a, 0x17, 0x1e },
-    { 0x1b, 0x0c, 0x12, 0x2f, 0x30, 0x13, 0x1f },
+    { 0x16, 0x08, 0x19, 0x25, 0x03, 0x04, 0x4d }, /* U 7 P K 2 3 Right */
+    { 0x0d, 0x0b, 0x21, 0x27, 0x2a, 0x06, 0x05 }, /* = 0 F ; Shift 5 4 */
+    { 0x02, 0x0a, 0x15, 0x28, 0x31, 0x18, 0x50 }, /* 1 9 Y ' N O Down */
+    { 0x0e, 0x09, 0x2e, 0x26, 0x2b, 0x11, 0x1d }, /* BS 8 C L \\ W Ctrl */
+    { 0x2c, 0x07, 0x14, 0x29, 0x2d, 0x01, 0x1c }, /* Z 6 T 記号 X 戻る 決定 */
+    { 0x20, 0x23, 0x32, 0x39, 0x4b, 0x48, 0x47 }, /* D H M Space Left Up Home */
+    { 0x10, 0x0f, 0x22, 0x24, 0x1a, 0x17, 0x1e }, /* Q Tab G J [ I A */
+    { 0x1b, 0x0c, 0x12, 0x2f, 0x30, 0x13, 0x1f }, /* ] — E V B R S */
 };
 
 static void brain_kbd_refresh(void *opaque);

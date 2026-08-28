@@ -112,10 +112,10 @@ OBJECT_DECLARE_SIMPLE_TYPE(MXSLcdifState, MXS_LCDIF)
 static int mxs_lcdif_bpp(MXSLcdifState *s);
 
 /*
- * Board lcd-rotate orients a portrait panel in the QEMU window.
- * If the guest already programs a landscape TRANSFER_COUNT (width >=
- * height), the framebuffer is already the picture the user should see:
- * rotating it again makes an 480-wide window and clips the right side.
+ * Automatic orientation: a landscape TRANSFER_COUNT (width >= height)
+ * is shown as-is.  A portrait scan is turned by board lcd-rotate
+ * (default 270) so the window is landscape.  No extra machine property
+ * is required at runtime.
  */
 static uint32_t mxs_lcdif_view_rotate(const MXSLcdifState *s, int src_w,
                                       int src_h)
