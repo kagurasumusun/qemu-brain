@@ -12,8 +12,6 @@ env:
   CCACHE_COMPRESS: "1"
   CCACHE_COMPRESSLEVEL: "6"
   CCACHE_MAXSIZE: 2G
-  # Shared across Linux/Windows; object files themselves are not reused,
-  # but wrap downloads and matching compiler hashes can hit.
   CACHE_KEY_PREFIX: qemu-common
 
 jobs:
@@ -139,7 +137,6 @@ jobs:
             bison
             flex
             mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-ccache
             mingw-w64-x86_64-ninja
             mingw-w64-x86_64-meson
             mingw-w64-x86_64-pkgconf
@@ -164,13 +161,18 @@ jobs:
       - name: Configure QEMU
         shell: msys2 {0}
         run: |
-          # Do not put ccache wrappers first: gcc then looks for cc1 under
+          # Real gcc.exe only. ccache wrappers make gcc look for cc1 under
           # /mingw64/lib/ccache and CreateProcess fails on Windows.
-          export PATH="/mingw64/bin:$PATH"
+          export PATH="/mingw64/bin:/usr/bin"
+          export CC=/mingw64/bin/gcc.exe
+          export CXX=/mingw64/bin/g++.exe
+          export CCACHE_DISABLE=1
           hash -r
           which gcc
           gcc -print-prog-name=cc1
           ./configure \
+            --cc="$CC" \
+            --cxx="$CXX" \
             --target-list=arm-softmmu \
             --enable-sdl \
             --enable-sdl-image \
@@ -191,9 +193,11 @@ jobs:
       - name: Build qemu-system-arm
         shell: msys2 {0}
         run: |
-          export PATH="/mingw64/lib/ccache/bin:/mingw64/bin:$PATH"
+          export PATH="/mingw64/bin:/usr/bin"
+          export CC=/mingw64/bin/gcc.exe
+          export CXX=/mingw64/bin/g++.exe
+          export CCACHE_DISABLE=1
           ninja -C build qemu-system-arm.exe
-          ccache -s || true
 
       - name: Package Windows Binary and DLLs
         shell: msys2 {0}
@@ -204,7 +208,6 @@ jobs:
             cp build/qemu-system-armw.exe dist/
           fi
 
-          # Bundle required MinGW DLL dependencies for standalone execution
           cd dist
           for binary in *.exe; do
             for dll in $(ldd "$binary" | grep '/mingw64/bin/' | awk '{print $3}'); do
