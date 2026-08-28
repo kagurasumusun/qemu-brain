@@ -72,21 +72,25 @@ static const int brain_kbd_col_pins[BRAIN_KBD_COLS] = { 0, 1, 2, 3, 4, 5, 6, 7 }
  */
 #define BRAIN_TOUCHKEY_VALID    0x10u
 static const uint32_t brain_touchkey_bits[] = {
-    /* slot 0 */ 0x2,      /* arrow up        */
-    /* slot 1 */ 0x4,      /* arrow down      */
-    /* slot 2 */ 0x8,      /* arrow left      */
-    /* slot 3 */ 0x20,     /* arrow right     */
-    /* slot 4 */ 0x40,     /* enter / decide  */
-    /* slot 5 */ 0x100,    /* home / menu     */
-    /* slot 6 */ 0x200,    /* back / escape   */
-    /* slot 7 */ 0x400,    /* function key 1  */
-    /* slot 8 */ 0x800,    /* function key 2  */
+    0x2, 0x4, 0x8, 0x20, 0x40,
+    0x100, 0x200, 0x400, 0x800,
+    /* aliases: ホーム / 国語漢字 / 英和和英 / My辞書 */
+    0x100, 0x400, 0x800, 0x400,
 };
 
 static const QKeyCode brain_touchkey_qcodes[] = {
     Q_KEY_CODE_UP, Q_KEY_CODE_DOWN, Q_KEY_CODE_LEFT, Q_KEY_CODE_RIGHT,
     Q_KEY_CODE_RET, Q_KEY_CODE_HOME, Q_KEY_CODE_ESC,
     Q_KEY_CODE_F1, Q_KEY_CODE_F2,
+    Q_KEY_CODE_AC_HOME,      /* ホーム */
+    Q_KEY_CODE_AC_BACK,      /* 国語 漢字 */
+    Q_KEY_CODE_AC_FORWARD,   /* 英和 和英 */
+    Q_KEY_CODE_AC_REFRESH,   /* My 辞書 */
+    Q_KEY_CODE_F13,          /* 履歴 */
+    Q_KEY_CODE_F14,          /* 一覧から選ぶ */
+    Q_KEY_CODE_F15,          /* 音声 */
+    Q_KEY_CODE_F16,          /* 文字小 */
+    Q_KEY_CODE_F17,          /* 文字大 */
 };
 
 typedef struct BrainKbdState {
@@ -199,7 +203,18 @@ static uint8_t brain_qcode_to_set1(QKeyCode q)
     case Q_KEY_CODE_LEFT:         return 0x4b;
     case Q_KEY_CODE_RIGHT:        return 0x4d;
     case Q_KEY_CODE_DOWN:         return 0x50;
-    case Q_KEY_CODE_HOME:         return 0x47; /* ホーム → touchkey too */
+    case Q_KEY_CODE_HOME:
+    case Q_KEY_CODE_AC_HOME:      return 0x47; /* ホーム */
+    case Q_KEY_CODE_AC_BACK:      return 0x3b; /* 国語 漢字 (F1) */
+    case Q_KEY_CODE_AC_FORWARD:   return 0x3c; /* 英和 和英 (F2) */
+    case Q_KEY_CODE_AC_REFRESH:   return 0x3d; /* My 辞書 (F3) */
+    case Q_KEY_CODE_F13:          return 0x3e; /* 履歴 */
+    case Q_KEY_CODE_F14:          return 0x3f; /* 一覧から選ぶ */
+    case Q_KEY_CODE_F15:          return 0x40; /* 音声 */
+    case Q_KEY_CODE_F16:          return 0x41; /* 文字小 */
+    case Q_KEY_CODE_F17:          return 0x42; /* 文字大 */
+    case Q_KEY_CODE_F1:           return 0x3b;
+    case Q_KEY_CODE_F2:           return 0x3c;
     default:
         if (q < qemu_input_map_qcode_to_atset1_len) {
             return qemu_input_map_qcode_to_atset1[q] & 0xff;
