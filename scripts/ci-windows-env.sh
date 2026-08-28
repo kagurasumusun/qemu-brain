@@ -8,9 +8,18 @@ export CCACHE_DISABLE=1
 unset CC CXX CCACHE_PATH
 rm -f /mingw64/lib/ccache/bin/cc.exe /mingw64/lib/ccache/bin/gcc.exe \
       /mingw64/lib/ccache/bin/cc /mingw64/lib/ccache/bin/gcc
-# Copy, do not symlink: ninja CreateProcess does not follow MSYS symlinks.
-cp -f /mingw64/bin/gcc.exe /mingw64/bin/cc.exe
-cp -f /mingw64/bin/g++.exe /mingw64/bin/c++.exe
+# Real PE file if ninja still says "cc". Skip when dest is already the
+# same inode (MSYS2 ships c++.exe as g++.exe; cp then exits 1).
+copy_cc() {
+    src=$1 dest=$2
+    [ -e "$src" ] || return 0
+    if [ -e "$dest" ] && [ "$src" -ef "$dest" ]; then
+        return 0
+    fi
+    cp -f "$src" "$dest"
+}
+copy_cc /mingw64/bin/gcc.exe /mingw64/bin/cc.exe
+copy_cc /mingw64/bin/g++.exe /mingw64/bin/c++.exe
 hash -r
 CI_CC=$(cygpath -m /mingw64/bin/gcc.exe)
 CI_CXX=$(cygpath -m /mingw64/bin/g++.exe)
