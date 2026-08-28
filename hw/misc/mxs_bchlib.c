@@ -203,7 +203,7 @@ void encode_bch(struct bch_control *bch, const uint8_t *data,
 {
 	const unsigned int l = BCH_ECC_WORDS(bch)-1;
 	unsigned int i, mlen;
-	unsigned long m;
+	unsigned int m;
 	uint32_t w, r[l+1];
 	const uint32_t * const tab0 = bch->mod8_tab;
 	const uint32_t * const tab1 = tab0 + 256*(l+1);
@@ -219,7 +219,7 @@ void encode_bch(struct bch_control *bch, const uint8_t *data,
 	}
 
 	/* process first unaligned data bytes */
-	m = ((unsigned long)data) & 3;
+	m = ((uintptr_t)data) & 3;
 	if (m) {
 		mlen = (len < (4-m)) ? len : 4-m;
 		encode_bch_unaligned(bch, data, mlen, bch->ecc_buf);
