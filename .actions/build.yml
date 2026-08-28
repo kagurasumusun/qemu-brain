@@ -161,24 +161,12 @@ jobs:
       - name: Configure QEMU
         shell: msys2 {0}
         run: |
-          # MinGW python/meson CreateProcess cannot run Unix paths like
-          # /mingw64/bin/gcc.exe (WinError 2).  Use the basename so meson
-          # resolves D:\...\mingw64\bin\gcc.exe via PATH.
-          # Bare "cc" in ninja must also be MinGW, not /usr/bin/cc.
-          export PATH="/mingw64/bin:/usr/bin"
-          export CCACHE_DISABLE=1
-          unset CC CXX CCACHE_PATH
-          rm -f /mingw64/lib/ccache/bin/cc /mingw64/lib/ccache/bin/gcc \
-                /mingw64/lib/ccache/bin/cc.exe /mingw64/lib/ccache/bin/gcc.exe
-          ln -sf gcc.exe /mingw64/bin/cc.exe
-          ln -sf g++.exe /mingw64/bin/c++.exe
-          hash -r
-          command -v gcc; command -v cc
+          . scripts/ci-windows-env.sh
+          test -x /mingw64/bin/gcc.exe
           gcc -print-prog-name=cc1
           ./configure \
-            --cc=gcc \
-            --cxx=g++ \
-            --host-cc=gcc \
+            --cc="$CI_CC" \
+            --cxx="$CI_CXX" \
             --target-list=arm-softmmu \
             --enable-sdl \
             --enable-sdl-image \
@@ -199,10 +187,7 @@ jobs:
       - name: Build qemu-system-arm
         shell: msys2 {0}
         run: |
-          export PATH="/mingw64/bin:/usr/bin"
-          export CCACHE_DISABLE=1
-          unset CC CXX
-          ln -sf gcc.exe /mingw64/bin/cc.exe
+          . scripts/ci-windows-env.sh
           ninja -C build qemu-system-arm.exe
 
       - name: Package Windows Binary and DLLs
