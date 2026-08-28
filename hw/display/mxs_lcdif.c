@@ -367,9 +367,11 @@ static void mxs_lcdif_update_display(void *opaque)
     DisplaySurface *surface = qemu_console_surface(s->con);
     int src_w, src_h, out_w, out_h, bpp, y, x;
     hwaddr base;
-    g_autofree uint8_t *line = NULL;
+    g_autofree uint8_t *fb = NULL;
+    uint8_t *line;
     uint32_t *dest;
     int src_stride;
+    size_t fb_bytes;
     uint32_t rotate = s->rotate;
     bool swap_xy = (rotate == 90 || rotate == 270);
 
@@ -400,11 +402,13 @@ static void mxs_lcdif_update_display(void *opaque)
     }
 
     src_stride = src_w * (bpp / 8);
-    line = g_malloc(src_stride);
+    fb_bytes = (size_t)src_h * src_stride;
+    fb = g_malloc(fb_bytes);
+    address_space_read(&address_space_memory, base, MEMTXATTRS_UNSPECIFIED,
+                       fb, fb_bytes);
 
     for (y = 0; y < src_h; y++) {
-        address_space_read(&address_space_memory, base + (hwaddr)y * src_stride,
-                           MEMTXATTRS_UNSPECIFIED, line, src_stride);
+        line = fb + (size_t)y * src_stride;
         for (x = 0; x < src_w; x++) {
             uint32_t pix;
             int dx, dy;

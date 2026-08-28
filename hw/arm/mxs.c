@@ -144,18 +144,11 @@ typedef struct BrainMachineState {
      * re-enable a single aid for analysis.
      *
      *   strict_hw           master switch
-     *   aid_edna2_status    Do not enable: sending a fake MCU-present
-     *                       status makes the main OS take the wrong
-     *                       boot path and it will not start correctly.
-     *   aid_edna2_resp      Same class of QEMU-only MCU spoof; leave off.
      *   aid_region4_remap   FMD Region 4 sector-window remap
      *   aid_sd_launcher     EBOOT-equivalent SD launcher auto-boot
      *   aid_ignore_bus_err  ignore unmapped / aborted memory transactions
      */
     bool strict_hw;
-    bool aid_edna2_status;
-    bool aid_edna2_uninit;
-    bool aid_edna2_resp;
     bool aid_region4_remap;
     bool aid_sd_launcher;
     bool aid_ignore_bus_err;
@@ -1485,7 +1478,6 @@ static bool mxs_rom_try_sd(BrainMachineState *bms, SBRun *run)
  * docs/BRAIN_DEV_STATUS.md): it is the SHARP APO idle timer.
  */
 #define BRAIN_EDNA2_MAILBOX_OFF    0xEA000
-#define BRAIN_EDNA2_DOORBELL_OFF   (BRAIN_EDNA2_MAILBOX_OFF + 0x3c)
 
 /*
  * ------------------------------------------------------------------
@@ -1528,9 +1520,6 @@ static bool mxs_rom_try_sd(BrainMachineState *bms, SBRun *run)
 
 static void brain_edna2_mcu_latch(BrainMachineState *bms);
 static void brain_edna2_mcu_execute(BrainMachineState *bms);
-static bool brain_inject_touch_cal(BrainMachineState *bms);
-static bool brain_inject_touch_area_flag(BrainMachineState *bms);
-static bool brain_inject_touch_affine(BrainMachineState *bms);
 
 static void brain_edna2_mcu_tick(void *opaque)
 {
@@ -1619,29 +1608,6 @@ static void brain_edna2_mcu_execute(BrainMachineState *bms)
     stl_le_p(bms->edna2_mb + 0x81c, 0x01000100u);
     stl_le_p(bms->edna2_mb + 0x820, 0x01000100u);
 
-    /*
-     * k.coredll's MCU API keeps a 16-byte cache of this header at
-     * VA 0xc0022afc (snapshot 0xc004cdbc / wait 0xc004ce4c read it;
-     * nothing in the guest ever writes it back from the mailbox, so
-     * it stays all-zero and the calibration's range check fails).
-     * Mirror the header there through the CPU's page tables so the
-     * guest sees the same values as the mailbox.
-     */
-    {
-        MemTxAttrs attrs = {};
-        hwaddr page = arm_cpu_get_phys_page_attrs_debug(
-            CPU(bms->cpu), 0xc0022000, &attrs);
-
-        if (page != (hwaddr)-1) {
-            hwaddr g = page + (0xc0022afc & 0xfff);
-
-            stl_le_phys(&address_space_memory, g + 0x00, 0x00000000u);
-            stl_le_phys(&address_space_memory, g + 0x04, 0x00000000u);
-            stl_le_phys(&address_space_memory, g + 0x08, 0x0000031Fu);
-            stl_le_phys(&address_space_memory, g + 0x0c, 0x00F00190u);
-        }
-    }
-
     switch (bms->edna2_mcu_cmd) {
     case 0x01:
     case 0xd0: case 0xd1: case 0xd2:
@@ -1665,14 +1631,6 @@ static void brain_edna2_mcu_execute(BrainMachineState *bms)
          */
         stl_le_p(bms->edna2_mb + BRAIN_EDNA2_MCU_TOUCHKEY_OFF,
                  0x00000010u | bms->edna2_touchkey);
-        /*
-         * Factory CalibrationData lives in the PDD after the MCU
-         * finishes a touchkey calibration command, not on every
-         * mailbox poll.  Post it here, once the command completes.
-         */
-        brain_inject_touch_affine(bms);
-        brain_inject_touch_cal(bms);
-        brain_inject_touch_area_flag(bms);
         break;
     default:
         break;
@@ -1713,121 +1671,6 @@ static void brain_edna2_mcu_kick(BrainMachineState *bms)
  * on.  The backing store is copied from / to the DRAM page so guest
  * behaviour is unchanged.  Release builds should drop the overlay.
  */
-/*
- * Touch calibration affine for sx8650_touchscreen.dll.
- *
- * TouchPanelCalibrateAPoint (0xc07c2cc8) computes
- *     x' = (a*raw_x + b*raw_y + c) << 2 / d
- *     y' = (e*raw_x + f*raw_y + g) << 2 / d
- * over the int32 struct at VA 0xc07c71f4 with a valid flag at
- * +0x1c.  The GWES MDD recomputes this struct from the registry
- * CalibrationData, but on this image the recomputed values map the
- * real raw coordinates to points far outside the 800x480 screen
- * (verified in runs/tch11/tch12: raw (1924,1972) -> (1601,972)),
- * so the model posts the registry-consistent coefficients instead:
- * with a=200,b=0,c=-177600,e=0,f=120,g=-108720,d=2073 the factory
- * centre raw (1931,1961) maps to (400,240).
- */
-/*
- * Touch linear calibration (Q8.8 int16[8]) at VA 0xc07c71c8, consumed by
- * the PDD fetch (0xc07c1c78 -> TouchPanelCalibrateAPoint 0xc07c23bc,
- * mode 0):
- *
- *     x' = cal[2] + cal[0]*raw_x/cal[1]   (clamped to [0, 799])
- *     y' = cal[5] + cal[3]*raw_y/cal[4]   (clamped to [0, 479])
- *
- * The registry CalibrationData maps raw X [888, 2961] over 800 px and
- * raw Y [906, 3039] over 480 px (nk_main.bin file 0x1be9f8d).  With the
- * ROM default identity coefficients raw 1924 -> x' = 1924 > 799, so the
- * fetch sets the pen-up flag (0xc07c1e84: flags |= 0x10) and every tap
- * is discarded.  Post the registry-consistent coefficients:
- * scale X = 800/2073 = 0.3859 (Q8.8 99), offset -888*0.3859 = -343;
- * scale Y = 480/2133 = 0.2250 (Q8.8 58), offset -906*0.2250 = -204.
- * Centre raw (1931,1961) then maps to (402, 240).
- */
-#define BRAIN_TOUCH_CAL_VA   0xc07c71c8u
-#define BRAIN_TOUCH_CAL_PAGE 0xc07c7000u
-static bool brain_inject_touch_cal(BrainMachineState *bms)
-{
-    static const uint16_t cal[8] = {
-        0x0063, 0x0100, 0xfea9, 0x003a, 0x0100, 0xff34, 0x0000, 0xffff,
-    };
-    MemTxAttrs attrs = {};
-    hwaddr page = arm_cpu_get_phys_page_attrs_debug(
-        CPU(bms->cpu), BRAIN_TOUCH_CAL_PAGE, &attrs);
-    int i;
-
-    if (page == (hwaddr)-1) {
-        return false;
-    }
-    for (i = 0; i < 8; i++) {
-        stw_le_phys(&address_space_memory,
-                    page + (BRAIN_TOUCH_CAL_VA & 0xfff) + i * 2, cal[i]);
-    }
-    return true;
-}
-
-/*
- * Touch-area valid flag (u32 at VA 0xc07c71f0, between the Q8.8 block
- * and the affine), read by the PDD's penup-delay delegation as
- * "calibration rect is valid" (0xc07c2564 -> [0xc07c71f0]).  It is
- * set to 1 by the driver's own calibration-apply path
- * (0xc07c2788: after IsRectEmpty(&rect at 0xc07c71d8) comes back
- * false), which only runs during a calibration-UI session
- * (0xc07c2574 is not called anywhere in the normal boot; verified in
- * runs/tch33 by breakpoint).  If the flag stays 0, every release of a
- * tap outside a registered gesture zone arms the gesture session
- * (0xc07c5630 -> [0xc07c726c]+8 = 1, 0xc07c5838) and the session can
- * never be cleared again: every subsequent fetch ORs the pen-up bit
- * into its flags (0xc07c1f10) and the IST (0xc07c3d00) drops the
- * sample before GWES ever sees a pen-down, so only the first tap
- * after boot reaches GWES.  With the flag set, the release path
- * clears the session (0xc07c585c/0xc07c5864) and consecutive taps
- * keep flowing: verified in runs/tch33 where GWES dispatch
- * (0xc01786e4) received 0x10000003 (pen down) and 5 (pen up) at
- * (401, 242) for repeated taps.  On the real device the flag is
- * left set from the factory calibration; post it together with the
- * coefficients below.
- */
-#define BRAIN_TOUCH_AREA_VA   0xc07c71f0u
-#define BRAIN_TOUCH_AREA_PAGE 0xc07c7000u
-static bool brain_inject_touch_area_flag(BrainMachineState *bms)
-{
-    MemTxAttrs attrs = {};
-    hwaddr page = arm_cpu_get_phys_page_attrs_debug(
-        CPU(bms->cpu), BRAIN_TOUCH_AREA_PAGE, &attrs);
-
-    if (page == (hwaddr)-1) {
-        return false;
-    }
-    stl_le_phys(&address_space_memory,
-                page + (BRAIN_TOUCH_AREA_VA & 0xfff), 1);
-    return true;
-}
-
-#define BRAIN_TOUCH_AFF_VA   0xc07c71f4u
-#define BRAIN_TOUCH_AFF_PAGE 0xc07c7000u
-static bool brain_inject_touch_affine(BrainMachineState *bms)
-{
-    static const uint32_t aff[8] = {
-        200, 0, (uint32_t)-177600, 0, 120,
-        (uint32_t)-108720, 2073, 1,
-    };
-    MemTxAttrs attrs = {};
-    hwaddr page = arm_cpu_get_phys_page_attrs_debug(
-        CPU(bms->cpu), BRAIN_TOUCH_AFF_PAGE, &attrs);
-    int i;
-
-    if (page == (hwaddr)-1) {
-        return false;
-    }
-    for (i = 0; i < 8; i++) {
-        stl_le_phys(&address_space_memory,
-                    page + (BRAIN_TOUCH_AFF_VA & 0xfff) + i * 4, aff[i]);
-    }
-    return true;
-}
-
 static uint64_t brain_edna2_mb_read(void *opaque, hwaddr offset, unsigned size)
 {
     BrainMachineState *bms = opaque;
@@ -1840,84 +1683,6 @@ static uint64_t brain_edna2_mb_read(void *opaque, hwaddr offset, unsigned size)
                 (unsigned)mxs_trace_guest_pc());
     }
     return v;
-}
-
-/*
- * EDNA2 MCU status block (+0x30 .. +0x73 of the shared mailbox).
- *
- * The WinCE OAL power monitor (OALIoCtl... 0x8020981c, traced in
- * docs/BRAIN_DEV_STATUS.md round 10) runs:
- *
- *     memcmp(EDNA2_mailbox + 0x30, zero_reference, 0x44)
- *
- * every timer tick.  When the 68-byte MCU status block is ALL ZERO the
- * OAL believes the MCU is dead/absent and calls the power function
- * (0x80211ae8) on every tick with IRQ/FIQ masked.  That function runs
- * the SRAM clock-switch sequence (OCRAM 0x3000) which parks the CPU in
- * WFI until the next timer interrupt, so the boot thread is starved and
- * the system never finishes booting before the ~181 s APO powers it off
- * (boot stall at serial line 219, "OALInitCpuHclkClock_change:
- * CLK_H=198MHz!").
- *
- * On real hardware the EDNA2 MCU posts this status block (battery /
- * charger status records) right after reset, so it is never all zero.
- * Emulate that: seed the block with a small non-zero pattern so the OAL
- * takes the normal "MCU present" path (idle WFI, no power-function
- * storm).  The guest itself overwrites parts of the window (observed:
- * +0x30/+0x38/+0x54/+0x74 get zeroed), but any surviving non-zero word
- * keeps the memcmp from matching; the write path below re-seeds only if
- * the whole window somehow becomes zero again.
- *
- * Verified by experiment (2026-08-09): poking +0x30..+0x73 with 1s at
- * stall time stops the power-function storm -- the CPU leaves the SRAM
- * WFI loop (0x327c) and idles at the normal OAL WFI (0x80212284).
- */
-#define BRAIN_EDNA2_STATUS_OFF  (BRAIN_EDNA2_MAILBOX_OFF + 0x30)
-#define BRAIN_EDNA2_STATUS_REL  0x30
-#define BRAIN_EDNA2_STATUS_LEN  0x44
-
-static void brain_edna2_seed_status(BrainMachineState *bms)
-{
-    uint8_t pat[BRAIN_EDNA2_STATUS_LEN];
-    int i;
-
-    if (!bms->aid_edna2_status) {
-        return;
-    }
-    if (bms->aid_edna2_uninit) {
-        /*
-         * "Uninitialized" MCU status block (experimental fidelity aid).
-         *
-         * The WCEPRJ.EXE launcher (SJIS "\u3057\u3070\u3089\u304f\u304a\u5f85\u3061\u304f\u3060\u3055\u3044")
-         * decides whether it must show the "please wait" screen by calling
-         * 0x129c3c, which reads the EDNA2 MCU status block and treats
-         * the unit as *initialized* only when buf[0] == 1, or when
-         * buf[1] & 0x86 == 0.  The default all-ones seed makes buf[0]=1
-         * so the launcher skips the wait screen and goes straight to
-         * the "initialize?" dialog -- which is NOT what the broken real
-         * unit does (it hangs on "please wait").
-         *
-         * With this aid enabled we post buf[0]=0 and buf[1]=0x02, i.e.
-         * "not initialized", which makes 0x129c3c return 0 and the
-         * launcher show the wait screen exactly like the real unit.
-         * This is a hypothesis-driven aid: the exact byte pattern the
-         * real EDNA2 MCU reports on a failed/never-initialized unit is
-         * not yet captured from hardware.
-         */
-        memset(pat, 0, sizeof(pat));
-        stl_le_p(pat + 1, 0x02);   /* buf[1] |= 0x02  (bit1 of 0x86 mask) */
-    } else {
-        for (i = 0; i < (int)sizeof(pat); i += 4) {
-            stl_le_p(pat + i, 1);
-        }
-    }
-    address_space_write(&address_space_memory,
-                        MXS_DRAM_BASE + BRAIN_EDNA2_STATUS_OFF,
-                        MEMTXATTRS_UNSPECIFIED, pat, sizeof(pat));
-    if (mxs_trace_live || brain_mb_trace_live) {
-        fprintf(stderr, "[edna2-mb] MCU status block seeded (+0x30, %u bytes)\n",
-                (unsigned)sizeof(pat));
-    }
 }
 
 static void brain_edna2_mb_write(void *opaque, hwaddr offset, uint64_t value,
@@ -1937,95 +1702,6 @@ static void brain_edna2_mb_write(void *opaque, hwaddr offset, uint64_t value,
         brain_edna2_mcu_kick(bms);
     }
 
-    /*
-     * Keep the MCU status block non-zero: if a guest write zeroes the
-     * last non-zero word in the +0x30..+0x73 window, re-post the block
-     * (a real MCU would keep its status current as well).  Disabled in
-     * strict-HW mode: a real unit with a dead/absent MCU leaves the
-     * window zero, which is exactly the boot-stall condition we want to
-     * reproduce faithfully.
-     */
-    if (bms->aid_edna2_status &&
-        offset < BRAIN_EDNA2_STATUS_REL + BRAIN_EDNA2_STATUS_LEN &&
-        offset + size > BRAIN_EDNA2_STATUS_REL) {
-        const uint8_t *p = bms->edna2_mb + BRAIN_EDNA2_STATUS_REL;
-        bool any = false;
-        int i;
-
-        for (i = 0; i < BRAIN_EDNA2_STATUS_LEN; i++) {
-            if (p[i]) {
-                any = true;
-                break;
-            }
-        }
-        if (!any) {
-            brain_edna2_seed_status(bms);
-        }
-    }
-
-    /*
-     * EDNA2 MCU response emulation (experimental, wedge analysis).
-     *
-     * On the real Brain the EDNA2 MCU services the shared mailbox and
-     * acknowledges command/status writes.  In QEMU there is no MCU, so
-     * guest drivers that wait for an MCU response would stall forever.
-     * These handshakes are heuristic and not a faithful model of the
-     * EDNA2 protocol, so they are OFF in strict-HW mode.
-     */
-    if (bms->aid_edna2_resp) {
-        if (offset == 0x0e0 && size == 4 && value == 1) {
-            uint32_t zero = 0;
-
-            memcpy(bms->edna2_mb + 0x0e0, &zero, 4);
-            if (mxs_trace_live || brain_mb_trace_live) {
-                fprintf(stderr, "[edna2-mb] MCU resp: +0x0e0 cleared\n");
-            }
-        }
-        if (offset == 0x1e0 && size == 4) {
-            uint32_t ack = 1;
-
-            memcpy(bms->edna2_mb + 0x1e4, &ack, 4);
-            if (mxs_trace_live || brain_mb_trace_live) {
-                fprintf(stderr, "[edna2-mb] MCU resp: +0x1e4 ack=1\n");
-            }
-        }
-    }
-
-    /*
-     * Debug aid: if BRAIN_MBSTOP is set, halt the VM the moment any
-     * guest code writes the mailbox.  The mailbox is only reachable
-     * while a driver (udevice.exe) is active, so this freezes the VM in
-     * the middle of driver execution -- letting us dump the driver DLL
-     * code/data with the monitor before it gets swapped out again.
-     * Analysis-only; remove for release.
-     */
-    if (getenv("BRAIN_MBSTOP")) {
-        uint32_t pc = mxs_trace_guest_pc();
-
-        /*
-         * Only halt when a driver-DLL address (0xc0xxxxxx) writes the
-         * mailbox: that is the moment a driver is actively executing, so
-         * the VM freezes mid-driver and we can dump the driver DLL.
-         * Kernel/OAL writes (0x80xxxxxx) are ignored so boot can proceed
-         * to the suspend cascade without halting at every battery write.
-         *
-         * Idle-period writers are excluded so guest time keeps flowing
-         * and the ~181 s APO fires in reasonable wall time:
-         *   - battdrvr 0xc0660000-0xc0680000 (LRADC battery polling)
-         *   - edna2_powermgr 0xc07d0000-0xc07f0000 (APO activity pulses)
-         * The suspend-cascade actors that still halt:
-         *   - EDNA2 0xc088xxxx, display 0xc06dxxxx, mailbox-reset 0xc05fxxxx
-         */
-        if ((pc & 0xff000000) == 0xc0000000 &&
-            !(0xc0660000 <= pc && pc < 0xc0680000) &&
-            !(0xc07d0000 <= pc && pc < 0xc07f0000)) {
-            fprintf(stderr, "[edna2-mb] DRIVER wrote +0x%03x <- 0x%llx "
-                    "pc=0x%08x -- halting for driver dump\n",
-                    (unsigned)offset, (unsigned long long)value, pc);
-            qemu_system_vmstop_request_prepare();
-            qemu_system_vmstop_request(RUN_STATE_DEBUG);
-        }
-    }
 }
 
 static const MemoryRegionOps brain_edna2_mb_ops = {
@@ -2037,17 +1713,6 @@ static const MemoryRegionOps brain_edna2_mb_ops = {
         .max_access_size = 4,
     },
 };
-
-static void brain_edna2_raise_doorbell(void)
-{
-    uint32_t doorbell = 1;
-
-    address_space_write(&address_space_memory,
-                        MXS_DRAM_BASE + BRAIN_EDNA2_DOORBELL_OFF,
-                        MEMTXATTRS_UNSPECIFIED,
-                        (uint8_t *)&doorbell, sizeof(doorbell));
-}
-
 
 static void brain_cpu_reset(void *opaque)
 {
@@ -2063,21 +1728,12 @@ static void brain_cpu_reset(void *opaque)
     timer_del(bms->edna2_mcu_timer);
 
     /*
-     * The EDNA2 MCU is a separate, functional microcontroller on the
-     * Brain PCB that comes out of reset together with the application
-     * processor and immediately posts a mailbox doorbell (+0x3c) and a
-     * non-zero battery/charger status block (+0x30..+0x73).  This is
-     * real hardware behaviour (the MCU is alive even when the main OS is
-     * wedged -- SD/diag boot proves it), not a QEMU compensation, so it
-     * is always modelled.  Do not turn 'aid-edna2-status' on: that
-     * fake MCU-present injection makes the main OS boot incorrectly.
+     * Shared mailbox RAM is empty at reset.  The MCU posts command
+     * results when the guest rings the doorbell; it does not inject a
+     * fake "MCU present / DiagApp" status block into +0x30.
      */
     memset(bms->edna2_mb, 0, sizeof(bms->edna2_mb));
     bms->edna2_touchkey = 0;
-    if (bms->aid_edna2_status) {
-        brain_edna2_raise_doorbell();
-        brain_edna2_seed_status(bms);
-    }
 
     /*
      * VMCopy.dll touchkey block (real EDNA2 MCU posts it at boot):
@@ -2449,7 +2105,6 @@ static void brain_init(MachineState *machine)
     bms->lcdif = dev;
 
     /* debug UART is a PL011 */
-    /* debug UART is a PL011 */
     DeviceState *duart = pl011_create(MXS_DUART_BASE,
                     qdev_get_gpio_in(icoll, MXS_IRQ_DUART), serial_hd(0));
 
@@ -2746,10 +2401,6 @@ static void brain_set_strict_hw(Object *obj, bool value, Error **errp)
 
     bms->strict_hw = value;
     if (!value) {
-        /* Re-enable the QEMU-only guest aids.  Do not turn
-         * aid-edna2-status on: that spoof makes the guest fail to
-         * boot the normal main OS. */
-        bms->aid_edna2_resp = true;
         bms->aid_region4_remap = true;
         bms->aid_sd_launcher = true;
         bms->aid_ignore_bus_err = true;
@@ -2764,9 +2415,6 @@ static void brain_set_strict_hw(Object *obj, bool value, Error **errp)
     static void brain_set_aid_##pid(Object *obj, bool v, Error **errp)     \
     { BRAIN_MACHINE(obj)->field = v; }
 
-BRAIN_AID_ACCESSOR(edna2_status,  aid_edna2_status)
-BRAIN_AID_ACCESSOR(edna2_uninit,  aid_edna2_uninit)
-BRAIN_AID_ACCESSOR(edna2_resp,    aid_edna2_resp)
 BRAIN_AID_ACCESSOR(region4_remap, aid_region4_remap)
 BRAIN_AID_ACCESSOR(sd_launcher,   aid_sd_launcher)
 BRAIN_AID_ACCESSOR(ignore_bus_err,aid_ignore_bus_err)
@@ -2817,26 +2465,12 @@ static void brain_instance_init(Object *obj)
                                         brain_edna2_mcu_tick, bms);
 
     /*
-     * Strict-hardware fidelity is the DEFAULT: synthetic guest aids that
-     * paper over a real failure (Region-4 sector remap, EBOOT-equivalent
-     * SD auto-launch, heuristic EDNA2 MCU responses, bus-error
-     * suppression) are off, so the guest behaves exactly like the real
-     * Brain.  The EDNA2 mailbox doorbell/status seeding stays ON because
-     * it models a real, functional MCU (the MCU powers the keyboard,
-     * battery and touch-keys even when the main OS is wedged).  Each aid
-     * can be toggled through its object property; 'strict-hw=off' turns
-     * the four QEMU aids on at once for the historic lenient behaviour.
+     * Strict-hardware fidelity is the default: QEMU-only guest aids
+     * (Region-4 remap, SD auto-launch, bus-error suppression) are off.
+     * The EDNA2 mailbox is RAM plus the doorbell command protocol; it
+     * does not spoof a DiagApp / factory-selftest MCU status block.
      */
     bms->strict_hw = true;
-    /*
-     * aid-edna2-status / aid-edna2-uninit / aid-edna2-resp are OFF.
-     * Enabling them injects a fake EDNA2 MCU-present / handshake
-     * block.  The main OS then takes the DiagApp selftest path and
-     * does not boot the normal first-run UI.  Leave them off.
-     */
-    bms->aid_edna2_status = false;    /* QEMU-only injection, off by default */
-    bms->aid_edna2_uninit = false;    /* hypothesis aid, off by default */
-    bms->aid_edna2_resp = false;     /* heuristic, off by default */
     bms->aid_region4_remap = false;  /* QEMU-only sector remap */
     bms->aid_sd_launcher = false;    /* EBOOT-equivalent auto-boot */
     bms->aid_ignore_bus_err = false; /* report real bus aborts */
@@ -2871,21 +2505,6 @@ static void brain_instance_init(Object *obj)
     object_property_set_description(obj, "gpmi-nand-file",
         "Raw image backing the GPMI NAND media (needs gpmi-nand=true)");
 
-    brain_add_aid_prop(obj, "aid-edna2-status",
-                       brain_get_aid_edna2_status,
-                       brain_set_aid_edna2_status,
-                       "Do not enable: fake MCU-present status makes the "
-                       "main OS boot incorrectly");
-    brain_add_aid_prop(obj, "aid-edna2-uninit",
-                       brain_get_aid_edna2_uninit,
-                       brain_set_aid_edna2_uninit,
-                       "Do not enable: fake 'MCU not initialized' status "
-                       "makes the main OS boot incorrectly");
-    brain_add_aid_prop(obj, "aid-edna2-resp",
-                       brain_get_aid_edna2_resp,
-                       brain_set_aid_edna2_resp,
-                       "Do not enable: fake MCU handshakes make the "
-                       "main OS boot incorrectly");
     brain_add_aid_prop(obj, "aid-region4-remap",
                        brain_get_aid_region4_remap,
                        brain_set_aid_region4_remap,
