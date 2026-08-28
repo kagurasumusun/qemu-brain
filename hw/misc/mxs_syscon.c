@@ -382,12 +382,6 @@ static void mxs_syscon_write(void *opaque, hwaddr offset, uint64_t value,
     if (s->kind == MXS_KIND_POWER && idx == PWR_RESET) {
         /* HW_POWER_RESET: 0x3e77_0001 = power off, ..._0002 = reset */
         if ((val & 0xffff0000u) == 0x3e770000u) {
-            static int po_budget = 8;
-            if (po_budget > 0) {
-                po_budget--;
-                fprintf(stderr, "[brain] HW_POWER_RESET val=%08x\n",
-                        (uint32_t)val);
-            }
             if (val & 2) {
                 qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
             } else if (val & 1) {

@@ -28,7 +28,6 @@
 #include "qemu/host-utils.h"
 #include "hw/arm/mxs.h"
 #include "hw/misc/mxs_bank.h"
-#include "hw/misc/mxs_bank.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/irq.h"
 #include "migration/vmstate.h"
@@ -102,6 +101,18 @@ struct MXSTimrotState {
 
 OBJECT_DECLARE_SIMPLE_TYPE(MXSTimrotState, MXS_TIMROT)
 
+static bool brain_timtrace(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *e = getenv("BRAIN_TIMTRACE");
+
+        on = e && *e && *e != '0';
+    }
+    return on;
+}
+
 static unsigned mxs_timer_freq(uint32_t ctrl)
 {
     unsigned freq;
@@ -135,13 +146,7 @@ static unsigned mxs_timer_freq(uint32_t ctrl)
 static void mxs_timer_update_irq(MXSTimer *t)
 {
     bool level = (t->ctrl & TIMCTRL_IRQ) && (t->ctrl & TIMCTRL_IRQ_EN);
-    static int irq_budget = 40;
 
-    if (irq_budget > 0) {
-        fprintf(stderr, "timrot-irq: t%d level=%d ctrl=%04x irq_en=%d\n",
-                t->index, level, t->ctrl, !!(t->ctrl & TIMCTRL_IRQ_EN));
-        irq_budget--;
-    }
     qemu_set_irq(t->irq, level);
 }
 
@@ -245,19 +250,15 @@ static void mxs_timer_resched(MXSTimer *t)
                 delta = 1;
             }
         }
-        {
-            static int rs_budget = 400;
+        if (unlikely(brain_timtrace()) && t->index == 0) {
             int64_t dns = mxs_timer_ns(t, delta);
 
-            if (rs_budget > 0 && t->index == 0) {
-                fprintf(stderr,
-                        "timrot-resched: t%d cur=%08x match=%08x "
-                        "delta=%u ticks freq=%u dns=%lldms base_ns=%lld\n",
-                        t->index, cur, t->match, (unsigned)delta, t->freq,
-                        (long long)(dns / 1000000),
-                        (long long)t->base_ns);
-                rs_budget--;
-            }
+            fprintf(stderr,
+                    "timrot-resched: t%d cur=%08x match=%08x "
+                    "delta=%u ticks freq=%u dns=%lldms base_ns=%lld\n",
+                    t->index, cur, t->match, (unsigned)delta, t->freq,
+                    (long long)(dns / 1000000),
+                    (long long)t->base_ns);
         }
     } else {
         if (cur) {
@@ -273,34 +274,17 @@ static void mxs_timer_resched(MXSTimer *t)
     timer_mod_ns(t->qtimer, t->base_ns + mxs_timer_ns(t, delta));
 }
 
-static void mxs_timer_diag_clocks(void)
-{
-    fprintf(stderr,
-            "timrot-clocks: VIRTUAL=%lld REALTIME=%lld HOST=%lld\n",
-            (long long)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL),
-            (long long)qemu_clock_get_ns(QEMU_CLOCK_REALTIME),
-            (long long)qemu_clock_get_ns(QEMU_CLOCK_HOST));
-}
-
 static void mxs_timer_expire(void *opaque)
 {
     MXSTimer *t = opaque;
-    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-    int64_t wall = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-    static int64_t last_fire[4] = { -1, -1, -1, -1 };
-    static uint64_t nfire[4];
-    int64_t vdelta = last_fire[t->index] < 0 ? 0 : now - last_fire[t->index];
 
-    nfire[t->index]++;
-    if (getenv("BRAIN_TIMTRACE") && nfire[t->index] <= 40) {
+    if (unlikely(brain_timtrace())) {
+        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
         fprintf(stderr,
-                "timrot-expire: t%d #%llu vnow=%lld wall=%lld dy=%lldms "
-                "ctrl=%04x freq=%u match=%08x\n",
-                t->index, (unsigned long long)nfire[t->index],
-                (long long)now, (long long)wall,
-                (long long)(vdelta / 1000000), t->ctrl, t->freq, t->match);
+                "timrot-expire: t%d vnow=%lld ctrl=%04x freq=%u match=%08x\n",
+                t->index, (long long)now, t->ctrl, t->freq, t->match);
     }
-    last_fire[t->index] = now;
 
     brain_stat_inc((BrainStat)(BST_TIMROTn_EXPIRE0 + t->index));
     t->ctrl |= TIMCTRL_IRQ;
@@ -354,19 +338,7 @@ static uint64_t mxs_timrot_read(void *opaque, hwaddr offset, unsigned size)
             if (idx == TIMROT_TIMCTRL(i)) {
                 val = t->ctrl;
             } else if (idx == TIMROT_RUNNING(i)) {
-                static int run_budget = 60;
-
                 val = mxs_timer_count(t, now);
-                if (run_budget > 0 && i == 0) {
-                    mxs_timer_diag_clocks();
-                    fprintf(stderr,
-                            "timrot-run0: count=%08x wall=%lld vnow=%lld "
-                            "base_ns=%lld base=%08x freq=%u run=%d\n",
-                            val, (long long)qemu_clock_get_ns(QEMU_CLOCK_REALTIME),
-                            (long long)now, (long long)t->base_ns,
-                            t->base_count, t->freq, t->running);
-                    run_budget--;
-                }
             } else if (idx == TIMROT_FIXED(i)) {
                 val = t->fixed;
             } else if (idx == TIMROT_MATCH(i)) {
@@ -473,7 +445,7 @@ static void mxs_timrot_write(void *opaque, hwaddr offset, uint64_t value,
              * away (at 12 MHz, 24M ticks) is anomalous for the WinCE
              * dynamic tick and worth attributing to a guest PC.
              */
-            if (ndelta > 24000000 && getenv("BRAIN_TIMTRACE")) {
+            if (ndelta > 24000000 && unlikely(brain_timtrace())) {
                 fprintf(stderr,
                         "timrot-tmt: t%d match=%08x cur=%08x delta=%u (%dms) "
                         "ctrl=%04x pc=0x%08x\n",

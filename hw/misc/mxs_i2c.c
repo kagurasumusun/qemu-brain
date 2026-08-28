@@ -72,6 +72,18 @@ typedef struct MXSI2CState {
 #define TYPE_MXS_I2C_REAL "mxs-i2c-real"
 OBJECT_DECLARE_SIMPLE_TYPE(MXSI2CState, MXS_I2C_REAL)
 
+static bool brain_i2c_debug(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *e = brain_i2c_debug();
+
+        on = e && *e && *e != '0';
+    }
+    return on;
+}
+
 #define TYPE_MXS_I2C_ACK "mxs-i2c-ack-slave"
 typedef struct MXSAckSlave { I2CSlave parent_obj; } MXSAckSlave;
 DECLARE_INSTANCE_CHECKER(MXSAckSlave, MXS_ACK_SLAVE, TYPE_MXS_I2C_ACK)
@@ -144,7 +156,7 @@ static void mxs_i2c_kick(MXSI2CState *s)
          */
         if (is_read) {
             uint8_t addr = s->regs[0xa0 >> 4] >> 1;
-            if (getenv("BRAIN_I2C_DEBUG")) {
+            if (brain_i2c_debug()) {
                 fprintf(stderr, "[i2c-debug] %s START_RECV addr=0x%02x "
                         "count=%u pc=0x%08x\n", s->name, addr, count,
                         (unsigned)mxs_trace_guest_pc());
@@ -155,7 +167,7 @@ static void mxs_i2c_kick(MXSI2CState *s)
             }
             for (unsigned i = 0; i < count; i++) {
                 s->regs[0xa0 >> 4] = i2c_recv(s->bus);
-                if (getenv("BRAIN_I2C_DEBUG")) {
+                if (brain_i2c_debug()) {
                     fprintf(stderr, "[i2c-debug] %s RECV[%u] 0x%02x "
                             "pc=0x%08x\n", s->name, i,
                             (uint8_t)s->regs[0xa0 >> 4],
@@ -220,7 +232,7 @@ static void mxs_i2c_write(void *opaque, hwaddr off, uint64_t value, unsigned siz
 
     switch (idx) {
     case 0x00: {   /* CTRL0 */
-        if (getenv("BRAIN_I2C_DEBUG")) {
+        if (brain_i2c_debug()) {
             fprintf(stderr, "[i2c-debug] %s CTRL0 W 0x%08x (was 0x%08x) "
                     "pc=0x%08x\n", s->name, val, old,
                     (unsigned)mxs_trace_guest_pc());
@@ -232,7 +244,7 @@ static void mxs_i2c_write(void *opaque, hwaddr off, uint64_t value, unsigned siz
         break;
     }
     case 0xa0 >> 4: { /* DATA (PIO byte) */
-        if (getenv("BRAIN_I2C_DEBUG")) {
+        if (brain_i2c_debug()) {
             fprintf(stderr, "[i2c-debug] %s DATA W 0x%02x (run=%d start=%d "
                     "dir=%d count=%u pc=0x%08x)\n", s->name,
                     (uint8_t)val, !!(s->regs[0] & CTRL0_RUN),
@@ -248,7 +260,7 @@ static void mxs_i2c_write(void *opaque, hwaddr off, uint64_t value, unsigned siz
              * leak into the 7-bit address (observed: probe byte 0x34
              * with 0x100 leftover produced addr 0x9a). */
             uint8_t addr = ((uint8_t)val) >> 1;
-            if (getenv("BRAIN_I2C_DEBUG")) {
+            if (brain_i2c_debug()) {
                 fprintf(stderr, "[i2c-debug] %s START_SEND addr=0x%02x "
                         "pc=0x%08x\n", s->name, addr,
                         (unsigned)mxs_trace_guest_pc());
@@ -270,7 +282,7 @@ static void mxs_i2c_write(void *opaque, hwaddr off, uint64_t value, unsigned siz
             }
         } else if (s->regs[0] & CTRL0_RUN) {
             /* continuation byte of a write xfer */
-            if (getenv("BRAIN_I2C_DEBUG")) {
+            if (brain_i2c_debug()) {
                 fprintf(stderr, "[i2c-debug] %s SEND 0x%02x pc=0x%08x\n",
                         s->name, (uint8_t)val,
                         (unsigned)mxs_trace_guest_pc());
