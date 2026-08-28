@@ -156,7 +156,6 @@ typedef struct BrainMachineState {
     bool aid_edna2_status;
     bool aid_edna2_uninit;
     bool aid_edna2_resp;
-    bool touch_cal_posted;
     bool aid_region4_remap;
     bool aid_sd_launcher;
     bool aid_ignore_bus_err;
@@ -1529,6 +1528,9 @@ static bool mxs_rom_try_sd(BrainMachineState *bms, SBRun *run)
 
 static void brain_edna2_mcu_latch(BrainMachineState *bms);
 static void brain_edna2_mcu_execute(BrainMachineState *bms);
+static bool brain_inject_touch_cal(BrainMachineState *bms);
+static bool brain_inject_touch_area_flag(BrainMachineState *bms);
+static bool brain_inject_touch_affine(BrainMachineState *bms);
 
 static void brain_edna2_mcu_tick(void *opaque)
 {
@@ -1663,6 +1665,14 @@ static void brain_edna2_mcu_execute(BrainMachineState *bms)
          */
         stl_le_p(bms->edna2_mb + BRAIN_EDNA2_MCU_TOUCHKEY_OFF,
                  0x00000010u | bms->edna2_touchkey);
+        /*
+         * Factory CalibrationData lives in the PDD after the MCU
+         * finishes a touchkey calibration command, not on every
+         * mailbox poll.  Post it here, once the command completes.
+         */
+        brain_inject_touch_affine(bms);
+        brain_inject_touch_cal(bms);
+        brain_inject_touch_area_flag(bms);
         break;
     default:
         break;
@@ -1821,18 +1831,6 @@ static bool brain_inject_touch_affine(BrainMachineState *bms)
 static uint64_t brain_edna2_mb_read(void *opaque, hwaddr offset, unsigned size)
 {
     BrainMachineState *bms = opaque;
-
-    /*
-     * Post calibration once.  Repeating MMU walks + stores on every
-     * 100 ms mailbox poll stalls the guest for no extra benefit after
-     * the first successful write.
-     */
-    if (!bms->touch_cal_posted) {
-        brain_inject_touch_affine(bms);
-        brain_inject_touch_cal(bms);
-        brain_inject_touch_area_flag(bms);
-        bms->touch_cal_posted = true;
-    }
     uint64_t v = 0;
 
     memcpy(&v, bms->edna2_mb + offset, size);
@@ -2062,7 +2060,6 @@ static void brain_cpu_reset(void *opaque)
 
     bms->edna2_mcu_busy = false;
     bms->edna2_mcu_latched = false;
-    bms->touch_cal_posted = false;
     timer_del(bms->edna2_mcu_timer);
 
     /*

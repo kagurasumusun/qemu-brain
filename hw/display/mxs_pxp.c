@@ -246,60 +246,74 @@ static uint32_t pxp_pack(unsigned fmt, uint32_t argb)
     }
 }
 
-static uint32_t pxp_load(hwaddr base, unsigned stride, int x, int y,
-                         unsigned fmt)
+static uint32_t pxp_load_mem(const uint8_t *img, unsigned stride, int x, int y,
+                             unsigned fmt, int w, int h)
 {
     int bytes = pxp_pixel_bytes(fmt);
-    hwaddr a = base + (hwaddr)y * stride + (hwaddr)x * bytes;
-    uint8_t buf[4] = { 0 };
+    const uint8_t *p;
     uint32_t raw = 0;
 
-    if (!bytes) {
+    if (!bytes || !img || x < 0 || y < 0 || x >= w || y >= h) {
         return 0xff000000u;
     }
-    address_space_read(&address_space_memory, a, MEMTXATTRS_UNSPECIFIED,
-                       buf, bytes);
+    p = img + (size_t)y * stride + (size_t)x * bytes;
     switch (bytes) {
     case 2:
-        raw = lduw_le_p(buf);
+        raw = lduw_le_p(p);
         break;
     case 3:
-        raw = buf[0] | (buf[1] << 8) | (buf[2] << 16);
+        raw = p[0] | (p[1] << 8) | (p[2] << 16);
         break;
     default:
-        raw = ldl_le_p(buf);
+        raw = ldl_le_p(p);
         break;
     }
     return pxp_unpack(fmt, raw);
 }
 
-static void pxp_store(hwaddr base, unsigned stride, int x, int y,
-                      unsigned fmt, uint32_t argb)
+static void pxp_store_mem(uint8_t *img, unsigned stride, int x, int y,
+                          unsigned fmt, uint32_t argb, int w, int h)
 {
     int bytes = pxp_pixel_bytes(fmt);
-    hwaddr a = base + (hwaddr)y * stride + (hwaddr)x * bytes;
     uint32_t raw;
-    uint8_t buf[4];
+    uint8_t *p;
 
-    if (!bytes) {
+    if (!bytes || !img || x < 0 || y < 0 || x >= w || y >= h) {
         return;
     }
     raw = pxp_pack(fmt, argb);
+    p = img + (size_t)y * stride + (size_t)x * bytes;
     switch (bytes) {
     case 2:
-        stw_le_p(buf, raw);
+        stw_le_p(p, raw);
         break;
     case 3:
-        buf[0] = raw & 0xff;
-        buf[1] = (raw >> 8) & 0xff;
-        buf[2] = (raw >> 16) & 0xff;
+        p[0] = raw & 0xff;
+        p[1] = (raw >> 8) & 0xff;
+        p[2] = (raw >> 16) & 0xff;
         break;
     default:
-        stl_le_p(buf, raw);
+        stl_le_p(p, raw);
         break;
     }
-    address_space_write(&address_space_memory, a, MEMTXATTRS_UNSPECIFIED,
-                        buf, bytes);
+}
+
+#define PXP_MAX_SURFACE  (16u * 1024u * 1024u)
+
+static uint8_t *pxp_fetch(hwaddr base, size_t bytes)
+{
+    uint8_t *buf;
+
+    if (!base || !bytes || bytes > PXP_MAX_SURFACE) {
+        return NULL;
+    }
+    buf = g_try_malloc(bytes);
+    if (!buf) {
+        return NULL;
+    }
+    address_space_read(&address_space_memory, base, MEMTXATTRS_UNSPECIFIED,
+                       buf, bytes);
+    return buf;
 }
 
 /* ------------------------------------------------------------------ */
@@ -373,7 +387,8 @@ static uint32_t pxp_blend(uint32_t dst, uint32_t src, unsigned alpha)
 /* the blitter                                                         */
 /* ------------------------------------------------------------------ */
 
-static void pxp_do_overlay(MXSPxpState *s, const PxpGeom *g, int n)
+static void pxp_do_overlay(MXSPxpState *s, const PxpGeom *g, uint8_t *out,
+                           int n)
 {
     uint32_t param = s->regs[PXP_OLPARAM(n)];
     uint32_t size = s->regs[PXP_OLSIZE(n)];
@@ -389,12 +404,17 @@ static void pxp_do_overlay(MXSPxpState *s, const PxpGeom *g, int n)
     int w = ((size >> 8) & 0xff) * 8;
     int h = (size & 0xff) * 8;
     unsigned stride;
+    g_autofree uint8_t *ol = NULL;
     int x, y;
 
-    if (!(param & OLPARAM_ENABLE) || !base || w <= 0 || h <= 0) {
+    if (!(param & OLPARAM_ENABLE) || !base || w <= 0 || h <= 0 || !out) {
         return;
     }
     stride = w * pxp_pixel_bytes(fmt);
+    ol = pxp_fetch(base, (size_t)h * stride);
+    if (!ol) {
+        return;
+    }
 
     for (y = 0; y < h; y++) {
         for (x = 0; x < w; x++) {
@@ -408,11 +428,11 @@ static void pxp_do_overlay(MXSPxpState *s, const PxpGeom *g, int n)
             if (!pxp_map_out(g, cx, cy, &px, &py)) {
                 continue;
             }
-            src = pxp_load(base, stride, x, y, fmt);
+            src = pxp_load_mem(ol, stride, x, y, fmt, w, h);
             if (ckey && cklow <= ckhigh) {
                 uint32_t rgb = src & 0xffffff;
                 if (rgb >= cklow && rgb <= ckhigh) {
-                    continue;   /* transparent */
+                    continue;
                 }
             }
             switch (actl) {
@@ -428,9 +448,10 @@ static void pxp_do_overlay(MXSPxpState *s, const PxpGeom *g, int n)
                 alpha = (src >> 24) & 0xff;
                 break;
             }
-            dst = pxp_load(g->out_base, g->out_stride, px, py, g->out_fmt);
-            pxp_store(g->out_base, g->out_stride, px, py, g->out_fmt,
-                      pxp_blend(dst, src, alpha));
+            dst = pxp_load_mem(out, g->out_stride, px, py, g->out_fmt,
+                               g->phys_w, g->phys_h);
+            pxp_store_mem(out, g->out_stride, px, py, g->out_fmt,
+                          pxp_blend(dst, src, alpha), g->phys_w, g->phys_h);
         }
     }
 }
@@ -503,41 +524,58 @@ static void pxp_blit(MXSPxpState *s)
         yscale = 0x1000;
     }
 
-    if (s0base && dstw > 0 && dsth > 0) {
-        s0stride = s0w * pxp_pixel_bytes(s0fmt);
+    {
+        size_t out_bytes = (size_t)g.phys_h * g.out_stride;
+        g_autofree uint8_t *out = pxp_fetch(g.out_base, out_bytes);
+        g_autofree uint8_t *s0 = NULL;
 
-        for (y = 0; y < dsth; y++) {
-            int sy = srcy + (int)(((uint64_t)y * yscale) >> 12);
+        if (!out) {
+            return;
+        }
 
-            if (sy >= s0h) {
-                sy = s0h - 1;
-            }
-            for (x = 0; x < dstw; x++) {
-                int sx = srcx + (int)(((uint64_t)x * xscale) >> 12);
-                int cx = dstx + x, cy = dsty + y, px, py;
-                uint32_t pix;
+        if (s0base && dstw > 0 && dsth > 0) {
+            s0stride = s0w * pxp_pixel_bytes(s0fmt);
+            s0 = pxp_fetch(s0base, (size_t)s0h * s0stride);
+        }
 
-                if (sx >= s0w) {
-                    sx = s0w - 1;
+        if (s0) {
+            for (y = 0; y < dsth; y++) {
+                int sy = srcy + (int)(((uint64_t)y * yscale) >> 12);
+
+                if (sy >= s0h) {
+                    sy = s0h - 1;
                 }
-                if (cx >= g.canvas_w || cy >= g.canvas_h) {
-                    continue;
+                for (x = 0; x < dstw; x++) {
+                    int sx = srcx + (int)(((uint64_t)x * xscale) >> 12);
+                    int cx = dstx + x, cy = dsty + y, px, py;
+                    uint32_t pix;
+
+                    if (sx >= s0w) {
+                        sx = s0w - 1;
+                    }
+                    if (cx >= g.canvas_w || cy >= g.canvas_h) {
+                        continue;
+                    }
+                    if (!pxp_map_out(&g, cx, cy, &px, &py)) {
+                        continue;
+                    }
+                    pix = pxp_load_mem(s0, s0stride, sx, sy, s0fmt, s0w, s0h);
+                    if (ctrl & CTRL_ALPHA_OUTPUT) {
+                        pix = (pix & 0xffffff) |
+                              ((outsize & 0xff000000u));
+                    }
+                    pxp_store_mem(out, g.out_stride, px, py, g.out_fmt, pix,
+                                  g.phys_w, g.phys_h);
                 }
-                if (!pxp_map_out(&g, cx, cy, &px, &py)) {
-                    continue;
-                }
-                pix = pxp_load(s0base, s0stride, sx, sy, s0fmt);
-                if (ctrl & CTRL_ALPHA_OUTPUT) {
-                    pix = (pix & 0xffffff) |
-                          ((outsize & 0xff000000u));
-                }
-                pxp_store(g.out_base, g.out_stride, px, py, g.out_fmt, pix);
             }
         }
-    }
 
-    for (n = 0; n < PXP_NUM_OL; n++) {
-        pxp_do_overlay(s, &g, n);
+        for (n = 0; n < PXP_NUM_OL; n++) {
+            pxp_do_overlay(s, &g, out, n);
+        }
+
+        address_space_write(&address_space_memory, g.out_base,
+                            MEMTXATTRS_UNSPECIFIED, out, out_bytes);
     }
 }
 

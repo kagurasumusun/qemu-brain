@@ -149,22 +149,14 @@ static void mxs_lcdif_latch_frame(MXSLcdifState *s)
     if (!(s->regs[LCDIF_CTRL] & CTRL_MASTER) || !base) {
         return;
     }
-    if (w < 16 || h < 16 || w > 4096 || h > 4096) {
-        return;         /* a command word, not a picture */
-    }
-
     /*
-     * MPU/DOTCLK command sequences and dirty-rect blits reuse LCDIF with
-     * a small TRANSFER_COUNT (often 16x16 or a strip).  Replacing the
-     * latched full-panel descriptor with those would resize the QEMU
-     * console to a sliver -- the "only part of the screen" / "flash on
-     * touch" bugs.  Keep the last full-size geometry; still accept a
-     * new buffer address of the same (or larger) size.
+     * MPU interface reuses the same registers to send panel command
+     * words (TRANSFER_COUNT 1x1).  Those are not a scanout.  Only a
+     * bus-master transfer large enough to be a picture updates the
+     * console descriptor.  Silicon still completes the small transfer
+     * (RUN self-clears); we just do not treat it as a new framebuffer.
      */
-    if (s->fb_width && s->fb_height &&
-        (w * h) < (s->fb_width * s->fb_height) / 2) {
-        s->fb_addr = base;
-        s->invalidate = 1;
+    if (w < 64 || h < 64 || w > 4096 || h > 4096) {
         return;
     }
 
@@ -204,27 +196,13 @@ static void mxs_lcdif_vsync_tick(void *opaque)
         }
     }
     /*
-     * Keep refreshing the SDL surface so the user sees the latest DRAM
-     * contents.  This makes a big difference for the SHARP Brain WinCE
-     * splash, which writes the framebuffer once at the end of its
-     * init sequence and never again; the guest relies on the panel
-     * to keep scanning out the same pixels.
-     */
-    /*
-     * Refresh the SDL surface from DRAM.  Doing this every vsync while
-     * the guest is idle is expensive (full FB copy) and makes input
-     * feel stalled; 15 Hz is enough to catch splash/desktop writes
-     * that never re-kick LCDIF.
+     * The panel keeps scanning CUR_BUF.  QEMU's GUI already calls
+     * gfx_update on its own refresh; mark dirty so that path copies
+     * DRAM.  Do not blit from the vsync timer — that doubled the
+     * copy cost and flashed the window on every IRQ.
      */
     if (s->con && s->fb_addr) {
-        static int refresh_div;
-        int hz = s->refresh_hz ? s->refresh_hz : 60;
-        int every = hz >= 30 ? hz / 15 : 1;
-
-        if (++refresh_div >= every || s->invalidate) {
-            refresh_div = 0;
-            dpy_gfx_update_full(s->con);
-        }
+        s->invalidate = 1;
     }
     timer_mod(s->vsync, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
               NANOSECONDS_PER_SECOND / (s->refresh_hz ? s->refresh_hz : 60));
@@ -392,10 +370,13 @@ static void mxs_lcdif_update_display(void *opaque)
     g_autofree uint8_t *line = NULL;
     uint32_t *dest;
     int src_stride;
-    bool swap_xy = (s->rotate == 90 || s->rotate == 270);
+    uint32_t rotate = s->rotate;
+    bool swap_xy = (rotate == 90 || rotate == 270);
 
     if (!s->fb_addr) {
-        /* the guest has not scanned a picture out of memory yet */
+        return;
+    }
+    if (!s->invalidate) {
         return;
     }
 
@@ -574,14 +555,12 @@ static void mxs_lcdif_write(void *opaque, hwaddr offset, uint64_t value,
          */
         if (s->con && (s->regs[LCDIF_CTRL] & CTRL_MASTER)) {
             mxs_lcdif_latch_frame(s);
-            dpy_gfx_update_full(s->con);
         }
         break;
     case LCDIF_CUR_BUF:
         s->regs[idx] = val;
         if (s->con && (s->regs[LCDIF_CTRL] & CTRL_MASTER)) {
             mxs_lcdif_latch_frame(s);
-            dpy_gfx_update_full(s->con);
         }
         break;
     default:
