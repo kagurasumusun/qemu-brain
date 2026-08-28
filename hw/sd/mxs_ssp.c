@@ -105,6 +105,10 @@
 #define STATUS_RESP_ERR         (1u << 15)
 #define STATUS_RESP_TIMEOUT     (1u << 14)
 #define STATUS_DATA_CRC_ERR     (1u << 13)
+#ifdef STATUS_TIMEOUT
+/* winnt.h (MinGW) defines NTSTATUS STATUS_TIMEOUT */
+#undef STATUS_TIMEOUT
+#endif
 #define STATUS_TIMEOUT          (1u << 12)
 #define STATUS_RECV_TIMEOUT     (1u << 11)
 #define STATUS_FIFO_OVRFLW      (1u << 9)
