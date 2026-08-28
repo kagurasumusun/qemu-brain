@@ -1520,6 +1520,9 @@ static bool mxs_rom_try_sd(BrainMachineState *bms, SBRun *run)
 
 static void brain_edna2_mcu_latch(BrainMachineState *bms);
 static void brain_edna2_mcu_execute(BrainMachineState *bms);
+static bool brain_inject_touch_cal(BrainMachineState *bms);
+static bool brain_inject_touch_area_flag(BrainMachineState *bms);
+static bool brain_inject_touch_affine(BrainMachineState *bms);
 
 static void brain_edna2_mcu_tick(void *opaque)
 {
@@ -1671,6 +1674,68 @@ static void brain_edna2_mcu_kick(BrainMachineState *bms)
  * on.  The backing store is copied from / to the DRAM page so guest
  * behaviour is unchanged.  Release builds should drop the overlay.
  */
+#define BRAIN_TOUCH_CAL_VA   0xc07c71c8u
+#define BRAIN_TOUCH_CAL_PAGE 0xc07c7000u
+#define BRAIN_TOUCH_AREA_VA  0xc07c71f0u
+#define BRAIN_TOUCH_AREA_PAGE 0xc07c7000u
+#define BRAIN_TOUCH_AFF_VA   0xc07c71f4u
+#define BRAIN_TOUCH_AFF_PAGE 0xc07c7000u
+
+static bool brain_inject_touch_cal(BrainMachineState *bms)
+{
+    static const uint16_t cal[8] = {
+        0x0063, 0x0100, 0xfea9, 0x003a, 0x0100, 0xff34, 0x0000, 0xffff,
+    };
+    MemTxAttrs attrs = {};
+    hwaddr page = arm_cpu_get_phys_page_attrs_debug(
+        CPU(bms->cpu), BRAIN_TOUCH_CAL_PAGE, &attrs);
+    int i;
+
+    if (page == (hwaddr)-1) {
+        return false;
+    }
+    for (i = 0; i < 8; i++) {
+        stw_le_phys(&address_space_memory,
+                    page + (BRAIN_TOUCH_CAL_VA & 0xfff) + i * 2, cal[i]);
+    }
+    return true;
+}
+
+static bool brain_inject_touch_area_flag(BrainMachineState *bms)
+{
+    MemTxAttrs attrs = {};
+    hwaddr page = arm_cpu_get_phys_page_attrs_debug(
+        CPU(bms->cpu), BRAIN_TOUCH_AREA_PAGE, &attrs);
+
+    if (page == (hwaddr)-1) {
+        return false;
+    }
+    stl_le_phys(&address_space_memory,
+                page + (BRAIN_TOUCH_AREA_VA & 0xfff), 1);
+    return true;
+}
+
+static bool brain_inject_touch_affine(BrainMachineState *bms)
+{
+    static const uint32_t aff[8] = {
+        200, 0, (uint32_t)-177600, 0, 120,
+        (uint32_t)-108720, 2073, 1,
+    };
+    MemTxAttrs attrs = {};
+    hwaddr page = arm_cpu_get_phys_page_attrs_debug(
+        CPU(bms->cpu), BRAIN_TOUCH_AFF_PAGE, &attrs);
+    int i;
+
+    if (page == (hwaddr)-1) {
+        return false;
+    }
+    for (i = 0; i < 8; i++) {
+        stl_le_phys(&address_space_memory,
+                    page + (BRAIN_TOUCH_AFF_VA & 0xfff) + i * 4, aff[i]);
+    }
+    return true;
+}
+
 static uint64_t brain_edna2_mb_read(void *opaque, hwaddr offset, unsigned size)
 {
     BrainMachineState *bms = opaque;

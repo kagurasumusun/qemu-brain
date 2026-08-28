@@ -431,10 +431,11 @@ void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
      * the comparator that flags a touch is independent of whether the
      * CPU currently has the interrupt unmasked.
      */
-    if (s->regs[LRADC_CTRL0] & CTRL0_TOUCH_DETECT_ENABLE) {
-        s->regs[LRADC_CTRL1] |= CTRL1_TOUCH_DETECT_IRQ;
-        mxs_lradc_update_irq(s);
-    }
+    s->regs[LRADC_CTRL1] |= CTRL1_TOUCH_DETECT_IRQ;
+    /* Drop then raise so ICOLL sees a new edge even if the previous
+     * tap's raw bit was still set. */
+    qemu_set_irq(s->irq_touch, 0);
+    mxs_lradc_update_irq(s);
     qemu_irq_pulse(s->panel_wake);
 }
 

@@ -410,12 +410,25 @@ static void mxs_lcdif_update_display(void *opaque)
     rotate = mxs_lcdif_view_rotate(s, src_w, src_h);
     mxs_lcdif_out_size(s, src_w, src_h, &out_w, &out_h);
 
-    if (out_w != s->cols || out_h != s->rows) {
-        s->cols = out_w;
-        s->rows = out_h;
-        qemu_console_resize(s->con, out_w, out_h);
-        surface = qemu_console_surface(s->con);
-        s->invalidate = 1;
+    /*
+     * Never shrink the window on a menu/dialog TRANSFER_COUNT.  That
+     * clipped the right edge and made the screen jump smaller on every
+     * UI transition.  Grow to fit the frame, but keep at least the
+     * board panel size.
+     */
+    {
+        int pw, ph, need_w, need_h;
+
+        mxs_lcdif_out_size(s, s->default_width, s->default_height, &pw, &ph);
+        need_w = MAX(out_w, MAX(s->cols, pw));
+        need_h = MAX(out_h, MAX(s->rows, ph));
+        if (need_w != s->cols || need_h != s->rows) {
+            s->cols = need_w;
+            s->rows = need_h;
+            qemu_console_resize(s->con, need_w, need_h);
+            surface = qemu_console_surface(s->con);
+            s->invalidate = 1;
+        }
     }
     if (!surface || surface_bits_per_pixel(surface) != 32) {
         return;
@@ -431,6 +444,11 @@ static void mxs_lcdif_update_display(void *opaque)
     fb = g_malloc(fb_bytes);
     address_space_read(&address_space_memory, base, MEMTXATTRS_UNSPECIFIED,
                        fb, fb_bytes);
+
+    /* Clear the (possibly larger) console so a smaller frame does not
+     * leave stale pixels around the edges. */
+    memset(surface_data(surface), 0,
+           (size_t)surface_stride(surface) * surface_height(surface));
 
     /*
      * PW-SH6 default: 32 bpp 480x854 portrait, console rotate 270.
