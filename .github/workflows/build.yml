@@ -161,18 +161,25 @@ jobs:
       - name: Configure QEMU
         shell: msys2 {0}
         run: |
-          # Real gcc.exe only. ccache wrappers make gcc look for cc1 under
-          # /mingw64/lib/ccache and CreateProcess fails on Windows.
+          # Meson/ninja for subprojects (libfdt) invoke the bare name "cc".
+          # /usr/bin/cc is MSYS gcc; with -m64 it looks for cc1 in the wrong
+          # tree and CreateProcess fails.  Point cc at MinGW gcc.exe.
           export PATH="/mingw64/bin:/usr/bin"
+          export CCACHE_DISABLE=1
+          export CCACHE_PATH=
+          rm -f /mingw64/lib/ccache/bin/cc /mingw64/lib/ccache/bin/gcc \
+                /mingw64/lib/ccache/bin/cc.exe /mingw64/lib/ccache/bin/gcc.exe
+          ln -sf gcc.exe /mingw64/bin/cc.exe
+          ln -sf gcc.exe /mingw64/bin/cc
+          ln -sf g++.exe /mingw64/bin/c++.exe
           export CC=/mingw64/bin/gcc.exe
           export CXX=/mingw64/bin/g++.exe
-          export CCACHE_DISABLE=1
           hash -r
-          which gcc
-          gcc -print-prog-name=cc1
+          which gcc; which cc; gcc -print-prog-name=cc1
           ./configure \
-            --cc="$CC" \
-            --cxx="$CXX" \
+            --cc=/mingw64/bin/gcc.exe \
+            --cxx=/mingw64/bin/g++.exe \
+            --host-cc=/mingw64/bin/gcc.exe \
             --target-list=arm-softmmu \
             --enable-sdl \
             --enable-sdl-image \
@@ -189,14 +196,18 @@ jobs:
             --enable-lzo \
             --enable-snappy \
             --disable-docs
+          python3 -c "from pathlib import Path; p=Path('build/build.ninja'); t=p.read_text().replace(chr(34)+'cc'+chr(34), chr(34)+'/mingw64/bin/gcc.exe'+chr(34)); p.write_text(t)"
 
       - name: Build qemu-system-arm
         shell: msys2 {0}
         run: |
           export PATH="/mingw64/bin:/usr/bin"
+          export CCACHE_DISABLE=1
+          ln -sf gcc.exe /mingw64/bin/cc.exe
+          ln -sf gcc.exe /mingw64/bin/cc
           export CC=/mingw64/bin/gcc.exe
           export CXX=/mingw64/bin/g++.exe
-          export CCACHE_DISABLE=1
+          python3 -c "from pathlib import Path; p=Path('build/build.ninja'); t=p.read_text().replace(chr(34)+'cc'+chr(34), chr(34)+'/mingw64/bin/gcc.exe'+chr(34)); p.write_text(t)"
           ninja -C build qemu-system-arm.exe
 
       - name: Package Windows Binary and DLLs
