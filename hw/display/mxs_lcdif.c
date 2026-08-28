@@ -111,6 +111,31 @@ OBJECT_DECLARE_SIMPLE_TYPE(MXSLcdifState, MXS_LCDIF)
 
 static int mxs_lcdif_bpp(MXSLcdifState *s);
 
+/*
+ * Board lcd-rotate orients a portrait panel in the QEMU window.
+ * If the guest already programs a landscape TRANSFER_COUNT (width >=
+ * height), the framebuffer is already the picture the user should see:
+ * rotating it again makes an 480-wide window and clips the right side.
+ */
+static uint32_t mxs_lcdif_view_rotate(const MXSLcdifState *s, int src_w,
+                                      int src_h)
+{
+    if (src_w >= src_h) {
+        return 0;
+    }
+    return s->rotate;
+}
+
+static void mxs_lcdif_out_size(const MXSLcdifState *s, int src_w, int src_h,
+                               int *out_w, int *out_h)
+{
+    uint32_t rotate = mxs_lcdif_view_rotate(s, src_w, src_h);
+    bool swap_xy = (rotate == 90 || rotate == 270);
+
+    *out_w = swap_xy ? src_h : src_w;
+    *out_h = swap_xy ? src_w : src_h;
+}
+
 static void mxs_lcdif_update_irq(MXSLcdifState *s)
 {
     uint32_t c1 = s->regs[LCDIF_CTRL1];
@@ -368,8 +393,8 @@ static void mxs_lcdif_update_display(void *opaque)
     uint32_t *dest;
     int src_stride;
     size_t fb_bytes;
-    uint32_t rotate = s->rotate;
-    bool swap_xy = (rotate == 90 || rotate == 270);
+    uint32_t rotate;
+    int surf_w, surf_h;
 
     if (!s->fb_addr) {
         return;
@@ -382,9 +407,8 @@ static void mxs_lcdif_update_display(void *opaque)
     src_h = s->fb_height;
     bpp = s->fb_bpp;
     base = s->fb_addr;
-
-    out_w = swap_xy ? src_h : src_w;
-    out_h = swap_xy ? src_w : src_h;
+    rotate = mxs_lcdif_view_rotate(s, src_w, src_h);
+    mxs_lcdif_out_size(s, src_w, src_h, &out_w, &out_h);
 
     if (out_w != s->cols || out_h != s->rows) {
         s->cols = out_w;
@@ -394,6 +418,11 @@ static void mxs_lcdif_update_display(void *opaque)
         s->invalidate = 1;
     }
     if (!surface || surface_bits_per_pixel(surface) != 32) {
+        return;
+    }
+    surf_w = surface_width(surface);
+    surf_h = surface_height(surface);
+    if (surf_w < 1 || surf_h < 1) {
         return;
     }
 
@@ -416,9 +445,16 @@ static void mxs_lcdif_update_display(void *opaque)
             uint32_t *src = (uint32_t *)(fb + (size_t)y * src_stride);
             int dx = y;
 
+            if (dx < 0 || dx >= surf_w) {
+                continue;
+            }
             for (x = 0; x < src_w; x++) {
                 uint32_t v = le32_to_cpu(src[x]);
                 int dy = src_w - 1 - x;
+
+                if (dy < 0 || dy >= surf_h) {
+                    continue;
+                }
                 dest = (uint32_t *)(surf + (size_t)dy * dstride);
                 dest[dx] = rgb_to_pixel32((v >> 16) & 0xff, (v >> 8) & 0xff,
                                           v & 0xff);
@@ -468,6 +504,9 @@ static void mxs_lcdif_update_display(void *opaque)
                     dx = x;
                     dy = y;
                     break;
+                }
+                if (dx < 0 || dy < 0 || dx >= surf_w || dy >= surf_h) {
+                    continue;
                 }
                 dest = (uint32_t *)(surf + (size_t)dy * dstride);
                 dest[dx] = pix;

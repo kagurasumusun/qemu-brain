@@ -121,6 +121,83 @@ static bool brain_kbd_debug(void)
 static void brain_kbd_touchkey_update(BrainKbdState *s, QKeyCode qcode,
                                       bool down);
 
+/*
+ * PC QKeyCode -> the same Set-1 byte the firmware table stores.
+ * Do not go through qemu_input_map_qcode_to_atset1 alone: that table
+ * omits some aliases (keypad, JP keys) so a PC key would not match.
+ */
+static uint8_t brain_qcode_to_set1(QKeyCode q)
+{
+    switch (q) {
+    case Q_KEY_CODE_ESC:          return 0x01;
+    case Q_KEY_CODE_1: case Q_KEY_CODE_KP_1: return 0x02;
+    case Q_KEY_CODE_2: case Q_KEY_CODE_KP_2: return 0x03;
+    case Q_KEY_CODE_3: case Q_KEY_CODE_KP_3: return 0x04;
+    case Q_KEY_CODE_4: case Q_KEY_CODE_KP_4: return 0x05;
+    case Q_KEY_CODE_5: case Q_KEY_CODE_KP_5: return 0x06;
+    case Q_KEY_CODE_6: case Q_KEY_CODE_KP_6: return 0x07;
+    case Q_KEY_CODE_7: case Q_KEY_CODE_KP_7: return 0x08;
+    case Q_KEY_CODE_8: case Q_KEY_CODE_KP_8: return 0x09;
+    case Q_KEY_CODE_9: case Q_KEY_CODE_KP_9: return 0x0a;
+    case Q_KEY_CODE_0: case Q_KEY_CODE_KP_0: return 0x0b;
+    case Q_KEY_CODE_MINUS:        return 0x0c;
+    case Q_KEY_CODE_EQUAL:        return 0x0d;
+    case Q_KEY_CODE_BACKSPACE:    return 0x0e;
+    case Q_KEY_CODE_TAB:          return 0x0f;
+    case Q_KEY_CODE_Q:            return 0x10;
+    case Q_KEY_CODE_W:            return 0x11;
+    case Q_KEY_CODE_E:            return 0x12;
+    case Q_KEY_CODE_R:            return 0x13;
+    case Q_KEY_CODE_T:            return 0x14;
+    case Q_KEY_CODE_Y:            return 0x15;
+    case Q_KEY_CODE_U:            return 0x16;
+    case Q_KEY_CODE_I:            return 0x17;
+    case Q_KEY_CODE_O:            return 0x18;
+    case Q_KEY_CODE_P:            return 0x19;
+    case Q_KEY_CODE_BRACKET_LEFT: return 0x1a;
+    case Q_KEY_CODE_BRACKET_RIGHT:return 0x1b;
+    case Q_KEY_CODE_RET:
+    case Q_KEY_CODE_KP_ENTER:     return 0x1c;
+    case Q_KEY_CODE_CTRL:
+    case Q_KEY_CODE_CTRL_R:       return 0x1d;
+    case Q_KEY_CODE_A:            return 0x1e;
+    case Q_KEY_CODE_S:            return 0x1f;
+    case Q_KEY_CODE_D:            return 0x20;
+    case Q_KEY_CODE_F:            return 0x21;
+    case Q_KEY_CODE_G:            return 0x22;
+    case Q_KEY_CODE_H:            return 0x23;
+    case Q_KEY_CODE_J:            return 0x24;
+    case Q_KEY_CODE_K:            return 0x25;
+    case Q_KEY_CODE_L:            return 0x26;
+    case Q_KEY_CODE_SEMICOLON:    return 0x27;
+    case Q_KEY_CODE_APOSTROPHE:   return 0x28;
+    case Q_KEY_CODE_GRAVE_ACCENT: return 0x29;
+    case Q_KEY_CODE_SHIFT:
+    case Q_KEY_CODE_SHIFT_R:      return 0x2a;
+    case Q_KEY_CODE_BACKSLASH:    return 0x2b;
+    case Q_KEY_CODE_Z:            return 0x2c;
+    case Q_KEY_CODE_X:            return 0x2d;
+    case Q_KEY_CODE_C:            return 0x2e;
+    case Q_KEY_CODE_V:            return 0x2f;
+    case Q_KEY_CODE_B:            return 0x30;
+    case Q_KEY_CODE_N:            return 0x31;
+    case Q_KEY_CODE_M:            return 0x32;
+    case Q_KEY_CODE_COMMA:        return 0x33;
+    case Q_KEY_CODE_DOT:          return 0x34;
+    case Q_KEY_CODE_SLASH:        return 0x35;
+    case Q_KEY_CODE_SPC:          return 0x39;
+    case Q_KEY_CODE_UP:           return 0x48;
+    case Q_KEY_CODE_LEFT:         return 0x4b;
+    case Q_KEY_CODE_RIGHT:        return 0x4d;
+    case Q_KEY_CODE_DOWN:         return 0x50;
+    default:
+        if (q < qemu_input_map_qcode_to_atset1_len) {
+            return qemu_input_map_qcode_to_atset1[q] & 0xff;
+        }
+        return 0;
+    }
+}
+
 /* MAIN NK VA 0xc0872cc0.  [column][row], Set 1.  Y=0x15 r2, N=0x31 r4 */
 static const uint8_t brain_keymap[BRAIN_KBD_COLS][BRAIN_KBD_ROWS] = {
     { 0x16, 0x08, 0x19, 0x25, 0x03, 0x04, 0x4d },   /* col6 row6 = right (0x4d) */
@@ -330,26 +407,25 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
         return;
     }
 
-    if (qcode >= qemu_input_map_qcode_to_atset1_len) {
-        return;
-    }
-    scancode = qemu_input_map_qcode_to_atset1[qcode];
+    scancode = brain_qcode_to_set1(qcode);
     if (!scancode) {
+        brain_kbd_touchkey_update(s, qcode, key->down);
         return;
     }
-    scancode &= 0xff;
 
     if (brain_kbd_debug()) {
         fprintf(stderr, "[brain-kbd] event qcode=%d scancode=0x%02x down=%d\n",
                 qcode, scancode, key->down);
     }
 
+    /* Touchkeys (arrows / home / enter) even if not in the 7x7 dump. */
+    brain_kbd_touchkey_update(s, qcode, key->down);
+
     for (c = 0; c < BRAIN_KBD_COLS; c++) {
         for (r = 0; r < BRAIN_KBD_ROWS; r++) {
             if (brain_keymap[c][r] != scancode) {
                 continue;
             }
-            brain_kbd_touchkey_update(s, qcode, key->down);
             if (key->down) {
                 s->want[c] |= 1u << r;
                 s->state[c] |= 1u << r;
