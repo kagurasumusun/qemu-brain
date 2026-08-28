@@ -403,53 +403,75 @@ static void mxs_lcdif_update_display(void *opaque)
     address_space_read(&address_space_memory, base, MEMTXATTRS_UNSPECIFIED,
                        fb, fb_bytes);
 
-    for (y = 0; y < src_h; y++) {
-        line = fb + (size_t)y * src_stride;
-        for (x = 0; x < src_w; x++) {
-            uint32_t pix;
-            int dx, dy;
+    /*
+     * PW-SH6 default: 32 bpp 480x854 portrait, console rotate 270.
+     * Keep the generic loop for other formats; this path avoids a
+     * per-pixel switch and a dest-row lookup on every sample.
+     */
+    if (bpp == 32 && rotate == 270) {
+        uint8_t *surf = surface_data(surface);
+        int dstride = surface_stride(surface);
 
-            switch (bpp) {
-            case 16:
-                pix = mxs_lcdif_pix16(s, lduw_le_p(line + x * 2));
-                break;
-            case 8: {
-                uint8_t v = line[x];
-                pix = rgb_to_pixel32(v, v, v);
-                break;
-            }
-            default: {
-                uint32_t v = ldl_le_p(line + x * 4);
-                pix = rgb_to_pixel32((v >> 16) & 0xff, (v >> 8) & 0xff,
-                                     v & 0xff);
-                break;
-            }
-            }
+        for (y = 0; y < src_h; y++) {
+            uint32_t *src = (uint32_t *)(fb + (size_t)y * src_stride);
+            int dx = y;
 
-            switch (rotate) {
-            case 90:
-                dx = src_h - 1 - y;
-                dy = x;
-                break;
-            case 180:
-                dx = src_w - 1 - x;
-                dy = src_h - 1 - y;
-                break;
-            case 270:
-                dx = y;
-                dy = src_w - 1 - x;
-                break;
-            default:
-                dx = x;
-                dy = y;
-                break;
+            for (x = 0; x < src_w; x++) {
+                uint32_t v = le32_to_cpu(src[x]);
+                int dy = src_w - 1 - x;
+                dest = (uint32_t *)(surf + (size_t)dy * dstride);
+                dest[dx] = rgb_to_pixel32((v >> 16) & 0xff, (v >> 8) & 0xff,
+                                          v & 0xff);
             }
-            if (dx < 0 || dy < 0 || dx >= out_w || dy >= out_h) {
-                continue;
+        }
+    } else {
+        int dstride = surface_stride(surface);
+        uint8_t *surf = surface_data(surface);
+
+        for (y = 0; y < src_h; y++) {
+            line = fb + (size_t)y * src_stride;
+            for (x = 0; x < src_w; x++) {
+                uint32_t pix;
+                int dx, dy;
+
+                switch (bpp) {
+                case 16:
+                    pix = mxs_lcdif_pix16(s, lduw_le_p(line + x * 2));
+                    break;
+                case 8: {
+                    uint8_t v = line[x];
+                    pix = rgb_to_pixel32(v, v, v);
+                    break;
+                }
+                default: {
+                    uint32_t v = ldl_le_p(line + x * 4);
+                    pix = rgb_to_pixel32((v >> 16) & 0xff, (v >> 8) & 0xff,
+                                         v & 0xff);
+                    break;
+                }
+                }
+
+                switch (rotate) {
+                case 90:
+                    dx = src_h - 1 - y;
+                    dy = x;
+                    break;
+                case 180:
+                    dx = src_w - 1 - x;
+                    dy = src_h - 1 - y;
+                    break;
+                case 270:
+                    dx = y;
+                    dy = src_w - 1 - x;
+                    break;
+                default:
+                    dx = x;
+                    dy = y;
+                    break;
+                }
+                dest = (uint32_t *)(surf + (size_t)dy * dstride);
+                dest[dx] = pix;
             }
-            dest = (uint32_t *)((uint8_t *)surface_data(surface) +
-                                (size_t)dy * surface_stride(surface));
-            dest[dx] = pix;
         }
     }
 

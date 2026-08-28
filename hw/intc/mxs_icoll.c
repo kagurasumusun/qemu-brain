@@ -115,28 +115,33 @@ static int mxs_icoll_serving_level(MXSIcollState *s)
  * Find the pending source with the highest priority.  Priority 3 is the
  * most urgent one; sources of equal priority are resolved by index.
  */
-static int mxs_icoll_pending(MXSIcollState *s, bool fiq)
+static void mxs_icoll_pick(MXSIcollState *s, int *best_irq, int *best_fiq)
 {
-    int best = -1;
-    int best_prio = -1;
-    int i;
+    int i, pri_irq = -1, pri_fiq = -1;
 
+    *best_irq = *best_fiq = -1;
     for (i = 0; i < MXS_NUM_IRQS; i++) {
+        uint32_t r = s->intr[i];
         int prio;
 
-        if (!mxs_icoll_asserted(s, i)) {
+        if (!(r & ICOLL_INTR_ENABLE)) {
             continue;
         }
-        if (!!(s->intr[i] & ICOLL_INTR_ENFIQ) != fiq) {
+        if (!(r & ICOLL_INTR_SOFTIRQ) &&
+            !((s->raw[i >> 5] >> (i & 31)) & 1u)) {
             continue;
         }
-        prio = s->intr[i] & ICOLL_INTR_PRIORITY;
-        if (prio > best_prio) {
-            best_prio = prio;
-            best = i;
+        prio = r & ICOLL_INTR_PRIORITY;
+        if (r & ICOLL_INTR_ENFIQ) {
+            if (prio > pri_fiq) {
+                pri_fiq = prio;
+                *best_fiq = i;
+            }
+        } else if (prio > pri_irq) {
+            pri_irq = prio;
+            *best_irq = i;
         }
     }
-    return best;
 }
 
 static void mxs_icoll_update(MXSIcollState *s)
@@ -162,11 +167,12 @@ static void mxs_icoll_update(MXSIcollState *s)
         }
     }
 
-    int irq = mxs_icoll_pending(s, false);
-    int fiq = mxs_icoll_pending(s, true);
-    int serving = mxs_icoll_serving_level(s);
+    int irq, fiq, serving;
     bool assert_irq = false;
+    bool assert_fiq;
 
+    mxs_icoll_pick(s, &irq, &fiq);
+    serving = mxs_icoll_serving_level(s);
     s->current = irq;
 
     if (irq >= 0 && (s->ctrl & ICOLL_CTRL_IRQ_FINAL_ENABLE)) {
@@ -180,30 +186,41 @@ static void mxs_icoll_update(MXSIcollState *s)
     }
 
     if (irq >= 0 && !assert_irq) {
-        /* pending source masked by the in-service level (nesting off) */
         brain_stat_inc(BST_ICOLL_SUPPRESS_NEW);
-        brain_log_event(BSTAG('S', 'U', 'P', 'R'), irq,
-                        s->intr[irq] & ICOLL_INTR_PRIORITY, serving,
-                        s->ctrl);
     }
 
     if (!!assert_irq != !!s->irq_out) {
         s->irq_out = assert_irq;
         brain_stat_inc(assert_irq ? BST_ICOLL_IRQ_ASSERT
                                   : BST_ICOLL_IRQ_DEASSERT);
+        qemu_set_irq(s->irq, assert_irq);
     }
 
-    qemu_set_irq(s->irq, assert_irq);
-    qemu_set_irq(s->fiq,
-                 fiq >= 0 && (s->ctrl & ICOLL_CTRL_FIQ_FINAL_ENABLE));
+    assert_fiq = fiq >= 0 && (s->ctrl & ICOLL_CTRL_FIQ_FINAL_ENABLE);
+    qemu_set_irq(s->fiq, assert_fiq);
 }
 
 static void mxs_icoll_set_irq(void *opaque, int n, int level)
 {
     MXSIcollState *s = MXS_ICOLL(opaque);
 
+    uint32_t bit, *word;
+
     if (n < 0 || n >= MXS_NUM_IRQS) {
         return;
+    }
+    word = &s->raw[n >> 5];
+    bit = 1u << (n & 31);
+    if (level) {
+        if (*word & bit) {
+            return;
+        }
+        *word |= bit;
+    } else {
+        if (!(*word & bit)) {
+            return;
+        }
+        *word &= ~bit;
     }
     if (n == 63 && brain_pin_debug()) {
         fprintf(stderr, "[brain] irq63 line=%d pc=0x%08x intr63=0x%x\n",
@@ -241,11 +258,6 @@ static void mxs_icoll_set_irq(void *opaque, int n, int level)
                 "pc=0x%08x vnow=%lld\n", level, s->raw[1], s->intr[61],
                 mxs_trace_guest_pc(),
                 (long long)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
-    }
-    if (level) {
-        s->raw[n / 32] |= 1u << (n % 32);
-    } else {
-        s->raw[n / 32] &= ~(1u << (n % 32));
     }
     mxs_icoll_update(s);
 }
@@ -331,7 +343,7 @@ static void mxs_icoll_write(void *opaque, hwaddr offset, uint64_t value,
     if (idx >= ICOLL_INTERRUPT0 && idx < ICOLL_INTERRUPT0 + MXS_NUM_IRQS) {
         unsigned n = idx - ICOLL_INTERRUPT0;
 
-        if (getenv("BRAIN_PIN_DEBUG")) {
+        if (brain_pin_debug()) {
             fprintf(stderr, "[brain] W INTR%-3d off=0x%03x val=0x%08x "
                     "pc=0x%08x (was 0x%x)\n", n, (unsigned)offset,
                     (uint32_t)value, mxs_trace_guest_pc(), s->intr[n]);
