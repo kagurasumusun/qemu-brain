@@ -43,7 +43,13 @@ static const int brain_kbd_col_pins[BRAIN_KBD_COLS] = { 0, 1, 2, 3, 4, 6, 7 };
  * repaired4.  (A 30 s hold keeps the row low for too long and the
  * guest sees an endless key repeat instead of a press/release pair.)
  */
-#define BRAIN_KBD_MIN_HOLD_NS  (2500 * 1000 * 1000LL)
+/*
+ * Guest column walk needs the row held low for at least one poll.
+ * 80 ms virtual is enough once the CPU is not stuck in WFI; the old
+ * 2.5 s floor made every SDL keystroke stick and feel "dead".
+ * Instant HMP sendkey (down+up in one tick) still gets this floor.
+ */
+#define BRAIN_KBD_MIN_HOLD_NS  (80 * 1000 * 1000LL)
 
 /*
  * EDNA2 MCU touchkey report (mailbox +0x404, consumed by VMCopy.dll's
@@ -87,6 +93,7 @@ typedef struct BrainKbdState {
     uint8_t want[BRAIN_KBD_COLS];
     uint8_t state[BRAIN_KBD_COLS];
     QEMUTimer *hold_timer;
+    int64_t hold_until_ns;
     QEMUTimer *edna2_pulse_timer;
     qemu_irq edna2_int;
     bool power;   /* power-key sense line (GPIO0 pin 16) held high */
@@ -168,6 +175,13 @@ void brain_kbd_edna2_pulse_ext(DeviceState *kbd)
     BrainKbdState *s = BRAIN_KBD(kbd);
 
     brain_kbd_edna2_timed_pulse(s);
+}
+
+static void brain_kbd_panel_wake(void *opaque, int n, int level)
+{
+    if (level) {
+        brain_kbd_edna2_timed_pulse(BRAIN_KBD(opaque));
+    }
 }
 
 /*
@@ -327,12 +341,13 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
                 brain_kbd_refresh(s);
                 /* kick the EDNA2 interrupt-driven path (ICOL 33) */
                 brain_kbd_edna2_pulse(s);
+                s->hold_until_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                                   BRAIN_KBD_MIN_HOLD_NS;
+                timer_mod(s->hold_timer, s->hold_until_ns);
             } else {
                 s->want[c] &= ~(1u << r);
+                timer_mod(s->hold_timer, s->hold_until_ns);
             }
-            timer_mod(s->hold_timer,
-                      qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                      BRAIN_KBD_MIN_HOLD_NS);
             return;
         }
     }
@@ -432,6 +447,7 @@ static void brain_kbd_init(Object *obj)
                              object_property_allow_set_link,
                              OBJ_PROP_LINK_STRONG);
     qdev_init_gpio_out_named(dev, &BRAIN_KBD(obj)->edna2_int, "edna2-int", 1);
+    qdev_init_gpio_in_named(dev, brain_kbd_panel_wake, "panel-wake", 1);
 }
 
 static const VMStateDescription vmstate_brain_kbd = {

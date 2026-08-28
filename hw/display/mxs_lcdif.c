@@ -153,6 +153,21 @@ static void mxs_lcdif_latch_frame(MXSLcdifState *s)
         return;         /* a command word, not a picture */
     }
 
+    /*
+     * MPU/DOTCLK command sequences and dirty-rect blits reuse LCDIF with
+     * a small TRANSFER_COUNT (often 16x16 or a strip).  Replacing the
+     * latched full-panel descriptor with those would resize the QEMU
+     * console to a sliver -- the "only part of the screen" / "flash on
+     * touch" bugs.  Keep the last full-size geometry; still accept a
+     * new buffer address of the same (or larger) size.
+     */
+    if (s->fb_width && s->fb_height &&
+        (w * h) < (s->fb_width * s->fb_height) / 2) {
+        s->fb_addr = base;
+        s->invalidate = 1;
+        return;
+    }
+
     s->fb_addr = base;
     s->fb_width = w;
     s->fb_height = h;
@@ -195,8 +210,21 @@ static void mxs_lcdif_vsync_tick(void *opaque)
      * init sequence and never again; the guest relies on the panel
      * to keep scanning out the same pixels.
      */
+    /*
+     * Refresh the SDL surface from DRAM.  Doing this every vsync while
+     * the guest is idle is expensive (full FB copy) and makes input
+     * feel stalled; 15 Hz is enough to catch splash/desktop writes
+     * that never re-kick LCDIF.
+     */
     if (s->con && s->fb_addr) {
-        dpy_gfx_update_full(s->con);
+        static int refresh_div;
+        int hz = s->refresh_hz ? s->refresh_hz : 60;
+        int every = hz >= 30 ? hz / 15 : 1;
+
+        if (++refresh_div >= every || s->invalidate) {
+            refresh_div = 0;
+            dpy_gfx_update_full(s->con);
+        }
     }
     timer_mod(s->vsync, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
               NANOSECONDS_PER_SECOND / (s->refresh_hz ? s->refresh_hz : 60));
@@ -417,7 +445,7 @@ static void mxs_lcdif_update_display(void *opaque)
             }
             }
 
-            switch (s->rotate) {
+            switch (rotate) {
             case 90:
                 dx = src_h - 1 - y;
                 dy = x;

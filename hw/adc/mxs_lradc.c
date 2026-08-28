@@ -68,6 +68,7 @@ typedef struct MXSLradcState {
     MemoryRegion iomem;
     qemu_irq irq_touch;             /* ICOLL "touch screen" line */
     qemu_irq irq_ch[LRADC_NCHANNELS];
+    qemu_irq panel_wake;            /* EDNA2 attention, like a key press */
 
     uint32_t regs[LRADC_NREGS];
     QEMUTimer *delay_timer[4];
@@ -384,6 +385,8 @@ void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
         s->last_x = s->touch_x;
         s->last_y = s->touch_y;
     }
+    bool down_edge = !s->touch_down && down;
+
     s->touch_x = x & 0x7fff;
     s->touch_y = y & 0x7fff;
     s->touch_down = down;
@@ -401,26 +404,26 @@ void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
     }
 
     /*
+     * Only the down *edge* latches TOUCH_DETECT_IRQ.  ABS motion events
+     * while the pen is already down used to re-set the bit on every
+     * mouse-move, which re-entered the IST, kicked LCDIF, and made the
+     * screen flash / the guest stall for the duration of the tap.
+     */
+    if (!down_edge) {
+        return;
+    }
+
+    /*
      * Latch the touch-detect status whenever the analog detector is
      * enabled (CTRL0.TOUCH_DETECT_ENABLE), exactly like real silicon:
      * the comparator that flags a touch is independent of whether the
-     * CPU currently has the interrupt unmasked.  Real touch drivers
-     * mask CTRL1.TOUCH_DETECT_IRQ_EN while they poll/settle a sample
-     * and unmask it again afterwards; previously this status bit was
-     * only set when IRQ_EN *also* happened to be on at the exact
-     * instant of the touch-down edge, so a tap landing during that
-     * masked window was silently lost -- the driver would only learn
-     * about the touch on a *subsequent* tap that happened to land
-     * while IRQ_EN was set, i.e. it took two taps to register one.
-     * mxs_lradc_update_irq() already gates the actual interrupt line
-     * on IRQ_EN, so asserting it unconditionally here does not cause
-     * a spurious interrupt when the guest has the line masked -- it
-     * just makes sure the edge is not lost, matching real hardware.
+     * CPU currently has the interrupt unmasked.
      */
     if (s->regs[LRADC_CTRL0] & CTRL0_TOUCH_DETECT_ENABLE) {
         s->regs[LRADC_CTRL1] |= CTRL1_TOUCH_DETECT_IRQ;
         mxs_lradc_update_irq(s);
     }
+    qemu_irq_pulse(s->panel_wake);
 }
 
 static void mxs_lradc_touch_event(DeviceState *dev, QemuConsole *src,
@@ -495,6 +498,7 @@ static void mxs_lradc_init(Object *obj)
     for (i = 0; i < LRADC_NCHANNELS; i++) {
         sysbus_init_irq(sbd, &s->irq_ch[i]);
     }
+    qdev_init_gpio_out_named(DEVICE(obj), &s->panel_wake, "panel-wake", 1);
 
     s->delay_timer[0] = timer_new_ns(QEMU_CLOCK_VIRTUAL, mxs_lradc_delay0, s);
     s->delay_timer[1] = timer_new_ns(QEMU_CLOCK_VIRTUAL, mxs_lradc_delay1, s);

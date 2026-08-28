@@ -2506,6 +2506,8 @@ static void brain_init(MachineState *machine)
      */
     qdev_connect_gpio_out_named(dev, "edna2-int", 0,
                                 qdev_get_gpio_in(icoll, 33));
+    qdev_connect_gpio_out_named(bms->lradc, "panel-wake", 0,
+                                qdev_get_gpio_in_named(dev, "panel-wake", 0));
 
     /* Blocks we only need to swallow register accesses for. */
     mxs_create_dummy("hsadc", MXS_HSADC_BASE, 0x2000);
