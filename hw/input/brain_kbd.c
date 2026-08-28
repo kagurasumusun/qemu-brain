@@ -80,7 +80,7 @@ static const uint32_t brain_touchkey_bits[] = {
 
 static const QKeyCode brain_touchkey_qcodes[] = {
     Q_KEY_CODE_UP, Q_KEY_CODE_DOWN, Q_KEY_CODE_LEFT, Q_KEY_CODE_RIGHT,
-    Q_KEY_CODE_RET, Q_KEY_CODE_HOME, Q_KEY_CODE_ESC,
+    Q_KEY_CODE_HOME, Q_KEY_CODE_ESC,
     Q_KEY_CODE_F1, Q_KEY_CODE_F2,
     Q_KEY_CODE_AC_HOME,      /* ホーム */
     Q_KEY_CODE_AC_BACK,      /* 国語 漢字 */
@@ -126,95 +126,28 @@ static void brain_kbd_touchkey_update(BrainKbdState *s, QKeyCode qcode,
                                       bool down);
 
 /*
- * PC QKeyCode -> the same Set-1 byte the firmware table stores.
- * Do not go through qemu_input_map_qcode_to_atset1 alone: that table
- * omits some aliases (keypad, JP keys) so a PC key would not match.
+ * Host key -> firmware Set-1.  Letters and digits use the standard
+ * AT Set-1 byte (JIS and US QWERTY share A-Z / 1-0 positions), so a
+ * JIS 106 keyboard types the same letter as the keycap.  Do not remap
+ * 1-0 onto Q-P: that made JIS number-row input look like a scrambled
+ * alphabet.  Do not steal henkan/muhenkan/hiragana; those are ordinary
+ * JIS keys, not Brain symbol.
  */
 static uint8_t brain_qcode_to_set1(QKeyCode q)
 {
     switch (q) {
-    case Q_KEY_CODE_ESC:          return 0x01; /* 戻る */
-    /*
-     * Brain prints 1..0 on Q..P.  PC digit keys and keypad digits
-     * hit those same cells (Q¹ W² … P⁰).
-     */
-    case Q_KEY_CODE_1: case Q_KEY_CODE_KP_1: return 0x10;
-    case Q_KEY_CODE_2: case Q_KEY_CODE_KP_2: return 0x11;
-    case Q_KEY_CODE_3: case Q_KEY_CODE_KP_3: return 0x12;
-    case Q_KEY_CODE_4: case Q_KEY_CODE_KP_4: return 0x13;
-    case Q_KEY_CODE_5: case Q_KEY_CODE_KP_5: return 0x14;
-    case Q_KEY_CODE_6: case Q_KEY_CODE_KP_6: return 0x15;
-    case Q_KEY_CODE_7: case Q_KEY_CODE_KP_7: return 0x16;
-    case Q_KEY_CODE_8: case Q_KEY_CODE_KP_8: return 0x17;
-    case Q_KEY_CODE_9: case Q_KEY_CODE_KP_9: return 0x18;
-    case Q_KEY_CODE_0: case Q_KEY_CODE_KP_0: return 0x19;
-    case Q_KEY_CODE_MINUS:        return 0x0c; /* 長音 — */
-    case Q_KEY_CODE_EQUAL:        return 0x0d;
-    case Q_KEY_CODE_BACKSPACE:
-    case Q_KEY_CODE_DELETE:       return 0x0e; /* 削除/クリア */
-    case Q_KEY_CODE_TAB:          return 0x0f;
-    case Q_KEY_CODE_Q:            return 0x10;
-    case Q_KEY_CODE_W:            return 0x11;
-    case Q_KEY_CODE_E:            return 0x12;
-    case Q_KEY_CODE_R:            return 0x13;
-    case Q_KEY_CODE_T:            return 0x14;
-    case Q_KEY_CODE_Y:            return 0x15;
-    case Q_KEY_CODE_U:            return 0x16;
-    case Q_KEY_CODE_I:            return 0x17;
-    case Q_KEY_CODE_O:            return 0x18;
-    case Q_KEY_CODE_P:            return 0x19;
-    case Q_KEY_CODE_BRACKET_LEFT: return 0x1a;
-    case Q_KEY_CODE_BRACKET_RIGHT:return 0x1b;
-    case Q_KEY_CODE_RET:
     case Q_KEY_CODE_KP_ENTER:     return 0x1c;
-    case Q_KEY_CODE_CTRL:
-    case Q_KEY_CODE_CTRL_R:       return 0x1d;
-    case Q_KEY_CODE_A:            return 0x1e;
-    case Q_KEY_CODE_S:            return 0x1f;
-    case Q_KEY_CODE_D:            return 0x20;
-    case Q_KEY_CODE_F:            return 0x21;
-    case Q_KEY_CODE_G:            return 0x22;
-    case Q_KEY_CODE_H:            return 0x23;
-    case Q_KEY_CODE_J:            return 0x24;
-    case Q_KEY_CODE_K:            return 0x25;
-    case Q_KEY_CODE_L:            return 0x26;
-    case Q_KEY_CODE_SEMICOLON:    return 0x27;
-    case Q_KEY_CODE_APOSTROPHE:   return 0x28;
-    case Q_KEY_CODE_SHIFT:
-    case Q_KEY_CODE_SHIFT_R:      return 0x2a;
-    case Q_KEY_CODE_BACKSLASH:    return 0x2b;
-    case Q_KEY_CODE_Z:            return 0x2c;
-    case Q_KEY_CODE_X:            return 0x2d;
-    case Q_KEY_CODE_C:            return 0x2e;
-    case Q_KEY_CODE_V:            return 0x2f;
-    case Q_KEY_CODE_B:            return 0x30;
-    case Q_KEY_CODE_N:            return 0x31;
-    case Q_KEY_CODE_M:            return 0x32;
-    case Q_KEY_CODE_COMMA:        return 0x33;
-    case Q_KEY_CODE_DOT:          return 0x34;
-    case Q_KEY_CODE_SLASH:        return 0x35;
-    case Q_KEY_CODE_SPC:          return 0x39; /* スペース/変換 */
-    case Q_KEY_CODE_HENKAN:
-    case Q_KEY_CODE_MUHENKAN:
-    case Q_KEY_CODE_LANG1:
-    case Q_KEY_CODE_LANG2:
-    case Q_KEY_CODE_GRAVE_ACCENT: return 0x29; /* 記号 */
-    case Q_KEY_CODE_UP:           return 0x48;
-    case Q_KEY_CODE_LEFT:         return 0x4b;
-    case Q_KEY_CODE_RIGHT:        return 0x4d;
-    case Q_KEY_CODE_DOWN:         return 0x50;
-    case Q_KEY_CODE_HOME:
-    case Q_KEY_CODE_AC_HOME:      return 0x47; /* ホーム */
-    case Q_KEY_CODE_AC_BACK:      return 0x3b; /* 国語 漢字 (F1) */
-    case Q_KEY_CODE_AC_FORWARD:   return 0x3c; /* 英和 和英 (F2) */
-    case Q_KEY_CODE_AC_REFRESH:   return 0x3d; /* My 辞書 (F3) */
-    case Q_KEY_CODE_F13:          return 0x3e; /* 履歴 */
-    case Q_KEY_CODE_F14:          return 0x3f; /* 一覧から選ぶ */
-    case Q_KEY_CODE_F15:          return 0x40; /* 音声 */
-    case Q_KEY_CODE_F16:          return 0x41; /* 文字小 */
-    case Q_KEY_CODE_F17:          return 0x42; /* 文字大 */
-    case Q_KEY_CODE_F1:           return 0x3b;
-    case Q_KEY_CODE_F2:           return 0x3c;
+    case Q_KEY_CODE_KP_1:         return 0x02;
+    case Q_KEY_CODE_KP_2:         return 0x03;
+    case Q_KEY_CODE_KP_3:         return 0x04;
+    case Q_KEY_CODE_KP_4:         return 0x05;
+    case Q_KEY_CODE_KP_5:         return 0x06;
+    case Q_KEY_CODE_KP_6:         return 0x07;
+    case Q_KEY_CODE_KP_7:         return 0x08;
+    case Q_KEY_CODE_KP_8:         return 0x09;
+    case Q_KEY_CODE_KP_9:         return 0x0a;
+    case Q_KEY_CODE_KP_0:         return 0x0b;
+    case Q_KEY_CODE_DELETE:       return 0x0e;
     default:
         if (q < qemu_input_map_qcode_to_atset1_len) {
             return qemu_input_map_qcode_to_atset1[q] & 0xff;
@@ -426,8 +359,12 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
     key = evt->u.key.data;
     qcode = qemu_input_key_value_to_qcode(key->key);
 
-    /* Host Power suspends the PC; Brain 電源 is AC_Bookmarks. */
-    if (qcode == Q_KEY_CODE_AC_BOOKMARKS) {
+    /*
+     * Brain 電源 is GPIO0.16, not a matrix scancode and not host Power
+     * (that suspends the PC).  Pause/Break is on JIS and US boards;
+     * AC_Bookmarks is not a keycap on a JIS 106.
+     */
+    if (qcode == Q_KEY_CODE_PAUSE || qcode == Q_KEY_CODE_STOP) {
         s->power = key->down;
         brain_kbd_refresh(s);
         qemu_set_irq(s->edna2_int, key->down ? 1 : 0);
@@ -446,8 +383,7 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
                 qcode, scancode, key->down);
     }
 
-    /* Touchkeys (arrows / home / enter) even if not in the 7x7 dump. */
-    brain_kbd_touchkey_update(s, qcode, key->down);
+    qemu_system_wakeup_request(QEMU_WAKEUP_REASON_OTHER, NULL);
 
     for (c = 0; c < BRAIN_KBD_COLS; c++) {
         for (r = 0; r < BRAIN_KBD_ROWS; r++) {
@@ -473,6 +409,7 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
             return;
         }
     }
+    brain_kbd_touchkey_update(s, qcode, key->down);
 }
 
 static const QemuInputHandler brain_kbd_handler = {
