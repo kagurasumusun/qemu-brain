@@ -105,6 +105,7 @@ static inline uint32_t mxs_bank_apply(uint32_t old, hwaddr offset,
  */
 extern bool mxs_trace_live;
 uint32_t mxs_trace_guest_pc(void);
+uint32_t brain_sd_trace_pc(void);
 
 static inline bool mxs_trace_enabled(const char *name)
 {
