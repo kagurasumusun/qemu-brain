@@ -199,7 +199,8 @@ static bool brain_qcode_to_cell(QKeyCode q, int *col, int *row)
 }
 
 /* MAIN NK VA 0xc0872cc0 / 0xc08a2cc0, 7x7 Set-1 dump plus pin5. */
-static const uint8_t brain_keymap[BRAIN_KBD_COLS][BRAIN_KBD_ROWS] = {
+static const uint8_t G_GNUC_UNUSED
+brain_keymap[BRAIN_KBD_COLS][BRAIN_KBD_ROWS] = {
     { 0x16, 0x08, 0x19, 0x25, 0x03, 0x04, 0x4d },
     { 0x0d, 0x0b, 0x21, 0x27, 0x2a, 0x06, 0x05 },
     { 0x02, 0x0a, 0x15, 0x28, 0x31, 0x18, 0x50 },
@@ -420,8 +421,8 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
     }
 
     if (brain_kbd_debug()) {
-        fprintf(stderr, "[brain-kbd] event qcode=%d cell=%d,%d down=%d\n",
-                qcode, c, r, key->down);
+        fprintf(stderr, "[brain-kbd] event qcode=%d cell=%d,%d dump=0x%02x down=%d\n",
+                qcode, c, r, brain_keymap[c][r], key->down);
     }
 
     qemu_system_wakeup_request(QEMU_WAKEUP_REASON_OTHER, NULL);
