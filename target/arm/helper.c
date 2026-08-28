@@ -3480,7 +3480,7 @@ uint32_t mxs_trace_guest_pc(void)
 }
 
 /* weak hook used by hw/sd/sd.c (BRAIN_SDTRACE) to annotate reads */
-uint32_t brain_sd_trace_pc(void)
+static uint32_t brain_sd_trace_pc(void)
 {
     return mxs_trace_guest_pc();
 }
