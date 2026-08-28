@@ -75,6 +75,18 @@ typedef struct MXSIcollState {
 
 OBJECT_DECLARE_SIMPLE_TYPE(MXSIcollState, MXS_ICOLL)
 
+static bool brain_pin_debug(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *e = getenv("BRAIN_PIN_DEBUG");
+
+        on = e && *e && *e != '0';
+    }
+    return on;
+}
+
 static bool mxs_icoll_asserted(MXSIcollState *s, int n)
 {
     if (!(s->intr[n] & ICOLL_INTR_ENABLE)) {
@@ -193,11 +205,11 @@ static void mxs_icoll_set_irq(void *opaque, int n, int level)
     if (n < 0 || n >= MXS_NUM_IRQS) {
         return;
     }
-    if (n == 63 && getenv("BRAIN_PIN_DEBUG")) {
+    if (n == 63 && brain_pin_debug()) {
         fprintf(stderr, "[brain] irq63 line=%d pc=0x%08x intr63=0x%x\n",
                 level, mxs_trace_guest_pc(), s->intr[63]);
     }
-    if (n == 48 && getenv("BRAIN_PIN_DEBUG")) {
+    if (n == 48 && brain_pin_debug()) {
         static int dbg48 = 3000;
         if (dbg48 > 0) {
             dbg48--;
@@ -206,33 +218,29 @@ static void mxs_icoll_set_irq(void *opaque, int n, int level)
                     (long long)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
         }
     }
-    if ((n == 10 || n == 18) && getenv("BRAIN_PIN_DEBUG")) {
+    if ((n == 10 || n == 18) && brain_pin_debug()) {
         fprintf(stderr, "[brain] icoll-irq%-2d line=%d raw%d=%08x intr%d=%08x "
                 "pc=0x%08x vnow=%lld\n", n, level, n / 32, s->raw[n / 32],
                 n, s->intr[n], mxs_trace_guest_pc(),
                 (long long)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     }
-    if (n == 33 && getenv("BRAIN_PIN_DEBUG")) {
+    if (n == 33 && brain_pin_debug()) {
         fprintf(stderr, "[brain] icoll-irq33 line=%d raw0=%08x intr33=%08x "
                 "pc=0x%08x vnow=%lld\n", level, s->raw[0],
                 s->intr[33], mxs_trace_guest_pc(),
                 (long long)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     }
-    if (n == 125 && getenv("BRAIN_PIN_DEBUG")) {
+    if (n == 125 && brain_pin_debug()) {
         fprintf(stderr, "[brain] icoll-irq125 line=%d raw3=%08x "
                 "intr125=%08x pc=0x%08x vnow=%lld\n", level, s->raw[3],
                 s->intr[125], mxs_trace_guest_pc(),
                 (long long)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     }
-    if (n == 61) {
-        static int dbg61 = 60;
-        if (dbg61 > 0) {
-            dbg61--;
-            fprintf(stderr, "[brain] icoll-irq61 line=%d raw1=%08x intr61=%08x "
-                    "pc=0x%08x vnow=%lld\n", level, s->raw[1], s->intr[61],
-                    mxs_trace_guest_pc(),
-                    (long long)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
-        }
+    if (n == 61 && brain_pin_debug()) {
+        fprintf(stderr, "[brain] icoll-irq61 line=%d raw1=%08x intr61=%08x "
+                "pc=0x%08x vnow=%lld\n", level, s->raw[1], s->intr[61],
+                mxs_trace_guest_pc(),
+                (long long)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     }
     if (level) {
         s->raw[n / 32] |= 1u << (n % 32);
@@ -265,7 +273,7 @@ static uint64_t mxs_icoll_read(void *opaque, hwaddr offset, unsigned size)
                 unsigned p = s->intr[s->current] & ICOLL_INTR_PRIORITY;
 
                 if ((s->current == 63 || s->current == 125 ||
-                     s->current == 61) && getenv("BRAIN_PIN_DEBUG")) {
+                     s->current == 61) && brain_pin_debug()) {
                     fprintf(stderr, "[brain] VECTOR read -> irq%d (prio %u) "
                             "intr125=%08x raw3=%08x pc=0x%08x vnow=%lld\n",
                             s->current, p, s->intr[125], s->raw[3],
@@ -371,18 +379,14 @@ static void mxs_icoll_write(void *opaque, hwaddr offset, uint64_t value,
     case ICOLL_CTRL: {
         uint32_t old = s->ctrl;
 
-        if ((uint32_t)value != old) {
-            static int ctrl_budget = 40;
-            if (ctrl_budget > 0) {
-                ctrl_budget--;
-                fprintf(stderr,
-                        "[brain] icoll CTRL wr: off=%03x val=%08x old=%08x "
-                        "new=%08x pc=%08x vnow=%lld\n",
-                        (unsigned)offset, (uint32_t)value, old,
-                        (uint32_t)(mxs_bank_apply(old, offset, value, size)),
-                        mxs_trace_guest_pc(),
-                        (long long)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
-            }
+        if ((uint32_t)value != old && brain_pin_debug()) {
+            fprintf(stderr,
+                    "[brain] icoll CTRL wr: off=%03x val=%08x old=%08x "
+                    "new=%08x pc=%08x vnow=%lld\n",
+                    (unsigned)offset, (uint32_t)value, old,
+                    (uint32_t)(mxs_bank_apply(old, offset, value, size)),
+                    mxs_trace_guest_pc(),
+                    (long long)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
         }
         s->ctrl = mxs_bank_sftrst(old,
                                   mxs_bank_apply(old, offset, value, size));

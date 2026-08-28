@@ -64,6 +64,18 @@ typedef struct MXSPinctrlState {
 
 OBJECT_DECLARE_SIMPLE_TYPE(MXSPinctrlState, MXS_PINCTRL)
 
+static bool brain_pin_debug(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *e = getenv("BRAIN_PIN_DEBUG");
+
+        on = e && *e && *e != '0';
+    }
+    return on;
+}
+
 static void mxs_pinctrl_update_irq(MXSPinctrlState *s)
 {
     int b;
@@ -116,7 +128,7 @@ void mxs_pinctrl_set_din(DeviceState *dev, int bank, uint32_t value)
      */
     inputs  = ~s->regs[PIN_DOE_IDX + bank];
     changed = (old_din ^ new_din) & inputs;
-    if (changed && getenv("BRAIN_PIN_DEBUG")) {
+    if (changed && brain_pin_debug()) {
         fprintf(stderr, "[pin-debug] set_din bank=%d old=%08x new=%08x "
                 "changed=%08x doe=%08x pin2irq=%08x irqen=%08x "
                 "irqlvl=%08x irqpol=%08x pc=0x%08x\n",

@@ -106,6 +106,18 @@ typedef struct BrainKbdState {
 
 OBJECT_DECLARE_SIMPLE_TYPE(BrainKbdState, BRAIN_KBD)
 
+static bool brain_kbd_debug(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *e = getenv("BRAIN_KBD_DEBUG");
+
+        on = e && *e && *e != '0';
+    }
+    return on;
+}
+
 static void brain_kbd_touchkey_update(BrainKbdState *s, QKeyCode qcode,
                                       bool down);
 
@@ -289,7 +301,7 @@ static void brain_kbd_refresh(void *opaque)
                         s->power ? 0xffffffffu
                                  : (0xffffffffu & ~(1u << BRAIN_KBD_POWER_PIN)));
 
-    if (getenv("BRAIN_KBD_DEBUG")) {
+    if (brain_kbd_debug()) {
         fprintf(stderr, "[brain-kbd] refresh driven_cols=%02x doe4=%08x "
                 "dout4=%08x din2=%08x din4=%08x\n",
                 driven_cols, doe4, dout4, din2, din4);
@@ -327,7 +339,7 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
     }
     scancode &= 0xff;
 
-    if (getenv("BRAIN_KBD_DEBUG")) {
+    if (brain_kbd_debug()) {
         fprintf(stderr, "[brain-kbd] event qcode=%d scancode=0x%02x down=%d\n",
                 qcode, scancode, key->down);
     }

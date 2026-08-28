@@ -169,7 +169,7 @@ static void mxs_lcdif_latch_frame(MXSLcdifState *s)
     {
         /* BRAIN_LCDTRACE: log each latched frame descriptor so we can find
          * when the guest pushes a full panel-sized framebuffer. */
-        if (getenv("BRAIN_LCDTRACE")) {
+        if (unlikely(getenv("BRAIN_LCDTRACE"))) {
             fprintf(stderr, "brain-lcdfb-latch: base=0x%08x w=%u h=%u "
                     "bpp=%d pc=0x%08x\n",
                     base, w, h, s->fb_bpp, (unsigned)mxs_trace_guest_pc());
@@ -196,14 +196,10 @@ static void mxs_lcdif_vsync_tick(void *opaque)
         }
     }
     /*
-     * The panel keeps scanning CUR_BUF.  QEMU's GUI already calls
-     * gfx_update on its own refresh; mark dirty so that path copies
-     * DRAM.  Do not blit from the vsync timer — that doubled the
-     * copy cost and flashed the window on every IRQ.
+     * Vsync only raises the hardware IRQ.  The console copies DRAM
+     * when the guest latches a new frame (invalidate).  Re-copying
+     * on every tick flashed the window and doubled DMA cost.
      */
-    if (s->con && s->fb_addr) {
-        s->invalidate = 1;
-    }
     timer_mod(s->vsync, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
               NANOSECONDS_PER_SECOND / (s->refresh_hz ? s->refresh_hz : 60));
 }

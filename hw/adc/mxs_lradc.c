@@ -88,6 +88,18 @@ typedef struct MXSLradcState {
 
 OBJECT_DECLARE_SIMPLE_TYPE(MXSLradcState, MXS_LRADC)
 
+static bool brain_touch_debug(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *e = getenv("BRAIN_TOUCH_DEBUG");
+
+        on = e && *e && *e != '0';
+    }
+    return on;
+}
+
 static void mxs_lradc_update_irq(MXSLradcState *s)
 {
     uint32_t c1 = s->regs[LRADC_CTRL1];
@@ -202,7 +214,7 @@ static void mxs_lradc_convert(MXSLradcState *s, uint32_t channels)
         s->regs[LRADC_CH0 + i] =
             (s->regs[LRADC_CH0 + i] & 0xfffc0000) | sample;
         s->regs[LRADC_CTRL1] |= 1u << i;
-        if (getenv("BRAIN_TOUCH_DEBUG")) {
+        if (brain_touch_debug()) {
             fprintf(stderr, "[brain] lradc convert: vch%d phys%d -> 0x%x "
                     "(touch_down=%d x=%d y=%d ctrl4=0x%08x)\n",
                     i, phys, sample, s->touch_down, s->touch_x, s->touch_y,
@@ -391,7 +403,7 @@ void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
     s->touch_y = y & 0x7fff;
     s->touch_down = down;
 
-    if (getenv("BRAIN_TOUCH_DEBUG")) {
+    if (brain_touch_debug()) {
         fprintf(stderr, "[brain] lradc SETTOUCH x=%d y=%d down=%d "
                 "CTRL0=0x%08x CTRL1=0x%08x vnow=%lld\n",
                 s->touch_x, s->touch_y, down,
