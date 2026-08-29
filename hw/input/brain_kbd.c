@@ -147,17 +147,12 @@ static uint8_t brain_host_set1(const KeyValue *kv)
     int n = qemu_input_key_value_to_number(kv);
     QKeyCode q = qemu_input_key_value_to_qcode(kv);
 
+    /*
+     * Do not map 1-0 onto Q-P.  That made 6 type Y (Set-1 0x15) and
+     * 7 type U.  Letters and digits use XT Set-1 as-is so each dump
+     * cell is unique.  Photo Q1 is still the Q key (0x10).
+     */
     switch (q) {
-    case Q_KEY_CODE_1: case Q_KEY_CODE_KP_1: return 0x10;
-    case Q_KEY_CODE_2: case Q_KEY_CODE_KP_2: return 0x11;
-    case Q_KEY_CODE_3: case Q_KEY_CODE_KP_3: return 0x12;
-    case Q_KEY_CODE_4: case Q_KEY_CODE_KP_4: return 0x13;
-    case Q_KEY_CODE_5: case Q_KEY_CODE_KP_5: return 0x14;
-    case Q_KEY_CODE_6: case Q_KEY_CODE_KP_6: return 0x15;
-    case Q_KEY_CODE_7: case Q_KEY_CODE_KP_7: return 0x16;
-    case Q_KEY_CODE_8: case Q_KEY_CODE_KP_8: return 0x17;
-    case Q_KEY_CODE_9: case Q_KEY_CODE_KP_9: return 0x18;
-    case Q_KEY_CODE_0: case Q_KEY_CODE_KP_0: return 0x19;
     case Q_KEY_CODE_F12:
     case Q_KEY_CODE_GRAVE_ACCENT:
     case Q_KEY_CODE_MUHENKAN:
@@ -170,6 +165,9 @@ static uint8_t brain_host_set1(const KeyValue *kv)
     }
     if (n <= 0) {
         return 0;
+    }
+    if (n & 0xff00) {
+        return n & 0xff;
     }
     return n & 0x7f;
 }
