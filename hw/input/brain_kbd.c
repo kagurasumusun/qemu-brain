@@ -33,7 +33,11 @@
 #define BRAIN_KBD_COLS  8
 #define BRAIN_KBD_ROWS  7
 
-/* DLL scan order 0,1,2,3,4,6,7; pin 5 last so Q/J/A stay on pin 6. */
+/*
+ * The driver scans these seven GPIO4 columns in this order.  Pin 5 is an
+ * additional direct matrix column used by the remaining key cells, and must
+ * not shift the DLL scan indices for pins 6 and 7 (in particular Q/J/A).
+ */
 static const int brain_kbd_col_pins[BRAIN_KBD_COLS] = { 0, 1, 2, 3, 4, 6, 7, 5 };
 #define BRAIN_KBD_ROW0_GPIO2_PIN   16
 #define BRAIN_KBD_ROW6_GPIO4_PIN   8
@@ -126,69 +130,64 @@ static void brain_kbd_touchkey_update(BrainKbdState *s, QKeyCode qcode,
                                       bool down);
 
 /*
- * DLL table is AT Set-1 (Esc=0x01 A=0x1e J=0x24 Enter=0x1c).
- * HID dump is Set-2 (Q=0x15 = Set-1 Y).  Use XT/Set-1 from
- * qemu_input_key_value_to_number (physical, JIS-safe).
- * Columns: GPIO4 0,1,2,3,4,6,7 then extra pin 5.
+ * Host events identify a physical PC key with QKeyCode.  Route it straight
+ * to the matching Brain matrix cell instead of searching a scancode table.
+ * The supplied capture is PS/2 Set-2 (J = 0x3b), but the driver table is
+ * Set-1 (J = 0x24); mixing those formats can select an unrelated cell such
+ * as 決定.  This mapping also keeps PC number-row keys from aliasing Q--P.
  */
-static const uint8_t brain_keymap[BRAIN_KBD_COLS][BRAIN_KBD_ROWS] = {
-    { 0x16, 0x08, 0x19, 0x25, 0x03, 0x04, 0x4d },
-    { 0x0d, 0x0b, 0x21, 0x27, 0x2a, 0x06, 0x05 },
-    { 0x02, 0x0a, 0x15, 0x28, 0x31, 0x18, 0x50 },
-    { 0x0e, 0x09, 0x2e, 0x26, 0x2b, 0x11, 0x1d },
-    { 0x2c, 0x07, 0x14, 0x29, 0x2d, 0x01, 0x1c },
-    { 0x10, 0x0f, 0x22, 0x24, 0x1a, 0x17, 0x1e },
-    { 0x1b, 0x0c, 0x12, 0x2f, 0x30, 0x13, 0x1f },
-    { 0x20, 0x23, 0x32, 0x39, 0x4b, 0x48, 0x47 },
-};
-
-static uint8_t brain_host_set1(const KeyValue *kv)
+static bool brain_qcode_to_cell(QKeyCode q, int *col, int *row)
 {
-    int n = qemu_input_key_value_to_number(kv);
-    QKeyCode q = qemu_input_key_value_to_qcode(kv);
-
-    /*
-     * Do not map 1-0 onto Q-P.  That made 6 type Y (Set-1 0x15) and
-     * 7 type U.  Letters and digits use XT Set-1 as-is so each dump
-     * cell is unique.  Photo Q1 is still the Q key (0x10).
-     */
     switch (q) {
+    case Q_KEY_CODE_Q: *col = 5; *row = 0; break;
+    case Q_KEY_CODE_W: *col = 3; *row = 5; break;
+    case Q_KEY_CODE_E: *col = 6; *row = 2; break;
+    case Q_KEY_CODE_R: *col = 6; *row = 5; break;
+    case Q_KEY_CODE_T: *col = 4; *row = 2; break;
+    case Q_KEY_CODE_Y: *col = 2; *row = 2; break;
+    case Q_KEY_CODE_U: *col = 0; *row = 0; break;
+    case Q_KEY_CODE_I: *col = 5; *row = 5; break;
+    case Q_KEY_CODE_O: *col = 2; *row = 5; break;
+    case Q_KEY_CODE_P: *col = 0; *row = 2; break;
+    case Q_KEY_CODE_A: *col = 5; *row = 6; break;
+    case Q_KEY_CODE_S: *col = 6; *row = 6; break;
+    case Q_KEY_CODE_D: *col = 7; *row = 0; break;
+    case Q_KEY_CODE_F: *col = 1; *row = 2; break;
+    case Q_KEY_CODE_G: *col = 5; *row = 2; break;
+    case Q_KEY_CODE_H: *col = 7; *row = 1; break;
+    case Q_KEY_CODE_J: *col = 5; *row = 3; break;
+    case Q_KEY_CODE_K: *col = 0; *row = 3; break;
+    case Q_KEY_CODE_L: *col = 3; *row = 3; break;
+    case Q_KEY_CODE_Z: *col = 4; *row = 0; break;
+    case Q_KEY_CODE_X: *col = 4; *row = 4; break;
+    case Q_KEY_CODE_C: *col = 3; *row = 2; break;
+    case Q_KEY_CODE_V: *col = 6; *row = 3; break;
+    case Q_KEY_CODE_B: *col = 6; *row = 4; break;
+    case Q_KEY_CODE_N: *col = 2; *row = 4; break;
+    case Q_KEY_CODE_M: *col = 7; *row = 2; break;
+    case Q_KEY_CODE_SHIFT:
+    case Q_KEY_CODE_SHIFT_R: *col = 1; *row = 4; break;
+    case Q_KEY_CODE_SPC:
+    case Q_KEY_CODE_HENKAN: *col = 7; *row = 3; break;
+    case Q_KEY_CODE_RET:
+    case Q_KEY_CODE_KP_ENTER: *col = 4; *row = 6; break;
+    case Q_KEY_CODE_ESC: *col = 4; *row = 5; break;
+    case Q_KEY_CODE_BACKSPACE:
+    case Q_KEY_CODE_DELETE: *col = 3; *row = 0; break;
+    case Q_KEY_CODE_MINUS: *col = 6; *row = 1; break;
     case Q_KEY_CODE_F12:
     case Q_KEY_CODE_GRAVE_ACCENT:
     case Q_KEY_CODE_MUHENKAN:
-    case Q_KEY_CODE_INSERT:
-        return 0x29;
-    case Q_KEY_CODE_HENKAN:
-        return 0x39;
+    case Q_KEY_CODE_INSERT: *col = 4; *row = 3; break;
+    case Q_KEY_CODE_TAB: *col = 5; *row = 1; break;
+    case Q_KEY_CODE_UP: *col = 7; *row = 5; break;
+    case Q_KEY_CODE_DOWN: *col = 2; *row = 6; break;
+    case Q_KEY_CODE_LEFT: *col = 7; *row = 4; break;
+    case Q_KEY_CODE_RIGHT: *col = 0; *row = 6; break;
     default:
-        break;
-    }
-    if (n <= 0) {
-        return 0;
-    }
-    if (n & 0xff00) {
-        return n & 0xff;
-    }
-    return n & 0x7f;
-}
-
-static bool brain_set1_to_cell(uint8_t sc, int *col, int *row)
-{
-    int c, r;
-
-    if (!sc) {
         return false;
     }
-    for (c = 0; c < BRAIN_KBD_COLS; c++) {
-        for (r = 0; r < BRAIN_KBD_ROWS; r++) {
-            if (brain_keymap[c][r] == sc) {
-                *col = c;
-                *row = r;
-                return true;
-            }
-        }
-    }
-    return false;
+    return true;
 }
 
 static void brain_kbd_refresh(void *opaque);
@@ -395,14 +394,14 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
         return;
     }
 
-    if (!brain_set1_to_cell(brain_host_set1(key->key), &c, &r)) {
+    if (!brain_qcode_to_cell(qcode, &c, &r)) {
         brain_kbd_touchkey_update(s, qcode, key->down);
         return;
     }
 
     if (brain_kbd_debug()) {
-        fprintf(stderr, "[brain-kbd] event qcode=%d set1=0x%02x cell=%d,%d down=%d\n",
-                qcode, brain_host_set1(key->key), c, r, key->down);
+        fprintf(stderr, "[brain-kbd] event qcode=%d cell=%d,%d down=%d\n",
+                qcode, c, r, key->down);
     }
 
     qemu_system_wakeup_request(QEMU_WAKEUP_REASON_OTHER, NULL);

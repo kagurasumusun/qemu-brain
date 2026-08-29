@@ -72,6 +72,9 @@
 #define VDCTRL0_ENABLE_PRESENT      (1u << 28)
 #define VDCTRL0_VSYNC_PULSE_WIDTH_UNIT (1u << 20)
 
+/* Brain's smallest full-screen dimension is 480 pixels. */
+#define MXS_LCDIF_MIN_FRAME_EDGE    400u
+
 typedef struct MXSLcdifState {
     SysBusDevice parent_obj;
 
@@ -175,13 +178,17 @@ static void mxs_lcdif_latch_frame(MXSLcdifState *s)
         return;
     }
     /*
-     * MPU interface reuses the same registers to send panel command
-     * words (TRANSFER_COUNT 1x1).  Those are not a scanout.  Only a
-     * bus-master transfer large enough to be a picture updates the
-     * console descriptor.  Silicon still completes the small transfer
-     * (RUN self-clears); we just do not treat it as a new framebuffer.
+     * MPU interface reuses the framebuffer registers for panel/touch
+     * commands.  The command transfers are often 1x1, but can also have
+     * one panel-sized dimension with a short command payload.  They must
+     * not replace the established scanout descriptor: doing so resizes the
+     * console to a transient shape, makes the window flash, and can select
+     * a different orientation.  Every supported Brain display mode is at
+     * least 480 pixels in both dimensions, so require a full-frame-sized
+     * candidate before updating the descriptor.
      */
-    if (w < 64 || h < 64 || w > 4096 || h > 4096) {
+    if (w < MXS_LCDIF_MIN_FRAME_EDGE || h < MXS_LCDIF_MIN_FRAME_EDGE ||
+        w > 4096 || h > 4096) {
         return;
     }
 
@@ -411,30 +418,18 @@ static void mxs_lcdif_update_display(void *opaque)
     mxs_lcdif_out_size(s, src_w, src_h, &out_w, &out_h);
 
     /*
-     * Never shrink below the viewed panel (PW-SH6: 854x480 landscape,
-     * 5.5" 121.1mm x 68.0mm).  Realize used to size the console to the
-     * unrotated 480x854 scan, then never-shrink kept height 854 and
-     * clipped the right edge of a landscape blit.  Grow only.
+     * TRANSFER_COUNT describes the actual scanout, not merely a damage
+     * rectangle.  Keeping the larger board-default surface left uncovered
+     * pixels black when the guest selected a narrower landscape mode (for
+     * example 800x480).  Match the console to every latched frame so every
+     * visible pixel comes from the guest framebuffer.
      */
-    {
-        int pw, ph, need_w, need_h;
-
-        mxs_lcdif_out_size(s, s->default_width, s->default_height, &pw, &ph);
-        need_w = MAX(out_w, pw);
-        need_h = MAX(out_h, ph);
-        if (need_w < s->cols) {
-            need_w = s->cols;
-        }
-        if (need_h < s->rows) {
-            need_h = s->rows;
-        }
-        if (need_w != s->cols || need_h != s->rows) {
-            s->cols = need_w;
-            s->rows = need_h;
-            qemu_console_resize(s->con, need_w, need_h);
-            surface = qemu_console_surface(s->con);
-            s->invalidate = 1;
-        }
+    if (out_w != s->cols || out_h != s->rows) {
+        s->cols = out_w;
+        s->rows = out_h;
+        qemu_console_resize(s->con, out_w, out_h);
+        surface = qemu_console_surface(s->con);
+        s->invalidate = 1;
     }
     if (!surface || surface_bits_per_pixel(surface) != 32) {
         return;
@@ -451,8 +446,7 @@ static void mxs_lcdif_update_display(void *opaque)
     address_space_read(&address_space_memory, base, MEMTXATTRS_UNSPECIFIED,
                        fb, fb_bytes);
 
-    /* Clear the (possibly larger) console so a smaller frame does not
-     * leave stale pixels around the edges. */
+    /* Clear the destination before copying the current complete scanout. */
     memset(surface_data(surface), 0,
            (size_t)surface_stride(surface) * surface_height(surface));
 
