@@ -1317,18 +1317,29 @@ void hmp_brain_pmemsave(Monitor *mon, const QDict *qdict)
 void hmp_brain_events(Monitor *mon, const QDict *qdict)
 {
     unsigned last = qdict_get_try_int(qdict, "last", 32);
-    char *buf = NULL;
-    size_t len = 0;
-    FILE *f = open_memstream(&buf, &len);
+    g_autofree char *buf = NULL;
+    long n;
+    FILE *f = tmpfile();
 
     if (!f) {
-        monitor_printf(mon, "brain_events: open_memstream failed\n");
+        monitor_printf(mon, "brain_events: tmpfile failed\n");
         return;
     }
     brain_events_dump(f, last);
+    n = ftell(f);
+    if (n < 0) {
+        fclose(f);
+        return;
+    }
+    rewind(f);
+    buf = g_malloc((size_t)n + 1);
+    if (fread(buf, 1, (size_t)n, f) != (size_t)n) {
+        fclose(f);
+        return;
+    }
+    buf[n] = '\0';
     fclose(f);
     monitor_printf(mon, "%s", buf);
-    g_free(buf);
 }
 
 /*
