@@ -182,8 +182,7 @@ static bool brain_qcode_to_cell(QKeyCode q, int *col, int *row)
     case Q_KEY_CODE_N: c = 2; r = 4; break;
     case Q_KEY_CODE_M: c = 5; r = 2; break;
     case Q_KEY_CODE_SHIFT:
-    case Q_KEY_CODE_SHIFT_R:
-    case Q_KEY_CODE_CAPS_LOCK: c = 1; r = 4; break; /* VK 0x14 Set2 0x58 */
+    case Q_KEY_CODE_SHIFT_R: c = 1; r = 4; break; /* シフト → Shift */
     case Q_KEY_CODE_SPC: case Q_KEY_CODE_HENKAN: c = 5; r = 3; break;
     case Q_KEY_CODE_RET: case Q_KEY_CODE_KP_ENTER: c = 4; r = 6; break; /* VK 0x0D Set2 0x5A */
     case Q_KEY_CODE_ESC: c = 4; r = 5; break; /* VK 0x1B Set2 0x76 */
