@@ -33,7 +33,8 @@
 #define BRAIN_KBD_COLS  8
 #define BRAIN_KBD_ROWS  7
 
-static const int brain_kbd_col_pins[BRAIN_KBD_COLS] = { 0, 1, 2, 3, 4, 5, 6, 7 };
+/* DLL scan order 0,1,2,3,4,6,7; pin 5 last so Q/J/A stay on pin 6. */
+static const int brain_kbd_col_pins[BRAIN_KBD_COLS] = { 0, 1, 2, 3, 4, 6, 7, 5 };
 #define BRAIN_KBD_ROW0_GPIO2_PIN   16
 #define BRAIN_KBD_ROW6_GPIO4_PIN   8
 
@@ -125,71 +126,71 @@ static void brain_kbd_touchkey_update(BrainKbdState *s, QKeyCode qcode,
                                       bool down);
 
 /*
- * Single host map: photo keycap / HID dump -> GPIO column index and row.
- * Column index is brain_kbd_col_pins[] (GPIO4 pin = that value).
- * Do not look up Set-1 in a second matrix: HID is VK+Set2 (Q=0x15),
- * the DLL dump is Set-1 (Y=0x15).  Searching one with the other
- * presses the wrong cell (PC Q would hit Y).
- *
- * シフト = Shift only.  記号 = F12.  電源 = Pause (HID unknown).
- * ホーム etc. are MCU touchkeys, not this matrix.
+ * DLL table is AT Set-1 (Esc=0x01 A=0x1e J=0x24 Enter=0x1c).
+ * HID dump is Set-2 (Q=0x15 = Set-1 Y).  Use XT/Set-1 from
+ * qemu_input_key_value_to_number (physical, JIS-safe).
+ * Columns: GPIO4 0,1,2,3,4,6,7 then extra pin 5.
  */
-static bool brain_qcode_to_cell(QKeyCode q, int *col, int *row)
+static const uint8_t brain_keymap[BRAIN_KBD_COLS][BRAIN_KBD_ROWS] = {
+    { 0x16, 0x08, 0x19, 0x25, 0x03, 0x04, 0x4d },
+    { 0x0d, 0x0b, 0x21, 0x27, 0x2a, 0x06, 0x05 },
+    { 0x02, 0x0a, 0x15, 0x28, 0x31, 0x18, 0x50 },
+    { 0x0e, 0x09, 0x2e, 0x26, 0x2b, 0x11, 0x1d },
+    { 0x2c, 0x07, 0x14, 0x29, 0x2d, 0x01, 0x1c },
+    { 0x10, 0x0f, 0x22, 0x24, 0x1a, 0x17, 0x1e },
+    { 0x1b, 0x0c, 0x12, 0x2f, 0x30, 0x13, 0x1f },
+    { 0x20, 0x23, 0x32, 0x39, 0x4b, 0x48, 0x47 },
+};
+
+static uint8_t brain_host_set1(const KeyValue *kv)
 {
-    int c = -1, r = -1;
+    int n = qemu_input_key_value_to_number(kv);
+    QKeyCode q = qemu_input_key_value_to_qcode(kv);
 
     switch (q) {
-    case Q_KEY_CODE_Q: case Q_KEY_CODE_1: case Q_KEY_CODE_KP_1: c = 6; r = 0; break;
-    case Q_KEY_CODE_W: case Q_KEY_CODE_2: case Q_KEY_CODE_KP_2: c = 3; r = 5; break;
-    case Q_KEY_CODE_E: case Q_KEY_CODE_3: case Q_KEY_CODE_KP_3: c = 7; r = 2; break;
-    case Q_KEY_CODE_R: case Q_KEY_CODE_4: case Q_KEY_CODE_KP_4: c = 7; r = 5; break;
-    case Q_KEY_CODE_T: case Q_KEY_CODE_5: case Q_KEY_CODE_KP_5: c = 4; r = 2; break;
-    case Q_KEY_CODE_Y: case Q_KEY_CODE_6: case Q_KEY_CODE_KP_6: c = 2; r = 2; break;
-    case Q_KEY_CODE_U: case Q_KEY_CODE_7: case Q_KEY_CODE_KP_7: c = 0; r = 0; break;
-    case Q_KEY_CODE_I: case Q_KEY_CODE_8: case Q_KEY_CODE_KP_8: c = 6; r = 5; break;
-    case Q_KEY_CODE_O: case Q_KEY_CODE_9: case Q_KEY_CODE_KP_9: c = 2; r = 5; break;
-    case Q_KEY_CODE_P: case Q_KEY_CODE_0: case Q_KEY_CODE_KP_0: c = 0; r = 2; break;
-    case Q_KEY_CODE_A: c = 6; r = 6; break;
-    case Q_KEY_CODE_S: c = 7; r = 6; break;
-    case Q_KEY_CODE_D: c = 5; r = 0; break;
-    case Q_KEY_CODE_F: c = 1; r = 2; break;
-    case Q_KEY_CODE_G: c = 6; r = 2; break;
-    case Q_KEY_CODE_H: c = 5; r = 1; break;
-    case Q_KEY_CODE_J: c = 6; r = 3; break;
-    case Q_KEY_CODE_K: c = 0; r = 3; break;
-    case Q_KEY_CODE_L: c = 3; r = 3; break;
-    case Q_KEY_CODE_Z: c = 4; r = 0; break;
-    case Q_KEY_CODE_X: c = 4; r = 4; break;
-    case Q_KEY_CODE_C: c = 3; r = 2; break;
-    case Q_KEY_CODE_V: c = 7; r = 3; break;
-    case Q_KEY_CODE_B: c = 7; r = 4; break;
-    case Q_KEY_CODE_N: c = 2; r = 4; break;
-    case Q_KEY_CODE_M: c = 5; r = 2; break;
-    case Q_KEY_CODE_SHIFT:
-    case Q_KEY_CODE_SHIFT_R: c = 1; r = 4; break;
-    case Q_KEY_CODE_SPC:
-    case Q_KEY_CODE_HENKAN: c = 5; r = 3; break;
-    case Q_KEY_CODE_RET:
-    case Q_KEY_CODE_KP_ENTER: c = 4; r = 6; break;
-    case Q_KEY_CODE_ESC: c = 4; r = 5; break;
-    case Q_KEY_CODE_BACKSPACE:
-    case Q_KEY_CODE_DELETE: c = 3; r = 0; break;
-    case Q_KEY_CODE_MINUS: c = 7; r = 1; break;
+    case Q_KEY_CODE_1: case Q_KEY_CODE_KP_1: return 0x10;
+    case Q_KEY_CODE_2: case Q_KEY_CODE_KP_2: return 0x11;
+    case Q_KEY_CODE_3: case Q_KEY_CODE_KP_3: return 0x12;
+    case Q_KEY_CODE_4: case Q_KEY_CODE_KP_4: return 0x13;
+    case Q_KEY_CODE_5: case Q_KEY_CODE_KP_5: return 0x14;
+    case Q_KEY_CODE_6: case Q_KEY_CODE_KP_6: return 0x15;
+    case Q_KEY_CODE_7: case Q_KEY_CODE_KP_7: return 0x16;
+    case Q_KEY_CODE_8: case Q_KEY_CODE_KP_8: return 0x17;
+    case Q_KEY_CODE_9: case Q_KEY_CODE_KP_9: return 0x18;
+    case Q_KEY_CODE_0: case Q_KEY_CODE_KP_0: return 0x19;
     case Q_KEY_CODE_F12:
     case Q_KEY_CODE_GRAVE_ACCENT:
     case Q_KEY_CODE_MUHENKAN:
-    case Q_KEY_CODE_INSERT: c = 4; r = 3; break;
-    case Q_KEY_CODE_TAB: c = 6; r = 1; break;
-    case Q_KEY_CODE_UP: c = 5; r = 5; break;
-    case Q_KEY_CODE_DOWN: c = 2; r = 6; break;
-    case Q_KEY_CODE_LEFT: c = 5; r = 4; break;
-    case Q_KEY_CODE_RIGHT: c = 0; r = 6; break;
+    case Q_KEY_CODE_INSERT:
+        return 0x29;
+    case Q_KEY_CODE_HENKAN:
+        return 0x39;
     default:
+        break;
+    }
+    if (n <= 0) {
+        return 0;
+    }
+    return n & 0x7f;
+}
+
+static bool brain_set1_to_cell(uint8_t sc, int *col, int *row)
+{
+    int c, r;
+
+    if (!sc) {
         return false;
     }
-    *col = c;
-    *row = r;
-    return true;
+    for (c = 0; c < BRAIN_KBD_COLS; c++) {
+        for (r = 0; r < BRAIN_KBD_ROWS; r++) {
+            if (brain_keymap[c][r] == sc) {
+                *col = c;
+                *row = r;
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 static void brain_kbd_refresh(void *opaque);
@@ -396,14 +397,14 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
         return;
     }
 
-    if (!brain_qcode_to_cell(qcode, &c, &r)) {
+    if (!brain_set1_to_cell(brain_host_set1(key->key), &c, &r)) {
         brain_kbd_touchkey_update(s, qcode, key->down);
         return;
     }
 
     if (brain_kbd_debug()) {
-        fprintf(stderr, "[brain-kbd] event qcode=%d cell=%d,%d down=%d\n",
-                qcode, c, r, key->down);
+        fprintf(stderr, "[brain-kbd] event qcode=%d set1=0x%02x cell=%d,%d down=%d\n",
+                qcode, brain_host_set1(key->key), c, r, key->down);
     }
 
     qemu_system_wakeup_request(QEMU_WAKEUP_REASON_OTHER, NULL);
