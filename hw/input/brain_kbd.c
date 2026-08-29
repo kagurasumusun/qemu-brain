@@ -71,19 +71,25 @@ static const int brain_kbd_col_pins[BRAIN_KBD_COLS] = { 0, 1, 2, 3, 4, 5, 6, 7 }
  * the APPMAIN menu behaviour.
  */
 #define BRAIN_TOUCHKEY_VALID    0x10u
-/* Photo top-row / 音声: MCU bits, PC F1..F6 (JIS にある普通のキー). */
+/*
+ * User HID dump (VK + PS/2 Set 2): ホーム=F1, 国語漢字=F2, 英和和英=F3,
+ * My辞書=F7, 履歴=F8, 一覧から選ぶ=Home, 音声=F11.
+ */
 static const uint32_t brain_touchkey_bits[] = {
-    0x2, 0x4, 0x8, 0x20,
-    0x100, 0x200, 0x400, 0x800, 0x40,
+    0x2, 0x4, 0x8, 0x20, 0x40,
+    0x100, 0x200, 0x400, 0x800,
 };
 
 static const QKeyCode brain_touchkey_qcodes[] = {
-    Q_KEY_CODE_UP, Q_KEY_CODE_DOWN, Q_KEY_CODE_LEFT, Q_KEY_CODE_RIGHT,
-    Q_KEY_CODE_HOME,          /* ホーム */
-    Q_KEY_CODE_F1,            /* 国語 漢字 */
-    Q_KEY_CODE_F2,            /* 英和 和英 */
-    Q_KEY_CODE_F3,            /* My 辞書 */
-    Q_KEY_CODE_F6,            /* 音声 */
+    Q_KEY_CODE_F1,            /* ホーム VK 0x70 Set2 0x05 */
+    Q_KEY_CODE_F2,            /* 国語 漢字 VK 0x71 Set2 0x06 */
+    Q_KEY_CODE_F3,            /* 英和 和英 VK 0x72 Set2 0x04 */
+    Q_KEY_CODE_F7,            /* My 辞書 VK 0x76 Set2 0x83 */
+    Q_KEY_CODE_F8,            /* 履歴 VK 0x77 Set2 0x0A */
+    Q_KEY_CODE_F11,           /* 音声 VK 0x7A Set2 0x78 */
+    Q_KEY_CODE_PGUP,          /* 音量+ VK 0x21 */
+    Q_KEY_CODE_PGDN,          /* 音量- VK 0x22 */
+    Q_KEY_CODE_HOME,          /* 一覧から選ぶ VK 0x24 Set2 0x6C */
 };
 
 typedef struct BrainKbdState {
@@ -175,12 +181,15 @@ static bool brain_qcode_to_cell(QKeyCode q, int *col, int *row)
     case Q_KEY_CODE_B: c = 7; r = 4; break;
     case Q_KEY_CODE_N: c = 2; r = 4; break;
     case Q_KEY_CODE_M: c = 5; r = 2; break;
-    case Q_KEY_CODE_SHIFT: case Q_KEY_CODE_SHIFT_R: c = 1; r = 4; break;
+    case Q_KEY_CODE_SHIFT:
+    case Q_KEY_CODE_SHIFT_R:
+    case Q_KEY_CODE_CAPS_LOCK: c = 1; r = 4; break; /* VK 0x14 Set2 0x58 */
     case Q_KEY_CODE_SPC: case Q_KEY_CODE_HENKAN: c = 5; r = 3; break;
-    case Q_KEY_CODE_RET: case Q_KEY_CODE_KP_ENTER: c = 4; r = 6; break;
-    case Q_KEY_CODE_ESC: c = 4; r = 5; break;
-    case Q_KEY_CODE_BACKSPACE: case Q_KEY_CODE_DELETE: c = 3; r = 0; break;
+    case Q_KEY_CODE_RET: case Q_KEY_CODE_KP_ENTER: c = 4; r = 6; break; /* VK 0x0D Set2 0x5A */
+    case Q_KEY_CODE_ESC: c = 4; r = 5; break; /* VK 0x1B Set2 0x76 */
+    case Q_KEY_CODE_BACKSPACE: case Q_KEY_CODE_DELETE: c = 3; r = 0; break; /* VK 0x08 Set2 0x66 */
     case Q_KEY_CODE_MINUS: c = 7; r = 1; break;
+    case Q_KEY_CODE_F12: c = 4; r = 3; break; /* 記号 VK 0x7B Set2 0x07 */
     case Q_KEY_CODE_GRAVE_ACCENT:
     case Q_KEY_CODE_MUHENKAN:
     case Q_KEY_CODE_INSERT: c = 4; r = 3; break;
@@ -189,7 +198,7 @@ static bool brain_qcode_to_cell(QKeyCode q, int *col, int *row)
     case Q_KEY_CODE_DOWN: c = 2; r = 6; break;
     case Q_KEY_CODE_LEFT: c = 5; r = 4; break;
     case Q_KEY_CODE_RIGHT: c = 0; r = 6; break;
-    case Q_KEY_CODE_HOME: c = 5; r = 6; break;
+    case Q_KEY_CODE_HOME: c = 5; r = 6; break; /* 一覧から選ぶ also MCU */
     default:
         return false;
     }
@@ -406,8 +415,8 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
      * (that suspends the PC).  Pause/Break is on JIS and US boards;
      * AC_Bookmarks is not a keycap on a JIS 106.
      */
-    if (qcode == Q_KEY_CODE_F12 ||
-        qcode == Q_KEY_CODE_PAUSE || qcode == Q_KEY_CODE_STOP) {
+    /* 電源 dump unknown.  F12 is 記号 (VK 0x7B).  Not host Power. */
+    if (qcode == Q_KEY_CODE_PAUSE || qcode == Q_KEY_CODE_STOP) {
         s->power = key->down;
         brain_kbd_refresh(s);
         qemu_set_irq(s->edna2_int, key->down ? 1 : 0);
@@ -427,31 +436,21 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
 
     qemu_system_wakeup_request(QEMU_WAKEUP_REASON_OTHER, NULL);
 
-    {
-        {
-            if (c < 0 || c >= BRAIN_KBD_COLS || r < 0 || r >= BRAIN_KBD_ROWS) {
-                return;
-            }
-            if (key->down) {
-                s->want[c] |= 1u << r;
-                s->state[c] |= 1u << r;
-                brain_kbd_refresh(s);
-                brain_kbd_edna2_pulse(s);
-                s->hold_until_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                                   BRAIN_KBD_MIN_HOLD_NS;
-            } else {
-                s->want[c] &= ~(1u << r);
-                if (qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) >=
-                    s->hold_until_ns) {
-                    brain_kbd_hold_tick(s);
-                    return;
-                }
-            }
-            timer_mod(s->hold_timer, s->hold_until_ns);
+    if (key->down) {
+        s->want[c] |= 1u << r;
+        s->state[c] |= 1u << r;
+        brain_kbd_refresh(s);
+        brain_kbd_edna2_pulse(s);
+        s->hold_until_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                           BRAIN_KBD_MIN_HOLD_NS;
+    } else {
+        s->want[c] &= ~(1u << r);
+        if (qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) >= s->hold_until_ns) {
+            brain_kbd_hold_tick(s);
             return;
         }
     }
-    brain_kbd_touchkey_update(s, qcode, key->down);
+    timer_mod(s->hold_timer, s->hold_until_ns);
 }
 
 static const QemuInputHandler brain_kbd_handler = {
