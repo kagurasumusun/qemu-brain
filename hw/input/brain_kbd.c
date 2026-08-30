@@ -210,10 +210,18 @@ static const BrainKbdCell brain_kbd_keymap[] = {
     { Q_KEY_CODE_Q,            3, 5 },  /* code 17 = Set2 0x0015 */
     { Q_KEY_CODE_F1,           3, 6 },  /* code 29 = Set2 0x0005 */
     { Q_KEY_CODE_BACKSPACE,    4, 0 },  /* code 44 = Set2 0x0066 */
+    /* The keycap of this cell reads 削除/クリア (Delete/Clear), so the PC
+     * Delete key is the same physical key as Backspace. */
+    { Q_KEY_CODE_DELETE,       4, 0 },  /* code 44 = Set2 0x0066 */
     { Q_KEY_CODE_G,            4, 1 },  /* code  7 = Set2 0x0034 */
     { Q_KEY_CODE_T,            4, 2 },  /* code 20 = Set2 0x002c */
     { Q_KEY_CODE_RIGHT,        4, 3 },  /* code 41 = Set2 0xe074 */
+    /* The keycap of this cell is the physical [シフト] key; the driver
+     * reports it as the layer-toggle (Set-2 0x58).  Bind the PC Shift and
+     * CapsLock keys to it so the guest's shift layer is reachable. */
     { Q_KEY_CODE_CAPS_LOCK,    4, 4 },  /* code 45 = Set2 0x0058 */
+    { Q_KEY_CODE_SHIFT,        4, 4 },  /* code 45 = Set2 0x0058 (シフト) */
+    { Q_KEY_CODE_SHIFT_R,      4, 4 },  /* code 45 = Set2 0x0058 (シフト) */
     { Q_KEY_CODE_A,            4, 5 },  /* code  1 = Set2 0x001c */
     { Q_KEY_CODE_P,            5, 0 },  /* code 16 = Set2 0x004d */
     { Q_KEY_CODE_O,            5, 1 },  /* code 15 = Set2 0x0044 */
