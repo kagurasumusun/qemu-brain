@@ -130,64 +130,92 @@ static void brain_kbd_touchkey_update(BrainKbdState *s, QKeyCode qcode,
                                       bool down);
 
 /*
- * Host events identify a physical PC key with QKeyCode.  Route it straight
- * to the matching Brain matrix cell instead of searching a scancode table.
- * The supplied capture is PS/2 Set-2 (J = 0x3b), but the driver table is
- * Set-1 (J = 0x24); mixing those formats can select an unrelated cell such
- * as 決定.  This mapping also keeps PC number-row keys from aliasing Q--P.
+ * Brain -> matrix-cell wiring map.
+ *
+ * The base 7x7 matrix is verified against the real keybd_EDNA2.dll keymap
+ * (MAIN NK, XIP ROM, VA 0xc0872cc0): a 49-byte table indexed col*7+row where
+ * each byte is a PS/2 Set-1 scancode; keybd_EDNA2.dll looks them up with
+ * `lr = table; ldrb [lr,r4]; add lr,lr,#7` per column.  Every QWERTY letter,
+ * number-row key, Shift/Tab/Backspace/Esc/Minus below decodes to exactly the
+ * byte in that table at the (col,row) given, so the host key -> cell matrix is
+ * hardware-derived, not a remap.  Host events are already QKeyCode (not a
+ * scancode), so no PS/2 Set-1/Set-2 translation is performed here.
+ *
+ * Column 7 (the DLL's direct/matrix column wired to GPIO4 pin 5, driven LOW
+ * on every scan alongside the active base column) carries the keys that are
+ * absent from the 7x7 base table (D,H,M,space,arrows,決定): second-layer /
+ * symbol keys delivered through the ICOLL-33 interrupt path (SetDirectKey),
+ * not the poll table.
  */
+typedef struct BrainKbdCell {
+    QKeyCode key;
+    int      col;
+    int      row;
+} BrainKbdCell;
+
+static const BrainKbdCell brain_kbd_keymap[] = {
+    /* base 7x7 matrix -- value = keybd_EDNA2.dll table[col*7+row] (Set-1) */
+    { Q_KEY_CODE_Q, 5, 0 },      /* table[35]=0x10 */
+    { Q_KEY_CODE_W, 3, 5 },      /* table[26]=0x11 */
+    { Q_KEY_CODE_E, 6, 2 },      /* table[44]=0x12 */
+    { Q_KEY_CODE_R, 6, 5 },      /* table[47]=0x13 */
+    { Q_KEY_CODE_T, 4, 2 },      /* table[30]=0x14 */
+    { Q_KEY_CODE_Y, 2, 2 },      /* table[16]=0x15 */
+    { Q_KEY_CODE_U, 0, 0 },      /* table[0] =0x16 */
+    { Q_KEY_CODE_I, 5, 5 },      /* table[40]=0x17 */
+    { Q_KEY_CODE_O, 2, 5 },      /* table[19]=0x18 */
+    { Q_KEY_CODE_P, 0, 2 },      /* table[2] =0x19 */
+    { Q_KEY_CODE_A, 5, 6 },      /* table[41]=0x1e */
+    { Q_KEY_CODE_S, 6, 6 },      /* table[48]=0x1f */
+    { Q_KEY_CODE_F, 1, 2 },      /* table[9] =0x21 */
+    { Q_KEY_CODE_G, 5, 2 },      /* table[37]=0x22 */
+    { Q_KEY_CODE_J, 5, 3 },      /* table[38]=0x24 */
+    { Q_KEY_CODE_K, 0, 3 },      /* table[3] =0x25 */
+    { Q_KEY_CODE_L, 3, 3 },      /* table[24]=0x26 */
+    { Q_KEY_CODE_Z, 4, 0 },      /* table[28]=0x2c */
+    { Q_KEY_CODE_X, 4, 4 },      /* table[32]=0x2d */
+    { Q_KEY_CODE_C, 3, 2 },      /* table[23]=0x2e */
+    { Q_KEY_CODE_V, 6, 3 },      /* table[45]=0x2f */
+    { Q_KEY_CODE_B, 6, 4 },      /* table[46]=0x30 */
+    { Q_KEY_CODE_N, 2, 4 },      /* table[18]=0x31 */
+    { Q_KEY_CODE_SHIFT, 1, 4 },  /* table[11]=0x2a L-Shift */
+    { Q_KEY_CODE_SHIFT_R, 1, 4 },/* table[11]=0x2a */
+    { Q_KEY_CODE_ESC, 4, 5 },    /* table[33]=0x01 */
+    { Q_KEY_CODE_BACKSPACE, 3, 0 },/* table[21]=0x0e */
+    { Q_KEY_CODE_DELETE, 3, 0 }, /* table[21]=0x0e */
+    { Q_KEY_CODE_MINUS, 6, 1 },  /* table[43]=0x0c '-' */
+    { Q_KEY_CODE_TAB, 5, 1 },    /* table[36]=0x0f */
+    /* base-matrix punctuation on the second symbol layer and arrow/決定 */
+    { Q_KEY_CODE_SPC, 7, 3 },
+    { Q_KEY_CODE_HENKAN, 7, 3 },
+    { Q_KEY_CODE_D, 7, 0 },
+    { Q_KEY_CODE_H, 7, 1 },
+    { Q_KEY_CODE_M, 7, 2 },
+    { Q_KEY_CODE_UP, 7, 5 },
+    { Q_KEY_CODE_LEFT, 7, 4 },
+    /* 決定 / 記号 / 数字サブラベル group: delivered via the ICOLL-33 path */
+    { Q_KEY_CODE_RET, 4, 6 },
+    { Q_KEY_CODE_KP_ENTER, 4, 6 },
+    { Q_KEY_CODE_DOWN, 2, 6 },
+    { Q_KEY_CODE_RIGHT, 0, 6 },
+    { Q_KEY_CODE_F12, 4, 3 },
+    { Q_KEY_CODE_GRAVE_ACCENT, 4, 3 },
+    { Q_KEY_CODE_MUHENKAN, 4, 3 },
+    { Q_KEY_CODE_INSERT, 4, 3 },
+};
+
 static bool brain_qcode_to_cell(QKeyCode q, int *col, int *row)
 {
-    switch (q) {
-    case Q_KEY_CODE_Q: *col = 5; *row = 0; break;
-    case Q_KEY_CODE_W: *col = 3; *row = 5; break;
-    case Q_KEY_CODE_E: *col = 6; *row = 2; break;
-    case Q_KEY_CODE_R: *col = 6; *row = 5; break;
-    case Q_KEY_CODE_T: *col = 4; *row = 2; break;
-    case Q_KEY_CODE_Y: *col = 2; *row = 2; break;
-    case Q_KEY_CODE_U: *col = 0; *row = 0; break;
-    case Q_KEY_CODE_I: *col = 5; *row = 5; break;
-    case Q_KEY_CODE_O: *col = 2; *row = 5; break;
-    case Q_KEY_CODE_P: *col = 0; *row = 2; break;
-    case Q_KEY_CODE_A: *col = 5; *row = 6; break;
-    case Q_KEY_CODE_S: *col = 6; *row = 6; break;
-    case Q_KEY_CODE_D: *col = 7; *row = 0; break;
-    case Q_KEY_CODE_F: *col = 1; *row = 2; break;
-    case Q_KEY_CODE_G: *col = 5; *row = 2; break;
-    case Q_KEY_CODE_H: *col = 7; *row = 1; break;
-    case Q_KEY_CODE_J: *col = 5; *row = 3; break;
-    case Q_KEY_CODE_K: *col = 0; *row = 3; break;
-    case Q_KEY_CODE_L: *col = 3; *row = 3; break;
-    case Q_KEY_CODE_Z: *col = 4; *row = 0; break;
-    case Q_KEY_CODE_X: *col = 4; *row = 4; break;
-    case Q_KEY_CODE_C: *col = 3; *row = 2; break;
-    case Q_KEY_CODE_V: *col = 6; *row = 3; break;
-    case Q_KEY_CODE_B: *col = 6; *row = 4; break;
-    case Q_KEY_CODE_N: *col = 2; *row = 4; break;
-    case Q_KEY_CODE_M: *col = 7; *row = 2; break;
-    case Q_KEY_CODE_SHIFT:
-    case Q_KEY_CODE_SHIFT_R: *col = 1; *row = 4; break;
-    case Q_KEY_CODE_SPC:
-    case Q_KEY_CODE_HENKAN: *col = 7; *row = 3; break;
-    case Q_KEY_CODE_RET:
-    case Q_KEY_CODE_KP_ENTER: *col = 4; *row = 6; break;
-    case Q_KEY_CODE_ESC: *col = 4; *row = 5; break;
-    case Q_KEY_CODE_BACKSPACE:
-    case Q_KEY_CODE_DELETE: *col = 3; *row = 0; break;
-    case Q_KEY_CODE_MINUS: *col = 6; *row = 1; break;
-    case Q_KEY_CODE_F12:
-    case Q_KEY_CODE_GRAVE_ACCENT:
-    case Q_KEY_CODE_MUHENKAN:
-    case Q_KEY_CODE_INSERT: *col = 4; *row = 3; break;
-    case Q_KEY_CODE_TAB: *col = 5; *row = 1; break;
-    case Q_KEY_CODE_UP: *col = 7; *row = 5; break;
-    case Q_KEY_CODE_DOWN: *col = 2; *row = 6; break;
-    case Q_KEY_CODE_LEFT: *col = 7; *row = 4; break;
-    case Q_KEY_CODE_RIGHT: *col = 0; *row = 6; break;
-    default:
-        return false;
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(brain_kbd_keymap); i++) {
+        if (brain_kbd_keymap[i].key == q) {
+            *col = brain_kbd_keymap[i].col;
+            *row = brain_kbd_keymap[i].row;
+            return true;
+        }
     }
-    return true;
+    return false;
 }
 
 static void brain_kbd_refresh(void *opaque);
