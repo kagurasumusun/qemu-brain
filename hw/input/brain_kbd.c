@@ -1,14 +1,25 @@
 /*
  * SHARP Brain keyboard matrix
  *
- * Wiring from keybd_EDNA2.dll (MAIN NK VA 0xc0872cc0 keymap):
+ * Wiring, decoded from keybd_EDNA2.dll (MAIN NK XIP ROM):
  *
  *   columns (driven, outputs): GPIO4 pins 0,1,2,3,4,6,7
  *   rows    (read,   inputs):  GPIO2 pins 16,17,18,19,20,21 (rows 0..5)
  *                              GPIO4 pin 8                    (row 6)
  *
- * Scanning drives one column LOW at a time and reads the 7 row inputs.
- * A pressed key ties its row to the driven column (row reads LOW).
+ * The scan routine (VA 0xc0878664) walks r7 = 1,2,4,...,0x40 and calls
+ * VA 0xc087847c, which ORs the remap table at VA 0xc0872ca4
+ * { 0x01,0x02,0x04,0x08,0x10,0x40,0x80 } into HW_PINCTRL_DOUT4_CLR
+ * (+0x748) / DOE4_SET (+0xb44); DOE4_CLR (+0xb48) = 0xDF releases the
+ * columns again.  So DLL column 0..6 = GPIO4 pin 0,1,2,3,4,6,7 and GPIO4
+ * pin 5 is *not* a matrix line.  Each column read builds a 7-bit row
+ * mask (VA 0xc0878708):
+ *
+ *   mask bit i (i=0..5) = ~DIN2 bit (16+i)     (row i, active low)
+ *   mask bit 6          = ~DIN4 bit 8          (row 6, active low)
+ *
+ * A pressed key ties its row to the driven (low) column, so a row that
+ * reads LOW while its column is driven means "pressed".
  *
  * ICOLL 63 is the MCU doorbell (guest pulses INTR63.SOFTIRQ).  Do not
  * drive that line from the matrix.
@@ -30,15 +41,15 @@
 #include "ui/input.h"
 #include "system/runstate.h"
 
-#define BRAIN_KBD_COLS  8
+#define BRAIN_KBD_COLS  7
 #define BRAIN_KBD_ROWS  7
 
 /*
- * The driver scans these seven GPIO4 columns in this order.  Pin 5 is an
- * additional direct matrix column used by the remaining key cells, and must
- * not shift the DLL scan indices for pins 6 and 7 (in particular Q/J/A).
+ * The driver scans these seven GPIO4 columns in this order (remap table
+ * at VA 0xc0872ca4, driven through DOUT4_CLR/DOE4_SET).  GPIO4 pin 5 is
+ * driven low by another driver but is not part of the key matrix.
  */
-static const int brain_kbd_col_pins[BRAIN_KBD_COLS] = { 0, 1, 2, 3, 4, 6, 7, 5 };
+static const int brain_kbd_col_pins[BRAIN_KBD_COLS] = { 0, 1, 2, 3, 4, 6, 7 };
 #define BRAIN_KBD_ROW0_GPIO2_PIN   16
 #define BRAIN_KBD_ROW6_GPIO4_PIN   8
 
@@ -130,22 +141,40 @@ static void brain_kbd_touchkey_update(BrainKbdState *s, QKeyCode qcode,
                                       bool down);
 
 /*
- * Brain -> matrix-cell wiring map.
+ * Host key -> matrix cell.
  *
- * The base 7x7 matrix is verified against the real keybd_EDNA2.dll keymap
- * (MAIN NK, XIP ROM, VA 0xc0872cc0): a 49-byte table indexed col*7+row where
- * each byte is a PS/2 Set-1 scancode; keybd_EDNA2.dll looks them up with
- * `lr = table; ldrb [lr,r4]; add lr,lr,#7` per column.  Every QWERTY letter,
- * number-row key, Shift/Tab/Backspace/Esc/Minus below decodes to exactly the
- * byte in that table at the (col,row) given, so the host key -> cell matrix is
- * hardware-derived, not a remap.  Host events are already QKeyCode (not a
- * scancode), so no PS/2 Set-1/Set-2 translation is performed here.
+ * keybd_EDNA2.dll decodes the matrix in TWO stages, and both must be
+ * modelled to get the right key:
  *
- * Column 7 (the DLL's direct/matrix column wired to GPIO4 pin 5, driven LOW
- * on every scan alongside the active base column) carries the keys that are
- * absent from the 7x7 base table (D,H,M,space,arrows,決定): second-layer /
- * symbol keys delivered through the ICOLL-33 interrupt path (SetDirectKey),
- * not the poll table.
+ *   1. VA 0xc0878604 walks the pressed cells and emits, per cell,
+ *      byte table49[col*7 + row] from the 49-byte table at VA 0xc0872cc0.
+ *      Those bytes are NOT PS/2 Set-1 scancodes: they are 1..49 key
+ *      indices (the set {1..49} minus 28/32/35, 46 values for the 46
+ *      populated cells).
+ *   2. The polling routine (VA 0xc087311c) then does
+ *          VK = keytable[layout * 50 + index]
+ *      (VA 0xc087329c: `and r3,r2,#0x7f; mla r3,r1,sl,r3; ldr r1,[sb,r3,lsl#2]`,
+ *      sl = 50) against the 3 x 50-entry table at VA 0xc087a148, whose
+ *      entries are PS/2 Set-2 codes.
+ *
+ * So cell -> index -> Set-2.  Applying both stages to all 46 populated
+ * cells yields exactly one complete keyboard with no duplicates:
+ * A-Z, '-', Enter, Backspace, Space, Esc, CapsLock, the four arrows,
+ * Home, PgUp, PgDn and F1/F2/F3/F7/F8/F11/F12.  Treating stage 1 as
+ * Set-1 instead (the old map) scrambles every key: e.g. the old
+ * J -> (5,3) cell holds index 36 = Set-2 0x5a = Enter, and the old
+ * A -> (5,6) cell holds index 30 = Set-2 0x06 = F2.
+ *
+ * Independent cross-check: the user HID dump lists ホーム=F1 (Set2 0x05),
+ * 国語漢字=F2 (0x06), 英和和英=F3 (0x04), My辞書=F7 (0x83), 履歴=F8 (0x0A),
+ * 音声=F11 (0x78), 一覧から選ぶ=Home (E0 6C) - all seven land on exactly
+ * the cells this table assigns them.
+ *
+ * Keys with no Brain keycap (digits, punctuation, Tab, Shift, Ctrl, Alt,
+ * Delete, F4/F5/F6/F9/F10) are deliberately left unmapped: on the real
+ * machine digits are a symbol-layer combination produced through the
+ * EDNA2 touchkey path, not a matrix cell, and inventing a cell for them
+ * would bypass the driver.
  */
 typedef struct BrainKbdCell {
     QKeyCode key;
@@ -154,54 +183,53 @@ typedef struct BrainKbdCell {
 } BrainKbdCell;
 
 static const BrainKbdCell brain_kbd_keymap[] = {
-    /* base 7x7 matrix -- value = keybd_EDNA2.dll table[col*7+row] (Set-1) */
-    { Q_KEY_CODE_Q, 5, 0 },      /* table[35]=0x10 */
-    { Q_KEY_CODE_W, 3, 5 },      /* table[26]=0x11 */
-    { Q_KEY_CODE_E, 6, 2 },      /* table[44]=0x12 */
-    { Q_KEY_CODE_R, 6, 5 },      /* table[47]=0x13 */
-    { Q_KEY_CODE_T, 4, 2 },      /* table[30]=0x14 */
-    { Q_KEY_CODE_Y, 2, 2 },      /* table[16]=0x15 */
-    { Q_KEY_CODE_U, 0, 0 },      /* table[0] =0x16 */
-    { Q_KEY_CODE_I, 5, 5 },      /* table[40]=0x17 */
-    { Q_KEY_CODE_O, 2, 5 },      /* table[19]=0x18 */
-    { Q_KEY_CODE_P, 0, 2 },      /* table[2] =0x19 */
-    { Q_KEY_CODE_A, 5, 6 },      /* table[41]=0x1e */
-    { Q_KEY_CODE_S, 6, 6 },      /* table[48]=0x1f */
-    { Q_KEY_CODE_F, 1, 2 },      /* table[9] =0x21 */
-    { Q_KEY_CODE_G, 5, 2 },      /* table[37]=0x22 */
-    { Q_KEY_CODE_J, 5, 3 },      /* table[38]=0x24 */
-    { Q_KEY_CODE_K, 0, 3 },      /* table[3] =0x25 */
-    { Q_KEY_CODE_L, 3, 3 },      /* table[24]=0x26 */
-    { Q_KEY_CODE_Z, 4, 0 },      /* table[28]=0x2c */
-    { Q_KEY_CODE_X, 4, 4 },      /* table[32]=0x2d */
-    { Q_KEY_CODE_C, 3, 2 },      /* table[23]=0x2e */
-    { Q_KEY_CODE_V, 6, 3 },      /* table[45]=0x2f */
-    { Q_KEY_CODE_B, 6, 4 },      /* table[46]=0x30 */
-    { Q_KEY_CODE_N, 2, 4 },      /* table[18]=0x31 */
-    { Q_KEY_CODE_SHIFT, 1, 4 },  /* table[11]=0x2a L-Shift */
-    { Q_KEY_CODE_SHIFT_R, 1, 4 },/* table[11]=0x2a */
-    { Q_KEY_CODE_ESC, 4, 5 },    /* table[33]=0x01 */
-    { Q_KEY_CODE_BACKSPACE, 3, 0 },/* table[21]=0x0e */
-    { Q_KEY_CODE_DELETE, 3, 0 }, /* table[21]=0x0e */
-    { Q_KEY_CODE_MINUS, 6, 1 },  /* table[43]=0x0c '-' */
-    { Q_KEY_CODE_TAB, 5, 1 },    /* table[36]=0x0f */
-    /* base-matrix punctuation on the second symbol layer and arrow/決定 */
-    { Q_KEY_CODE_SPC, 7, 3 },
-    { Q_KEY_CODE_HENKAN, 7, 3 },
-    { Q_KEY_CODE_D, 7, 0 },
-    { Q_KEY_CODE_H, 7, 1 },
-    { Q_KEY_CODE_M, 7, 2 },
-    { Q_KEY_CODE_UP, 7, 5 },
-    { Q_KEY_CODE_LEFT, 7, 4 },
-    /* 決定 / 記号 / 数字サブラベル group: delivered via the ICOLL-33 path */
-    { Q_KEY_CODE_RET, 4, 6 },
-    { Q_KEY_CODE_KP_ENTER, 4, 6 },
-    { Q_KEY_CODE_DOWN, 2, 6 },
-    { Q_KEY_CODE_RIGHT, 0, 6 },
-    { Q_KEY_CODE_F12, 4, 3 },
-    { Q_KEY_CODE_GRAVE_ACCENT, 4, 3 },
-    { Q_KEY_CODE_MUHENKAN, 4, 3 },
-    { Q_KEY_CODE_INSERT, 4, 3 },
+    { Q_KEY_CODE_V,            0, 0 },  /* code 22 = Set2 0x002a */
+    { Q_KEY_CODE_H,            0, 1 },  /* code  8 = Set2 0x0033 */
+    { Q_KEY_CODE_Y,            0, 2 },  /* code 25 = Set2 0x0035 */
+    { Q_KEY_CODE_ESC,          0, 3 },  /* code 37 = Set2 0x0076 */
+    { Q_KEY_CODE_C,            0, 4 },  /* code  3 = Set2 0x0021 */
+    { Q_KEY_CODE_D,            0, 5 },  /* code  4 = Set2 0x0023 */
+    { Q_KEY_CODE_M,            1, 0 },  /* code 13 = Set2 0x003a */
+    { Q_KEY_CODE_K,            1, 1 },  /* code 11 = Set2 0x0042 */
+    { Q_KEY_CODE_F8,           1, 2 },  /* code 33 = Set2 0x000a */
+    { Q_KEY_CODE_DOWN,         1, 3 },  /* code 39 = Set2 0xe072 */
+    { Q_KEY_CODE_PGUP,         1, 4 },  /* code 42 = Set2 0xe07d */
+    { Q_KEY_CODE_F,            1, 5 },  /* code  6 = Set2 0x002b */
+    { Q_KEY_CODE_E,            1, 6 },  /* code  5 = Set2 0x0024 */
+    { Q_KEY_CODE_B,            2, 0 },  /* code  2 = Set2 0x0032 */
+    { Q_KEY_CODE_J,            2, 1 },  /* code 10 = Set2 0x003b */
+    { Q_KEY_CODE_U,            2, 2 },  /* code 21 = Set2 0x003c */
+    { Q_KEY_CODE_LEFT,         2, 3 },  /* code 40 = Set2 0xe06b */
+    { Q_KEY_CODE_F12,          2, 4 },  /* code 49 = Set2 0x0007 */
+    { Q_KEY_CODE_X,            2, 5 },  /* code 24 = Set2 0x0022 */
+    { Q_KEY_CODE_N,            3, 0 },  /* code 14 = Set2 0x0031 */
+    { Q_KEY_CODE_I,            3, 1 },  /* code  9 = Set2 0x0043 */
+    { Q_KEY_CODE_F7,           3, 2 },  /* code 46 = Set2 0x0083 */
+    { Q_KEY_CODE_UP,           3, 3 },  /* code 38 = Set2 0xe075 */
+    { Q_KEY_CODE_PGDN,         3, 4 },  /* code 43 = Set2 0xe07a */
+    { Q_KEY_CODE_Q,            3, 5 },  /* code 17 = Set2 0x0015 */
+    { Q_KEY_CODE_F1,           3, 6 },  /* code 29 = Set2 0x0005 */
+    { Q_KEY_CODE_BACKSPACE,    4, 0 },  /* code 44 = Set2 0x0066 */
+    { Q_KEY_CODE_G,            4, 1 },  /* code  7 = Set2 0x0034 */
+    { Q_KEY_CODE_T,            4, 2 },  /* code 20 = Set2 0x002c */
+    { Q_KEY_CODE_RIGHT,        4, 3 },  /* code 41 = Set2 0xe074 */
+    { Q_KEY_CODE_CAPS_LOCK,    4, 4 },  /* code 45 = Set2 0x0058 */
+    { Q_KEY_CODE_A,            4, 5 },  /* code  1 = Set2 0x001c */
+    { Q_KEY_CODE_P,            5, 0 },  /* code 16 = Set2 0x004d */
+    { Q_KEY_CODE_O,            5, 1 },  /* code 15 = Set2 0x0044 */
+    { Q_KEY_CODE_HOME,         5, 2 },  /* code 34 = Set2 0xe06c */
+    { Q_KEY_CODE_RET,          5, 3 },  /* code 36 = Set2 0x005a */
+    { Q_KEY_CODE_KP_ENTER,     5, 3 },  /* code 36 = Set2 0x005a */
+    { Q_KEY_CODE_Z,            5, 4 },  /* code 26 = Set2 0x001a */
+    { Q_KEY_CODE_W,            5, 5 },  /* code 23 = Set2 0x001d */
+    { Q_KEY_CODE_F2,           5, 6 },  /* code 30 = Set2 0x0006 */
+    { Q_KEY_CODE_MINUS,        6, 0 },  /* code 27 = Set2 0x004e */
+    { Q_KEY_CODE_L,            6, 1 },  /* code 12 = Set2 0x004b */
+    { Q_KEY_CODE_R,            6, 2 },  /* code 18 = Set2 0x002d */
+    { Q_KEY_CODE_SPC,          6, 3 },  /* code 47 = Set2 0x0029 */
+    { Q_KEY_CODE_F11,          6, 4 },  /* code 48 = Set2 0x0078 */
+    { Q_KEY_CODE_S,            6, 5 },  /* code 19 = Set2 0x001b */
+    { Q_KEY_CODE_F3,           6, 6 },  /* code 31 = Set2 0x0004 */
 };
 
 static bool brain_qcode_to_cell(QKeyCode q, int *col, int *row)
@@ -550,8 +578,8 @@ static void brain_kbd_init(Object *obj)
 
 static const VMStateDescription vmstate_brain_kbd = {
     .name = "brain-keyboard",
-    .version_id = 2,
-    .minimum_version_id = 2,
+    .version_id = 3,
+    .minimum_version_id = 3,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT8_ARRAY(want, BrainKbdState, BRAIN_KBD_COLS),
         VMSTATE_UINT8_ARRAY(state, BrainKbdState, BRAIN_KBD_COLS),
