@@ -1416,16 +1416,11 @@ void hmp_brain_touch(Monitor *mon, const QDict *qdict)
     }
 
     /*
-     * The EDNA2 MCU watches the touch panel in parallel with the
-     * host LRADC and pulses its attention line (ICOL 33) on panel
-     * activity.  The host touch PDD powers itself down when idle
-     * (serial: "LOG(1): OFF state") and only this MCU pulse wakes
-     * it back up on the real device; mirror that here so touches
-     * work in the OFF state too.
+     * The panel wake path belongs to the touch device, not to this command:
+     * mxs_lradc_set_touch() pulses the EDNA2 attention line on every press
+     * edge, so the SDL/gtk pointer and `brain_touch` behave identically and a
+     * press is not duplicated here.
      */
-    if (bms->kbd && down) {
-        brain_kbd_edna2_pulse_ext(bms->kbd);
-    }
 
     monitor_printf(mon, "brain_touch: x=%d y=%d down=%d\n", x, y, down);
 }
@@ -1761,6 +1756,32 @@ static bool brain_inject_touch_affine(BrainMachineState *bms)
     }
     return true;
 }
+
+/*
+ * The resistive panel's factory calibration is not stored anywhere the
+ * emulated guest can read it: on the real Brain it lives in the registry hive
+ * (HARDWARE\DEVICEMAP\TOUCH "CalibrationData") and in every eMMC dump in
+ * circulation that area was erased, so the touch PDD comes up with an
+ * all-zero Q8.8 table at 0xc07c71c8 and affine block at 0xc07c71f4.  The
+ * fetch (0xc07c1c78) then calibrates every sample to zero, its
+ * "x' - 0x50 > 0x2cf" rectangle test fails, and the tap is discarded with the
+ * pen-up flag -- the "tap does nothing" symptom, and specifically the "right
+ * edge is dead during normal operation but fine while the logo is up"
+ * symptom, because the logo phase is exactly the window before the PDD wipes
+ * the block.
+ *
+ * The MCU command path already injects the factory values once (see
+ * brain_edna2_mcu_execute), but that lands ~8 s into boot while the PDD
+ * zeroes the same words later, during its own initialisation: measured in
+ * runs/cal01 the affine reappeared for one poll and was gone from then on,
+ * and in runs/fix03 delivery stopped dead after the 11th tap.
+ *
+ * So re-assert them until the driver publishes a calibration of its own.
+ * The area flag at 0xc07c71f0 is written only by the calibration flow
+ * (0xc07c2788 sets it together with the RECT), so a set flag means the guest
+ * has real coefficients and we must stay out of the way.
+ */
+#define BRAIN_TOUCH_CAL_REFRESH_NS   200000000LL   /* 200 ms */
 
 static uint64_t brain_edna2_mb_read(void *opaque, hwaddr offset, unsigned size)
 {

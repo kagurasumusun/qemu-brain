@@ -62,6 +62,18 @@
 
 #define LRADC_NCHANNELS     8
 
+/*
+ * Calibrated plate span, from the boot registry CalibrationData
+ * (HARDWARE\DEVICEMAP\TOUCH, "1931,1961 889,2993 888,906 2961,920
+ * 2958,3039"): raw X runs 888..2961 over the 800 px display width and raw Y
+ * 906..3039 over the 480 px height.  Centre raw (1931,1961) therefore lands
+ * on display (400,240), exactly as measured on hardware.
+ */
+#define BRAIN_RAW_X_LO      888
+#define BRAIN_RAW_X_HI      2961
+#define BRAIN_RAW_Y_LO      906
+#define BRAIN_RAW_Y_HI      3039
+
 typedef struct MXSLradcState {
     SysBusDevice parent_obj;
 
@@ -78,15 +90,31 @@ typedef struct MXSLradcState {
     int touch_x;                    /* 0 .. 0x7fff from the UI */
     int touch_y;
     bool touch_down;
-    int last_x, last_y;             /* unused; kept for migration shape */
+    int last_x, last_y;             /* transitional pen-up sample */
 
-    uint32_t width;
-    uint32_t height;
+    /*
+     * A DELAY kick arms LOOP_COUNT further conversions; on silicon the
+     * sequence is free-running once started.  Latch the plate state for the
+     * whole run so a UI motion landing in the middle of a burst can not make
+     * the driver's three-sample jitter filter reject the read.
+     */
+    int run_x, run_y;
+    bool run_down;
+    bool run_valid;
+
+    uint32_t loop_count[4];         /* conversions left per DELAY channel */
+    bool touch_up_pending;          /* deliver one transitional sample */
+
     uint32_t batt_value;
     uint32_t vddio_value;
 } MXSLradcState;
 
 OBJECT_DECLARE_SIMPLE_TYPE(MXSLradcState, MXS_LRADC)
+
+static int clamp32(int v, int lo, int hi)
+{
+    return v < lo ? lo : (v > hi ? hi : v);
+}
 
 static bool brain_touch_debug(void)
 {
@@ -144,11 +172,42 @@ static void mxs_lradc_update_irq(MXSLradcState *s)
 static uint32_t mxs_lradc_sample(MXSLradcState *s, int ch, uint32_t trigger)
 {
     uint32_t x, y;
+    int ax, ay;
+    int sx, sy;
+    bool down;
 
-    x = s->touch_down ?
-        888 + (uint32_t)s->touch_x * 2073 / 0x8000 : 0;
-    y = s->touch_down ?
-        906 + (uint32_t)s->touch_y * 2133 / 0x8000 : 0;
+    /*
+     * Report the state latched for the current conversion burst (see
+     * mxs_lradc_run_start()): the driver's three-sample jitter filter must
+     * not be tripped by a UI motion that lands inside a burst, which is what
+     * makes a slide "stop halfway" while a static tap works.
+     *
+     * A pen-up transition is sampled while the panel is already released: on
+     * silicon the last conversion still carries the release position, so the
+     * driver can tell "the pen lifted" from "no pen was ever down".  Feed the
+     * transitional coordinates through the burst exactly once.
+     */
+    sx = s->run_valid ? s->run_x : s->touch_x;
+    sy = s->run_valid ? s->run_y : s->touch_y;
+    down = s->run_valid ? s->run_down : s->touch_down;
+
+    /*
+     * The UI delivers normalised absolute coordinates over the whole panel;
+     * the calibrated plate span is what a finger on the glass produces, so
+     * map [0, 0x7fff] -> [LEFT, RIGHT] with round-to-nearest.  Truncating
+     * instead costs a systematic half-to-one pixel and pushes the extreme
+     * column outside the driver's rectangle test.
+     */
+    ax = DIV_ROUND_UP(sx * (BRAIN_RAW_X_HI - BRAIN_RAW_X_LO), 0x7fff);
+    ay = DIV_ROUND_UP(sy * (BRAIN_RAW_Y_HI - BRAIN_RAW_Y_LO), 0x7fff);
+    /* 12-bit converter: a plate reading can never exceed 0xfff */
+    x = MIN(BRAIN_RAW_X_LO + ax, 0xfff);
+    y = MIN(BRAIN_RAW_Y_LO + ay, 0xfff);
+
+    if (!down) {
+        x = 0;
+        y = 0;
+    }
 
     /*
      * Physical plate semantics (i.MX28 4-wire, verified against
@@ -183,9 +242,9 @@ static uint32_t mxs_lradc_sample(MXSLradcState *s, int ch, uint32_t trigger)
         if (trigger & (1u << 3)) {
             return x;
         }
-        return s->touch_down ? 0x200 : 0;
+        return down ? 0x200 : 0;
     case 4:     /* XNUL (unread by the touch stack) */
-        return s->touch_down ? 0x400 : 0;
+        return down ? 0x400 : 0;
     case 5:     /* YNLR: Y probe (read by GetX as X5) */
         return y;
     case 6:     /* VDDIO */
@@ -195,6 +254,35 @@ static uint32_t mxs_lradc_sample(MXSLradcState *s, int ch, uint32_t trigger)
     default:
         return 0x400;
     }
+}
+
+/*
+ * Latch the touch state for the duration of one conversion burst.  Called
+ * with @force on a fresh DELAY kick (the sequence starts there), and without
+ * it from the auto-rearm path, which must keep reporting the same sample the
+ * driver armed the loop for.
+ */
+static void mxs_lradc_run_start(MXSLradcState *s, bool force)
+{
+    if (s->run_valid && !force) {
+        return;
+    }
+    s->run_x = s->touch_x;
+    s->run_y = s->touch_y;
+    s->run_down = s->touch_down;
+    if (!s->touch_down && s->touch_up_pending) {
+        /* the pen lifted since the last sample: report the release position */
+        s->run_x = s->last_x;
+        s->run_y = s->last_y;
+        s->run_down = true;
+        s->touch_up_pending = false;
+    }
+    s->run_valid = true;
+}
+
+static void mxs_lradc_run_end(MXSLradcState *s)
+{
+    s->run_valid = false;
 }
 
 static void mxs_lradc_convert(MXSLradcState *s, uint32_t channels)
@@ -224,21 +312,54 @@ static void mxs_lradc_convert(MXSLradcState *s, uint32_t channels)
     mxs_lradc_update_irq(s);
 }
 
+/*
+ * HW_LRADC_DELAYn counts LOOP_COUNT conversions and then stops; DELAY.KICK is
+ * self-clearing on silicon.  Both matter far beyond fidelity.
+ *
+ * The WinCE touch PDD ends a sampling sequence by clearing KICK
+ * (0xc06731e8).  A loop that ignored KICK kept re-arming a 1 ms conversion
+ * for the rest of the session: every round re-latched the channel IRQ status,
+ * which the guest's write-1-to-clear can never win against, so the collector
+ * spun in "InterruptHandle() already gated" (~20k ICOLL transactions per tap
+ * measured in runs/fix02), the touch IST thread starved, and the result
+ * registers were overwritten with the release value before the driver read
+ * them.  That is the "tap does nothing", "slide stops halfway" and
+ * boot-time input-lag symptom in one bug.
+ */
+static void mxs_lradc_delay_stop(MXSLradcState *s, int n)
+{
+    s->loop_count[n] = 0;
+    timer_del(s->delay_timer[n]);
+    mxs_lradc_run_end(s);
+}
+
+static void mxs_lradc_delay_schedule(MXSLradcState *s, int n)
+{
+    uint32_t d = s->regs[LRADC_DELAY0 + n];
+    uint32_t delay = d & DELAY_DELAY_MASK;
+    int64_t period = (int64_t)(delay ? delay : 1) * 500000; /* ~2kHz */
+
+    if ((d & DELAY_KICK) && s->loop_count[n] > 1) {
+        s->loop_count[n]--;
+        timer_mod(s->delay_timer[n],
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + period);
+    } else {
+        mxs_lradc_delay_stop(s, n);
+    }
+}
+
 static void mxs_lradc_delay_tick(void *opaque, int n)
 {
     MXSLradcState *s = opaque;
     uint32_t d = s->regs[LRADC_DELAY0 + n];
-    uint32_t loops = (d >> DELAY_LOOP_COUNT_SHIFT) & DELAY_LOOP_COUNT_MASK;
 
-    mxs_lradc_convert(s, d >> DELAY_TRIGGER_LRADCS_SHIFT);
-
-    if (loops) {
-        uint32_t delay = d & DELAY_DELAY_MASK;
-        int64_t period = (int64_t)(delay ? delay : 1) * 500000; /* ~2kHz */
-
-        timer_mod(s->delay_timer[n],
-                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + period);
+    if (!(d & DELAY_KICK)) {
+        mxs_lradc_delay_stop(s, n);
+        return;
     }
+    mxs_lradc_run_start(s, false);
+    mxs_lradc_convert(s, d >> DELAY_TRIGGER_LRADCS_SHIFT);
+    mxs_lradc_delay_schedule(s, n);
 }
 
 static void mxs_lradc_delay0(void *o) { mxs_lradc_delay_tick(o, 0); }
@@ -294,7 +415,9 @@ static void mxs_lradc_write(void *opaque, hwaddr offset, uint64_t value,
         val = mxs_bank_sftrst(s->regs[idx], val);
         s->regs[idx] = val & ~CTRL0_SCHEDULE_MASK;
         if (sched && !(val & (CTRL0_SFTRST | CTRL0_CLKGATE))) {
+            mxs_lradc_run_start(s, true);
             mxs_lradc_convert(s, sched);
+            mxs_lradc_run_end(s);
         }
         break;
     }
@@ -322,8 +445,6 @@ static void mxs_lradc_write(void *opaque, hwaddr offset, uint64_t value,
 
         s->regs[idx] = val;
         if (val & DELAY_KICK) {
-            uint32_t delay = val & DELAY_DELAY_MASK;
-            int64_t period = (int64_t)(delay ? delay : 1) * 500000;
             uint32_t loops = (val >> DELAY_LOOP_COUNT_SHIFT) &
                              DELAY_LOOP_COUNT_MASK;
 
@@ -339,15 +460,15 @@ static void mxs_lradc_write(void *opaque, hwaddr offset, uint64_t value,
              * the settling delay -- and keep the timer only for the
              * loop re-arms.
              */
+            /* consume KICK: the burst is armed for 1 + LOOP_COUNT reads */
+            s->regs[idx] = val & ~DELAY_KICK;
+            s->loop_count[n] = 1 + loops;
+            mxs_lradc_run_start(s, true);
             mxs_lradc_convert(s, val >> DELAY_TRIGGER_LRADCS_SHIFT);
-            if (loops) {
-                timer_mod(s->delay_timer[n],
-                          qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + period);
-            } else {
-                timer_del(s->delay_timer[n]);
-            }
+            mxs_lradc_delay_schedule(s, n);
         } else {
-            timer_del(s->delay_timer[n]);
+            /* KICK cleared by the driver: the burst is over */
+            mxs_lradc_delay_stop(s, n);
         }
         break;
     }
@@ -396,11 +517,18 @@ void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
     if (s->touch_down && !down) {
         s->last_x = s->touch_x;
         s->last_y = s->touch_y;
+        s->touch_up_pending = true;
     }
     bool down_edge = !s->touch_down && down;
 
-    s->touch_x = x & 0x7fff;
-    s->touch_y = y & 0x7fff;
+    /*
+     * Clamp, never mask.  "& 0x7fff" folded an over-range value back onto
+     * the opposite side of the panel: the HMP helper's int(px * 0x8000 / 800)
+     * returns exactly 0x8000 for the last pixel, so the rightmost column was
+     * reported as the leftmost one -- "the right edge cannot be captured".
+     */
+    s->touch_x = clamp32(x, 0, 0x7fff);
+    s->touch_y = clamp32(y, 0, 0x7fff);
     s->touch_down = down;
 
     if (brain_touch_debug()) {
@@ -436,6 +564,13 @@ void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
      * tap's raw bit was still set. */
     qemu_set_irq(s->irq_touch, 0);
     mxs_lradc_update_irq(s);
+    /*
+     * The EDNA2 MCU owns the panel wake line on the real Brain: it watches
+     * the touch panel in parallel with the host LRADC, so a press rings it
+     * whatever the entry point was.  Pulsing it here (rather than from the
+     * board's HMP helper) is what makes the SDL/gtk pointer wake a PDD that
+     * powered itself down, exactly like brain_touch does.
+     */
     qemu_irq_pulse(s->panel_wake);
 }
 
@@ -485,8 +620,11 @@ static void mxs_lradc_reset(DeviceState *dev)
     s->regs[LRADC_CTRL4] = 0x76543210;
     for (i = 0; i < 4; i++) {
         timer_del(s->delay_timer[i]);
+        s->loop_count[i] = 0;
     }
     s->touch_down = false;
+    s->touch_up_pending = false;
+    s->run_valid = false;
 }
 
 static void mxs_lradc_realize(DeviceState *dev, Error **errp)
