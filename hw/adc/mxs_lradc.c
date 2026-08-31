@@ -63,11 +63,21 @@
 #define LRADC_NCHANNELS     8
 
 /*
- * Calibrated plate span, from the boot registry CalibrationData
+ * Plate span of the fitted panel, from the boot registry CalibrationData
  * (HARDWARE\DEVICEMAP\TOUCH, "1931,1961 889,2993 888,906 2961,920
- * 2958,3039"): raw X runs 888..2961 over the 800 px display width and raw Y
- * 906..3039 over the 480 px height.  Centre raw (1931,1961) therefore lands
- * on display (400,240), exactly as measured on hardware.
+ * 2958,3039"): raw X runs 888..2961 across the 800 px width, raw Y
+ * 906..3039 across the 480 px height.
+ *
+ * Endpoints only -- not a coordinate mapping.  What turns a plate count into
+ * a pixel is the driver's own calibration (Q8.8 table + affine block), which
+ * the model reads back and inverts when the guest publishes one (see
+ * mxs_lradc_set_calibration()); this span is the fallback for a guest that
+ * has none, and it is linear across the axis, so it does not reproduce a
+ * driver whose scale and divisor differ.  Measured with runs/cal02: logical
+ * y=240 came back as 255 (+15 px) with the fallback path -- and note that the
+ * guest in that run also had its driver data page corrupted by the model's own
+ * (since removed) guest-memory writes, so treat the number as indicative, not
+ * as the hardware's behaviour.
  */
 #define BRAIN_RAW_X_LO      888
 #define BRAIN_RAW_X_HI      2961
@@ -105,6 +115,18 @@ typedef struct MXSLradcState {
     uint32_t loop_count[4];         /* conversions left per DELAY channel */
     bool touch_up_pending;          /* deliver one transitional sample */
 
+    /*
+     * The touch PDD's calibration (sx8650_touchscreen.dll affine block,
+     * pushed by the board whenever the driver's block changes).  With
+     * cal_valid set the model maps the UI's logical position to plate counts
+     * by inverting the driver's own transform, so a sample round-trips to the
+     * pixel it was taken at instead of through a separately hand-tuned span.
+     */
+    bool cal_valid;
+    int cal_ay, cal_acx, cal_div;   /* x' = (x*cal_ay + cal_acx) / cal_div */
+    int cal_by, cal_bcy;            /* y' = (y*cal_by + cal_bcy) / cal_div */
+    int cal_w, cal_h;               /* logical panel size */
+
     uint32_t batt_value;
     uint32_t vddio_value;
 } MXSLradcState;
@@ -114,6 +136,33 @@ OBJECT_DECLARE_SIMPLE_TYPE(MXSLradcState, MXS_LRADC)
 static int clamp32(int v, int lo, int hi)
 {
     return v < lo ? lo : (v > hi ? hi : v);
+}
+
+/*
+ * Invert the driver's calibration for one axis: given the logical position
+ * the UI reports, return the plate count that the driver's
+ *
+ *      out = (sample * a + c) / div
+ *
+ * maps back to that position.  The requested position is first scaled across
+ * the panel's measured raw span (a finger that touches the left edge produces
+ * raw LEFT, not raw 0), then pushed through the inverse of the driver's
+ * transform, and the result stays clamped inside that span, so the extremes
+ * remain reachable and no count outside the panel's range is ever reported.
+ */
+static int mxs_lradc_inverse_cal(int a, int c, int div, int raw_lo, int raw_hi,
+                                 int logical, int pos)
+{
+    int64_t want = (int64_t)pos * (raw_hi - raw_lo) / MAX(logical - 1, 1);
+    int64_t num = want * div - (int64_t)c;
+    int v;
+
+    if (a == 0) {
+        return 0;
+    }
+    /* round-to-nearest signed division */
+    v = (int)((num >= 0 ? (num + a / 2) : (num - a / 2)) / a);
+    return clamp32(v - raw_lo, 0, raw_hi - raw_lo);
 }
 
 static bool brain_touch_debug(void)
@@ -198,8 +247,23 @@ static uint32_t mxs_lradc_sample(MXSLradcState *s, int ch, uint32_t trigger)
      * instead costs a systematic half-to-one pixel and pushes the extreme
      * column outside the driver's rectangle test.
      */
-    ax = DIV_ROUND_UP(sx * (BRAIN_RAW_X_HI - BRAIN_RAW_X_LO), 0x7fff);
-    ay = DIV_ROUND_UP(sy * (BRAIN_RAW_Y_HI - BRAIN_RAW_Y_LO), 0x7fff);
+    if (s->cal_valid) {
+        ax = mxs_lradc_inverse_cal(s->cal_ay, s->cal_acx, s->cal_div,
+                                   BRAIN_RAW_X_LO, BRAIN_RAW_X_HI,
+                                   s->cal_w ? s->cal_w : 800, sx);
+        ay = mxs_lradc_inverse_cal(s->cal_by, s->cal_bcy, s->cal_div,
+                                   BRAIN_RAW_Y_LO, BRAIN_RAW_Y_HI,
+                                   s->cal_h ? s->cal_h : 480, sy);
+    } else {
+        /*
+         * No published calibration: fall back to the measured plate span,
+         * linear over [0, 0x7fff].  Round to nearest -- truncating costs a
+         * systematic half-to-one count and pushes the extreme column outside
+         * the driver's rectangle test.
+         */
+        ax = DIV_ROUND_UP(sx * (BRAIN_RAW_X_HI - BRAIN_RAW_X_LO), 0x7fff);
+        ay = DIV_ROUND_UP(sy * (BRAIN_RAW_Y_HI - BRAIN_RAW_Y_LO), 0x7fff);
+    }
     /* 12-bit converter: a plate reading can never exceed 0xfff */
     x = MIN(BRAIN_RAW_X_LO + ax, 0xfff);
     y = MIN(BRAIN_RAW_Y_LO + ay, 0xfff);
@@ -572,6 +636,26 @@ void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
      * powered itself down, exactly like brain_touch does.
      */
     qemu_irq_pulse(s->panel_wake);
+}
+
+void mxs_lradc_set_calibration(DeviceState *dev, int ax, int acx,
+                               int by, int bcy, int div,
+                               int width, int height)
+{
+    MXSLradcState *s = MXS_LRADC(dev);
+
+    if (div <= 0) {
+        s->cal_valid = false;
+        return;
+    }
+    s->cal_ay = ax;
+    s->cal_acx = acx;
+    s->cal_by = by;
+    s->cal_bcy = bcy;
+    s->cal_div = div;
+    s->cal_w = width;
+    s->cal_h = height;
+    s->cal_valid = true;
 }
 
 static void mxs_lradc_touch_event(DeviceState *dev, QemuConsole *src,

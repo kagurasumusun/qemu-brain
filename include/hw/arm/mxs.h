@@ -138,6 +138,9 @@ int mxs_lcdif_dump_fb_opt(DeviceState *dev, const char *path,
 
 /* touch screen input (also used by the headless HMP brain_touch) */
 void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down);
+void mxs_lradc_set_calibration(DeviceState *dev, int ax, int acx,
+                               int by, int bcy, int div,
+                               int width, int height);
 #define TYPE_MXS_AUART      "mxs-auart"
 #define TYPE_BRAIN_KBD      "brain-keyboard"
 
