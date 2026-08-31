@@ -172,8 +172,8 @@ static void brain_kbd_touchkey_update(BrainKbdState *s, QKeyCode qcode,
  * 音声=F11 (0x78), 一覧から選ぶ=Home (E0 6C) - all seven land on exactly
  * the cells this table assigns them.
  *
- * Keys with no Brain keycap (digits, punctuation, Tab, Shift, Ctrl, Alt,
- * Delete, F4/F5/F6/F9/F10) are deliberately left unmapped: on the real
+ * Keys with no Brain keycap (digits, punctuation, Tab, Ctrl, Alt,
+ * F4/F5/F6/F9/F10) are deliberately left unmapped: on the real
  * machine digits are a symbol-layer combination produced through the
  * EDNA2 touchkey path, not a matrix cell, and inventing a cell for them
  * would bypass the driver.
