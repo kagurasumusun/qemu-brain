@@ -117,8 +117,10 @@ typedef struct BrainKbdState {
     QEMUTimer *hold_timer;
     int64_t hold_until_ns;
     QEMUTimer *edna2_pulse_timer;
+    QEMUTimer *attn_timer;
     qemu_irq edna2_int;
     bool power;   /* power-key sense line (GPIO0 pin 16) held high */
+    bool attn;    /* MCU attention: row 0 briefly pulled low */
     uint32_t *touchkey_state;   /* points at bms->edna2_touchkey */
     uint32_t *touchkey_mb;      /* points at mailbox +0x404 word */
 } BrainKbdState;
@@ -255,6 +257,38 @@ static bool brain_qcode_to_cell(QKeyCode q, int *col, int *row)
 }
 
 static void brain_kbd_refresh(void *opaque);
+
+/*
+ * Power-key attention pulse.  The keybd_EDNA2 poller thread only runs
+ * when woken through the SYSINTR-33 event, whose OAL sysintr table arms
+ * the seven matrix ROW pins (PIN2IRQ2 bits 16-21 / PIN2IRQ4 bit 8);
+ * nothing else wakes it.  On the real Brain the EDNA2 MCU mirrors the
+ * power key onto GPIO0 pin 16 AND asserts its attention by pulling a
+ * row line, so a lone power press still produces a row-pin IRQ and the
+ * poller's raw reader (0xc08787b4) samples the power bit.  Model that
+ * MCU attention as a brief (3 ms) row-0 pull-down on every power edge.
+ * The raw reader takes two snapshots 5 ms apart, so both snapshots can
+ * never fall inside the 3 ms window: a snapshot pair straddling the
+ * release mismatches and is retried, and the stable pair that gets
+ * decoded sees only the power bit - never a phantom matrix key.
+ */
+#define BRAIN_KBD_ATTN_HOLD_NS  (3000 * 1000LL)
+
+static void brain_kbd_attn_tick(void *opaque)
+{
+    BrainKbdState *s = opaque;
+
+    s->attn = false;
+    brain_kbd_refresh(s);
+}
+
+static void brain_kbd_attn_pulse(BrainKbdState *s)
+{
+    s->attn = true;
+    brain_kbd_refresh(s);
+    timer_mod(s->attn_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + BRAIN_KBD_ATTN_HOLD_NS);
+}
 
 /*
  * EDNA2 MCU attention pulse.  On real hardware the EDNA2 MCU scans
@@ -394,6 +428,11 @@ static void brain_kbd_refresh(void *opaque)
         }
     }
 
+    /* MCU attention: row 0 pulled low for the brief pulse window. */
+    if (s->attn) {
+        din2 &= ~(1u << BRAIN_KBD_ROW0_GPIO2_PIN);
+    }
+
     /*
      * Row-pin DIN update with full IRQ latching.
      *
@@ -454,6 +493,9 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
         s->power = key->down;
         brain_kbd_refresh(s);
         qemu_set_irq(s->edna2_int, key->down ? 1 : 0);
+        /* MCU attention edge: wake the poller via a row-pin IRQ so the
+         * raw reader samples the power sense bit (see attn comment). */
+        brain_kbd_attn_pulse(s);
         qemu_system_wakeup_request(QEMU_WAKEUP_REASON_OTHER, NULL);
         return;
     }
@@ -547,8 +589,10 @@ static void brain_kbd_realize(DeviceState *dev, Error **errp)
     s->hold_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, brain_kbd_hold_tick, s);
     s->edna2_pulse_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                         brain_kbd_edna2_pulse_tick, s);
+    s->attn_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, brain_kbd_attn_tick, s);
     /* power-key sense line: low at rest, before the guest ever scans */
     s->power = false;
+    s->attn = false;
     mxs_pinctrl_set_din(s->pinctrl, 0,
                         0xffffffffu & ~(1u << BRAIN_KBD_POWER_PIN));
     if (s->pinctrl) {
@@ -570,6 +614,10 @@ static void brain_kbd_reset(DeviceState *dev)
     if (s->edna2_pulse_timer) {
         timer_del(s->edna2_pulse_timer);
     }
+    if (s->attn_timer) {
+        timer_del(s->attn_timer);
+    }
+    s->attn = false;
 }
 
 static void brain_kbd_init(Object *obj)
