@@ -97,12 +97,6 @@ static const uint32_t brain_touchkey_bits[] = {
 };
 
 static const QKeyCode brain_touchkey_qcodes[] = {
-    Q_KEY_CODE_F1,            /* ホーム VK 0x70 Set2 0x05 */
-    Q_KEY_CODE_F2,            /* 国語 漢字 VK 0x71 Set2 0x06 */
-    Q_KEY_CODE_F3,            /* 英和 和英 VK 0x72 Set2 0x04 */
-    Q_KEY_CODE_F7,            /* My 辞書 VK 0x76 Set2 0x83 */
-    Q_KEY_CODE_F8,            /* 履歴 VK 0x77 Set2 0x0A */
-    Q_KEY_CODE_F11,           /* 音声 VK 0x7A Set2 0x78 */
     Q_KEY_CODE_PGUP,          /* 音量+ VK 0x21 */
     Q_KEY_CODE_PGDN,          /* 音量- VK 0x22 */
     Q_KEY_CODE_HOME,          /* 一覧から選ぶ VK 0x24 Set2 0x6C */
@@ -121,6 +115,8 @@ typedef struct BrainKbdState {
     qemu_irq edna2_int;
     bool power;   /* power-key sense line (GPIO0 pin 16) held high */
     bool attn;    /* MCU attention: row 0 briefly pulled low */
+    bool mod_ctrl; /* host Ctrl held (chord prefix, never forwarded) */
+    bool mod_alt;  /* host Alt held (chord prefix, never forwarded) */
     uint32_t *touchkey_state;   /* points at bms->edna2_touchkey */
     uint32_t *touchkey_mb;      /* points at mailbox +0x404 word */
 } BrainKbdState;
@@ -202,15 +198,12 @@ static const BrainKbdCell brain_kbd_keymap[] = {
     { Q_KEY_CODE_J,            2, 1 },  /* code 10 = Set2 0x003b */
     { Q_KEY_CODE_U,            2, 2 },  /* code 21 = Set2 0x003c */
     { Q_KEY_CODE_LEFT,         2, 3 },  /* code 40 = Set2 0xe06b */
-    { Q_KEY_CODE_F12,          2, 4 },  /* code 49 = Set2 0x0007 */
     { Q_KEY_CODE_X,            2, 5 },  /* code 24 = Set2 0x0022 */
     { Q_KEY_CODE_N,            3, 0 },  /* code 14 = Set2 0x0031 */
     { Q_KEY_CODE_I,            3, 1 },  /* code  9 = Set2 0x0043 */
-    { Q_KEY_CODE_F7,           3, 2 },  /* code 46 = Set2 0x0083 */
     { Q_KEY_CODE_UP,           3, 3 },  /* code 38 = Set2 0xe075 */
     { Q_KEY_CODE_PGDN,         3, 4 },  /* code 43 = Set2 0xe07a */
     { Q_KEY_CODE_Q,            3, 5 },  /* code 17 = Set2 0x0015 */
-    { Q_KEY_CODE_F1,           3, 6 },  /* code 29 = Set2 0x0005 */
     { Q_KEY_CODE_BACKSPACE,    4, 0 },  /* code 44 = Set2 0x0066 */
     /* The keycap of this cell reads 削除/クリア (Delete/Clear), so the PC
      * Delete key is the same physical key as Backspace. */
@@ -232,14 +225,32 @@ static const BrainKbdCell brain_kbd_keymap[] = {
     { Q_KEY_CODE_KP_ENTER,     5, 3 },  /* code 36 = Set2 0x005a */
     { Q_KEY_CODE_Z,            5, 4 },  /* code 26 = Set2 0x001a */
     { Q_KEY_CODE_W,            5, 5 },  /* code 23 = Set2 0x001d */
-    { Q_KEY_CODE_F2,           5, 6 },  /* code 30 = Set2 0x0006 */
     { Q_KEY_CODE_MINUS,        6, 0 },  /* code 27 = Set2 0x004e */
     { Q_KEY_CODE_L,            6, 1 },  /* code 12 = Set2 0x004b */
     { Q_KEY_CODE_R,            6, 2 },  /* code 18 = Set2 0x002d */
     { Q_KEY_CODE_SPC,          6, 3 },  /* code 47 = Set2 0x0029 */
-    { Q_KEY_CODE_F11,          6, 4 },  /* code 48 = Set2 0x0078 */
     { Q_KEY_CODE_S,            6, 5 },  /* code 19 = Set2 0x001b */
-    { Q_KEY_CODE_F3,           6, 6 },  /* code 31 = Set2 0x0004 */
+};
+
+/*
+ * The Brain top-row / touch keys (ホーム..記号, 音声) used to sit on
+ * single-press PC F-keys, but F1-F12 are live host keys (help, rename,
+ * refresh, devtools, Alt+F4, ...), so stealing them gets in the way of
+ * PC use.  Serve them as Ctrl+Alt+letter chords instead: Ctrl and Alt
+ * have no Brain keycaps and are never forwarded to the guest, and
+ * Ctrl+Alt+letter is neither reserved by the host OS nor eaten by the
+ * QEMU UI (GTK/SDL bind only Ctrl+Alt+{g,f,m} plus the digits for
+ * grab/full-screen/menu-bar/virtual-console switching).  Letters are
+ * mnemonic: H=ホーム K=国語漢字 E=英和和英 J=辞書 R=履歴 V=voice S=記号.
+ */
+static const BrainKbdCell brain_kbd_chords[] = {
+    { Q_KEY_CODE_H,            3, 6 },  /* ホーム     = index 29 Set2 0x05 */
+    { Q_KEY_CODE_K,            5, 6 },  /* 国語漢字   = index 30 Set2 0x06 */
+    { Q_KEY_CODE_E,            6, 6 },  /* 英和和英   = index 31 Set2 0x04 */
+    { Q_KEY_CODE_J,            3, 2 },  /* My辞書     = index 46 Set2 0x83 */
+    { Q_KEY_CODE_R,            1, 2 },  /* 履歴       = index 33 Set2 0x0a */
+    { Q_KEY_CODE_V,            6, 4 },  /* 音声       = index 48 Set2 0x78 */
+    { Q_KEY_CODE_S,            2, 4 },  /* 記号       = index 49 Set2 0x07 */
 };
 
 static bool brain_qcode_to_cell(QKeyCode q, int *col, int *row)
@@ -254,6 +265,23 @@ static bool brain_qcode_to_cell(QKeyCode q, int *col, int *row)
         }
     }
     return false;
+}
+
+static bool brain_qcode_chord_or_cell(BrainKbdState *s, QKeyCode q,
+                                      int *col, int *row)
+{
+    int i;
+
+    if (s->mod_ctrl && s->mod_alt) {
+        for (i = 0; i < ARRAY_SIZE(brain_kbd_chords); i++) {
+            if (brain_kbd_chords[i].key == q) {
+                *col = brain_kbd_chords[i].col;
+                *row = brain_kbd_chords[i].row;
+                return true;
+            }
+        }
+    }
+    return brain_qcode_to_cell(q, col, row);
 }
 
 static void brain_kbd_refresh(void *opaque);
@@ -483,6 +511,21 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
     key = evt->u.key.data;
     qcode = qemu_input_key_value_to_qcode(key->key);
 
+    /* Ctrl/Alt are chord prefixes only; the Brain has no such keycaps
+     * and the codes must never reach the guest on their own. */
+    switch (qcode) {
+    case Q_KEY_CODE_CTRL:
+    case Q_KEY_CODE_CTRL_R:
+        s->mod_ctrl = key->down;
+        return;
+    case Q_KEY_CODE_ALT:
+    case Q_KEY_CODE_ALT_R:
+        s->mod_alt = key->down;
+        return;
+    default:
+        break;
+    }
+
     /*
      * Brain 電源 is GPIO0.16, not a matrix scancode and not host Power
      * (that suspends the PC).  Pause/Break is on JIS and US boards;
@@ -500,7 +543,7 @@ static void brain_kbd_event(DeviceState *dev, QemuConsole *src,
         return;
     }
 
-    if (!brain_qcode_to_cell(qcode, &c, &r)) {
+    if (!brain_qcode_chord_or_cell(s, qcode, &c, &r)) {
         brain_kbd_touchkey_update(s, qcode, key->down);
         return;
     }
