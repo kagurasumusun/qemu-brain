@@ -174,6 +174,12 @@ typedef struct BrainMachineState {
      * Decoded from keybd_EDNA2.dll + mailbox traces (S11 report).
      */
     QEMUTimer *edna2_mcu_timer;
+    /*
+     * Refresh of the touch driver's factory calibration (see
+     * brain_touch_factory_cal_tick()).
+     */
+    QEMUTimer *touch_cal_timer;
+    bool aid_touch_factory_cal;
     bool edna2_mcu_busy;        /* command in flight */
     bool edna2_mcu_latched;     /* command byte latched (stage 2) */
     uint8_t edna2_mcu_cmd;      /* latched command byte */
@@ -1783,6 +1789,102 @@ static bool brain_inject_touch_affine(BrainMachineState *bms)
  */
 #define BRAIN_TOUCH_CAL_REFRESH_NS   200000000LL   /* 200 ms */
 
+/*
+ * The resistive panel's factory calibration is not stored anywhere the
+ * emulated guest can read it: on the real Brain it lives in the registry hive
+ * (HARDWARE\DEVICEMAP\TOUCH "CalibrationData") and in every eMMC dump in
+ * circulation that area was erased, so the touch PDD comes up with an
+ * all-zero Q8.8 table at 0xc07c71c8 and affine block at 0xc07c71f4.  The
+ * fetch (0xc07c1c78) then calibrates every sample to zero, its
+ * "x' - 0x50 > 0x2cf" rectangle test fails, and the tap is discarded with the
+ * pen-up flag -- the "tap does nothing" symptom, and specifically the "right
+ * edge is dead during normal operation but fine while the logo is up"
+ * symptom, because the logo phase is exactly the window before the PDD wipes
+ * the block.
+ *
+ * The MCU command path already injects the factory values once (see
+ * brain_edna2_mcu_execute), but that lands ~8 s into boot while the PDD
+ * zeroes the same words later, during its own initialisation: measured in
+ * runs/cal01 the affine reappeared for one poll and was gone from then on,
+ * and in runs/fix03 delivery stopped dead after the 11th tap.
+ *
+ * So re-assert them until the driver publishes a calibration of its own.
+ * The area flag at 0xc07c71f0 is written only by the calibration flow
+ * (0xc07c2788 sets it together with the RECT), so a set flag means the guest
+ * has real coefficients and we must stay out of the way.
+ */
+#define BRAIN_TOUCH_CAL_REFRESH_NS   200000000LL   /* 200 ms */
+
+static bool brain_touch_factory_cal_debug(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *e = getenv("BRAIN_TOUCHCAL_DEBUG");
+
+        on = e && *e && *e != '0';
+    }
+    return on;
+}
+
+static void brain_touch_factory_cal_tick(void *opaque)
+{
+    BrainMachineState *bms = opaque;
+    static const int16_t want_q88[6] = { 0x0063, 0x0100, (int16_t)0xfea9,
+                                         0x003a, 0x0100, (int16_t)0xff34 };
+    static const int32_t want_aff[8] = { 200, 0, -177600, 0, 120, -108720,
+                                         2073, 1 };
+    MemTxAttrs attrs = {};
+    hwaddr page;
+    hwaddr off = BRAIN_TOUCH_CAL_VA & 0xfff;
+    bool dirty = false;
+    int i;
+
+    page = arm_cpu_get_phys_page_attrs_debug(CPU(bms->cpu),
+                                             BRAIN_TOUCH_CAL_PAGE, &attrs);
+    if (page != (hwaddr)-1) {
+        uint32_t flag = ldl_le_phys(&address_space_memory,
+                                    page + (BRAIN_TOUCH_AREA_VA & 0xfff));
+
+        if (!flag) {
+            for (i = 0; i < 6; i++) {
+                if ((int16_t)ldl_le_phys(&address_space_memory,
+                                         page + off + i * 4) !=
+                    want_q88[i]) {
+                    dirty = true;
+                    break;
+                }
+            }
+            if (!dirty) {
+                for (i = 0; i < 8; i++) {
+                    if ((int32_t)ldl_le_phys(&address_space_memory,
+                                             page +
+                                             (BRAIN_TOUCH_AFF_VA & 0xfff) +
+                                             i * 4) != want_aff[i]) {
+                        dirty = true;
+                        break;
+                    }
+                }
+            }
+            if (dirty) {
+                bool ok = brain_inject_touch_cal(bms) &&
+                          brain_inject_touch_affine(bms) &&
+                          brain_inject_touch_area_flag(bms);
+                if (brain_touch_factory_cal_debug()) {
+                    fprintf(stderr,
+                            "[brain] touch-factory-cal: stale, reapplied=%d\n",
+                            ok);
+                }
+            }
+        }
+    }
+    if (bms->aid_touch_factory_cal) {
+        timer_mod(bms->touch_cal_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  BRAIN_TOUCH_CAL_REFRESH_NS);
+    }
+}
+
 static uint64_t brain_edna2_mb_read(void *opaque, hwaddr offset, unsigned size)
 {
     BrainMachineState *bms = opaque;
@@ -2530,6 +2632,7 @@ static void brain_set_strict_hw(Object *obj, bool value, Error **errp)
 BRAIN_AID_ACCESSOR(region4_remap, aid_region4_remap)
 BRAIN_AID_ACCESSOR(sd_launcher,   aid_sd_launcher)
 BRAIN_AID_ACCESSOR(ignore_bus_err,aid_ignore_bus_err)
+BRAIN_AID_ACCESSOR(touch_factory_cal, aid_touch_factory_cal)
 
 #define BRAIN_EXP_FAULT_ACCESSOR(pid, field)                               \
     static void brain_get_exp_##pid(Object *obj, Visitor *v,              \
@@ -2575,6 +2678,12 @@ static void brain_instance_init(Object *obj)
     bms->edna2_mcu_latched = false;
     bms->edna2_mcu_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                         brain_edna2_mcu_tick, bms);
+    bms->aid_touch_factory_cal = true;
+    bms->touch_cal_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                        brain_touch_factory_cal_tick, bms);
+    timer_mod(bms->touch_cal_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+              BRAIN_TOUCH_CAL_REFRESH_NS);
 
     /*
      * Strict-hardware fidelity is the default: QEMU-only guest aids
@@ -2634,6 +2743,14 @@ static void brain_instance_init(Object *obj)
                        "Ignore unmapped/aborted memory transactions "
                        "(off in strict-HW mode)");
 
+    brain_add_aid_prop(obj, "aid-touch-factory-cal",
+                       brain_get_aid_touch_factory_cal,
+                       brain_set_aid_touch_factory_cal,
+                       "Re-assert the touch driver's factory calibration "
+                       "while the guest has none of its own (default on: "
+                       "that calibration lives in the registry area the "
+                       "dumped images have erased; turn off to let the "
+                       "driver's own calibration flow own the block)");
     object_property_add(obj, "exp-fault-start", "uint32",
                         brain_get_exp_fault_start,
                         brain_set_exp_fault_start, NULL, NULL);
