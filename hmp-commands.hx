@@ -323,10 +323,25 @@ SRST
 ERST
 
     {
+        .name       = "brain_pdump",
+        .args_type  = "addr:l,len:i,to:s",
+        .params     = "addr len to",
+        .help       = "copy 'len' bytes of guest physical memory at 'addr' "
+                      "into file 'to'",
+        .cmd        = hmp_brain_pdump,
+    },
+
+SRST
+``brain_pdump`` *addr len to*
+  Copy *len* bytes of guest physical memory starting at *addr* into the file
+  *to*, so a whole RAM image can be searched offline.
+ERST
+
+    {
         .name       = "brain_pread",
         .args_type  = "addr:l",
         .params     = "addr",
-        .help       = "dump 256 bytes of guest physical memory at 'addr'",
+        .help       = "dump 256 bytes of guest physical memory at 'addr',",
         .cmd        = hmp_brain_pread,
     },
 

@@ -99,6 +99,7 @@ void hmp_brain_lilo(Monitor *mon, const QDict *qdict);
 void hmp_brain_touch(Monitor *mon, const QDict *qdict);
 void hmp_brain_lcdfb(Monitor *mon, const QDict *qdict);
 void hmp_brain_pread(Monitor *mon, const QDict *qdict);
+void hmp_brain_pdump(Monitor *mon, const QDict *qdict);
 void hmp_brain_vread(Monitor *mon, const QDict *qdict);
 void hmp_brain_pwrite(Monitor *mon, const QDict *qdict);
 void hmp_brain_stats(Monitor *mon, const QDict *qdict);
