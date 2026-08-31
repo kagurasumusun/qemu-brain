@@ -189,7 +189,6 @@ static const BrainKbdCell brain_kbd_keymap[] = {
     { Q_KEY_CODE_D,            0, 5 },  /* code  4 = Set2 0x0023 */
     { Q_KEY_CODE_M,            1, 0 },  /* code 13 = Set2 0x003a */
     { Q_KEY_CODE_K,            1, 1 },  /* code 11 = Set2 0x0042 */
-    { Q_KEY_CODE_F8,           1, 2 },  /* code 33 = Set2 0x000a */
     { Q_KEY_CODE_DOWN,         1, 3 },  /* code 39 = Set2 0xe072 */
     { Q_KEY_CODE_PGUP,         1, 4 },  /* code 42 = Set2 0xe07d */
     { Q_KEY_CODE_F,            1, 5 },  /* code  6 = Set2 0x002b */
