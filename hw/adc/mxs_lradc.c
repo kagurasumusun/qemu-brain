@@ -200,8 +200,11 @@ static int mxs_lradc_inverse_cal(int a, int c, int div, int raw_lo, int raw_hi,
     if (den == 0) {
         return 0;
     }
-    /* round-to-nearest, then stay inside the converter's own range */
-    v = (int)((num + den / 2) / den);
+    /*
+     * Absolute converter counts = c + pos*win*a / (div*(panel-1)).
+     * round-to-nearest, then stay inside the panel's own span.
+     */
+    v = (int)((num + den / 2) / den) + c;
     v = clamp32(v, raw_lo, raw_hi) - raw_lo;
     return clamp32(v, 0, raw_hi - raw_lo);
 }
@@ -835,9 +838,34 @@ static void mxs_lradc_init(Object *obj)
 static void mxs_lradc_init_calibration(MXSLradcState *s)
 {
     const char *e = getenv("BRAIN_TOUCH_CAL");
-    int ax = 1, acx = 0, by = 1, bcy = 0, div = 1;
-    int wx = LRADC_MAX_VALUE + 1, wy = LRADC_MAX_VALUE + 1;
-    int w = 4096, h = 4096;
+    /*
+     * Default = the factory-calibrated plate response of the real panel.
+     * The Brain's 4-wire resistive digitiser does not span the full 12-bit
+     * converter range: the on-unit CalibrationData registry value
+     * ("1931,1961 889,2993 888,906 2961,920 2958,3039") pins the physical
+     * endpoints at raw 888..2961 (X) and 906..3039 (Y), non-inverted, so a
+     * finger at fraction f of an axis physically produces
+     *     raw = raw_lo + f * (raw_hi - raw_lo).
+     * With the QEMU ABS input's 0..INPUT_EVENT_ABS_MAX position range this
+     * is v = pos * span / ABS_MAX, i.e.  a = span, div = win = panel =
+     * ABS_MAX+1 in the generic formula  v = pos*win*a / (div*(panel-1)).
+     *
+     * The previous default (a = c = div = 1, win = panel = 4096) instead
+     * treated the ABS position as a 12-bit value, giving
+     *     raw = clamp(pos * 4096/4095, raw_lo, raw_hi),
+     * which is saturated 1:1 outside a top-left ~9%/~13% ramp: every tap
+     * right of pos 2961 (X) / 3039 (Y) reported the panel max and every
+     * tap left of the raw-undershoot floor reported the panel min, so most
+     * of the panel collapsed onto the far edges downstream of the calibrated
+     * driver transform — the observed "tap misses / drag freezes / edges
+     * unreachable" geometry.  Measured live (t02 run): ui pos 1024 -> raw
+     * 0x400; ui pos 8192 -> raw 0xb91 (2961, already X-max).
+     */
+    int ax = BRAIN_RAW_X_HI - BRAIN_RAW_X_LO, acx = BRAIN_RAW_X_LO;
+    int by = BRAIN_RAW_Y_HI - BRAIN_RAW_Y_LO, bcy = BRAIN_RAW_Y_LO;
+    int div = INPUT_EVENT_ABS_MAX + 1;
+    int wx = INPUT_EVENT_ABS_MAX + 1, wy = INPUT_EVENT_ABS_MAX + 1;
+    int w = INPUT_EVENT_ABS_MAX + 1, h = INPUT_EVENT_ABS_MAX + 1;
 
     if (e) {
         sscanf(e, "%d,%d,%d,%d,%d,%d,%d,%d,%d", &ax, &acx, &by, &bcy, &div,
