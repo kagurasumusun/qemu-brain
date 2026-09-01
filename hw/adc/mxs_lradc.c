@@ -68,16 +68,24 @@
  * 2958,3039"): raw X runs 888..2961 across the 800 px width, raw Y
  * 906..3039 across the 480 px height.
  *
- * Endpoints only -- not a coordinate mapping.  What turns a plate count into
- * a pixel is the driver's own calibration (Q8.8 table + affine block), which
- * the model reads back and inverts when the guest publishes one (see
- * mxs_lradc_set_calibration()); this span is the fallback for a guest that
- * has none, and it is linear across the axis, so it does not reproduce a
- * driver whose scale and divisor differ.  Measured with runs/cal02: logical
- * y=240 came back as 255 (+15 px) with the fallback path -- and note that the
- * guest in that run also had its driver data page corrupted by the model's own
- * (since removed) guest-memory writes, so treat the number as indicative, not
- * as the hardware's behaviour.
+ * Endpoints only -- not a coordinate mapping.  What turns a plate count into a
+ * pixel is the driver's calibration.  Measured in runs/acc10 (one tap per
+ * pixel, the model's own raw output against the coordinates handed to GWES at
+ * the dispatch site 0xc01786e4), the live guest satisfies
+ *
+ *      logical_x = ui_x * 799 / 32767        logical_y = ui_y * 479 / 32767
+ *
+ * where ui is the 0..0x7fff absolute axis the UI layer delivers: the driver
+ * scales the LRADC's whole 12-bit range onto the panel, not the calibrated
+ * span.  The span above is therefore what the *panel* produces, and the
+ * mapping below (UI axis -> span, round to nearest) is the inverse of the
+ * driver's transform to within a count -- 32767 counts of travel spread over
+ * 2073 raw counts, i.e. 1.58 raw counts per logical pixel.
+ *
+ * Everything outside 888..2961 / 906..3039 is what makes the driver's own
+ * "x' - 0x50 > 0x2cf" rectangle test discard a sample, and it is reachable
+ * only for the first/last fraction of a pixel; that is the panel's behaviour,
+ * not something to special-case.
  */
 #define BRAIN_RAW_X_LO      888
 #define BRAIN_RAW_X_HI      2961
