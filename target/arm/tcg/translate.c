@@ -6800,17 +6800,6 @@ static void arm_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
      * out of such a TB has already been suppressed in gen_goto_tb().
      */
     if (unlikely(dc->brain_apply_tb_end)) {
-        static int ae_budget = 60;
-
-        if (ae_budget > 0) {
-            fprintf(stderr,
-                    "brain-tbend: apply pc_first=%08x pc_next=%08x "
-                    "insns=%d is_jmp=%d cflags=%x\n",
-                    (uint32_t)dc->base.pc_first,
-                    (uint32_t)dc->base.pc_next, dc->base.num_insns,
-                    (int)dc->base.is_jmp, (unsigned)tb_cflags(dc->base.tb));
-            ae_budget--;
-        }
         gen_helper_brain_mmu_prefetch_apply(tcg_env);
     }
     if (dc->base.is_jmp == DISAS_BX_EXCRET) {

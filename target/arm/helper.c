@@ -3390,17 +3390,6 @@ static void sctlr_write(CPUARMState *env, const ARMCPRegInfo *ri,
      */
     if ((ri->type & ARM_CP_SUPPRESS_TB_EXIT) || cpu->mmu_prefetch_quirk) {
         uint64_t old = raw_read(env, ri);
-        static int sc_budget = 60;
-
-        if (sc_budget > 0) {
-            fprintf(stderr,
-                    "brain-sctlr: wr pc=%08x type=%x old=%08x new=%08x "
-                    "togM=%d dirty\n",
-                    (uint32_t)env->regs[15], (unsigned)ri->type,
-                    (unsigned)old, (unsigned)value,
-                    !!((old ^ value) & SCTLR_M));
-            sc_budget--;
-        }
         /*
          * Brain/WinCE MMU-prefetch quirk: the current TB continues to
          * run under the old translation state (like real prefetch
@@ -3441,18 +3430,6 @@ static void sctlr_write(CPUARMState *env, const ARMCPRegInfo *ri,
             env->hflags_dirty_pending = true;
         }
         return;
-    } else if (raw_read(env, ri) != value) {
-        static int sc_budget2 = 60;
-
-        if (sc_budget2 > 0) {
-            fprintf(stderr,
-                    "brain-sctlr: NOSUPPRESS wr pc=%08x type=%x "
-                    "old=%08x new=%08x togM=%d\n",
-                    (uint32_t)env->regs[15], (unsigned)ri->type,
-                    (unsigned)raw_read(env, ri), (unsigned)value,
-                    !!((raw_read(env, ri) ^ value) & SCTLR_M));
-            sc_budget2--;
-        }
     }
 
     raw_write(env, ri, value);

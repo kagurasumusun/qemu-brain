@@ -27,6 +27,7 @@
 #include "target/arm/idau.h"
 #include "qemu/module.h"
 #include "qapi/error.h"
+#include "qemu/error-report.h"
 #include "cpu.h"
 #ifdef CONFIG_TCG
 #include "exec/translation-block.h"
@@ -2190,17 +2191,12 @@ static void arm_cpu_realizefn(DeviceState *dev, Error **errp)
                 ri->opc1 == 0 && ri->opc2 == 0 &&
                 !(ri->type & ARM_CP_64BIT)) {
                 ri->type |= ARM_CP_SUPPRESS_TB_EXIT;
-                fprintf(stderr,
-                        "qemu: arm_cpu_realize: mmu-prefetch-quirk marked "
-                        "cpreg key=%08x name=%s type=%x\n",
-                        (unsigned)(uintptr_t)key, ri->name,
-                        (unsigned)ri->type);
                 marked++;
             }
         }
         if (!marked) {
-            fprintf(stderr, "qemu: arm_cpu_realize: mmu-prefetch-quirk "
-                    "requested but SCTLR reginfo not found!\n");
+            error_report("mmu-prefetch-quirk requested but no SCTLR "
+                         "reginfo found to mark");
         }
     }
 
