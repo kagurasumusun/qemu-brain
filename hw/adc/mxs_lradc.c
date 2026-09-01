@@ -67,44 +67,55 @@
 #define LRADC_MAX_VALUE     4095
 
 /*
- * Plate span of the fitted panel, from the boot registry CalibrationData
- * (HARDWARE\DEVICEMAP\TOUCH, "1931,1961 889,2993 888,906 2961,920
- * 2958,3039"): raw X runs 888..2961 across the 800 px width, raw Y
- * 906..3039 across the 480 px height.
+ * Plate counts the PW-SH6 resistive digitiser presents to the LRADC.
  *
- * Endpoints only -- not a coordinate mapping.  What turns a plate count into a
- * pixel is the driver's calibration.  Measured in runs/acc10 (one tap per
- * pixel, the model's own raw output against the coordinates handed to GWES at
- * the dispatch site 0xc01786e4), the live guest satisfies
+ * These are hardware constants of the panel, measured off the unit's own
+ * factory calibration record, which the boot registry carries as
+ * HARDWARE\DEVICEMAP\TOUCH "CalibrationData":
  *
- *      logical_x = ui_x * 799 / 32767        logical_y = ui_y * 479 / 32767
+ *   "1931,1961  889,2993  888,906  2961,920  2958,3039"
+ *    centre      top-left    bottom-left  bottom-right  top-right
  *
- * where ui is the 0..0x7fff absolute axis the UI layer delivers: the driver
- * scales the LRADC's whole 12-bit range onto the panel, not the calibrated
- * span.  The span above is therefore what the *panel* produces, and the
- * mapping below (UI axis -> span, round to nearest) is the inverse of the
- * driver's transform to within a count -- 32767 counts of travel spread over
- * 2073 raw counts, i.e. 1.58 raw counts per logical pixel.
+ * (order established below, not assumed: it is the only reading under which
+ * the four corner records are mutually consistent, see the note there).  A
+ * 5-point calibration taps inset targets, so these raws are *not* the counts
+ * at the glass edges, they are the counts at the targets, and the panel's law
+ * is the straight line through them:
  *
- * Everything outside 888..2961 / 906..3039 is what makes the driver's own
- * "x' - 0x50 > 0x2cf" rectangle test discard a sample, and it is reachable
- * only for the first/last fraction of a pixel; that is the panel's behaviour,
- * not something to special-case.
+ *   X: raw 888.5 (left pair) and 2959.5 (right pair); the driver's transform
+ *      x' = (raw*633 - 36*2811... /2811 puts those at logical x = 164 and
+ *      631, i.e. the classic ~20% inset, so raw = 160 + 4.4347 * x'.
+ *   Y: raw 3016 (upper pair, y' = 119..124) and 913 (lower pair, y' =
+ *      389..391) -> raw = 3968 - 7.83 * y'.  The Y plate count therefore
+ *      *decreases* as the finger moves down: the axis is inverted at the
+ *      panel level, which is what the driver's negative Y coefficient
+ *      compensates for.
+ *
+ * Two independent checks agree with that line, which is why it is trusted:
+ * the driver's own acceptance rectangle is  x' - 0x50 > 0x2cf  (rejects
+ * x' < 80 and x' > 799, i.e. it expects a calibrated 0..799 logical range),
+ * and its live BootArgs coefficient block at PA 0x47f9007c is
+ * {633, 2811, -36, 320, -2502, 507} -- the exact inverse of the fit above,
+ * mapping raw 160..3704 onto 0..799 and raw 3960..219 onto 0..479.
+ *
+ * so the counts at the *edges of the glass* -- what the plates show when a
+ * finger is on the outermost row or column of the 800x480 panel -- are:
  */
-#define BRAIN_RAW_X_LO      888
-#define BRAIN_RAW_X_HI      2961
-#define BRAIN_RAW_Y_LO      906
-#define BRAIN_RAW_Y_HI      3039
+#define BRAIN_PLATE_X_AT_LEFT   160     /* raw at logical x = 0 */
+#define BRAIN_PLATE_X_AT_RIGHT  3712    /* raw at logical x = 800 (off-panel) */
+#define BRAIN_PLATE_Y_AT_TOP    3964    /* raw at logical y = 0 */
+#define BRAIN_PLATE_Y_AT_BOTTOM 211     /* raw at logical y = 480 (off-panel) */
 
 /*
- * Panel geometry the WinCE touch stack actually transforms into.  The device
- * is an 800x480 LCD, but the shell runs at 320x240 and every measurement of
- * the live guest shows the delivered coordinate in that space (a tap on the
- * logical centre arrives as (160,120) before GWES' own scaling): runs/acc13,
- * x=400 -> 156*4 and y=240 -> 120*4.  Model the surface, not the glass.
+ * The travel is therefore 3552 counts over 800 px (4.44/px) and 3753 counts
+ * over 480 px (7.82/px), against the previous model's 2073 and 2133 -- i.e.
+ * half the plate range was simply never produced, which is the size of the
+ * "only the middle of the screen reacts" error, and the Y axis ran the wrong
+ * way.  Both numbers are inside the converter's 0..4095 range, as they must
+ * be on real silicon; nothing here clamps to a "usable window", and the outer
+ * columns that the driver's own rectangle test (x' < 80 or x' > 799) discards
+ * are left discarded, because the device does that too.
  */
-#define BRAIN_PANEL_W        320
-#define BRAIN_PANEL_H        240
 
 typedef struct MXSLradcState {
     SysBusDevice parent_obj;
@@ -154,18 +165,11 @@ typedef struct MXSLradcState {
     uint32_t loop_count[4];         /* conversions left per DELAY channel */
 
     /*
-     * The touch PDD's calibration (sx8650_touchscreen.dll affine block,
-     * pushed by the board whenever the driver's block changes).  With
-     * cal_valid set the model maps the UI's logical position to plate counts
-     * by inverting the driver's own transform, so a sample round-trips to the
-     * pixel it was taken at instead of through a separately hand-tuned span.
+     * Panel response, in converter counts, over the *whole* front-end surface
+     * (BRAIN_PLATE= lets a sweep fit it without touching the guest).
      */
-    bool cal_valid;
-    int cal_ax, cal_acx;            /* x' = (x*cal_ax + cal_acx) / cal_div */
-    int cal_by, cal_bcy;            /* y' = (y*cal_by + cal_bcy) / cal_div */
-    int cal_div;
-    int cal_w, cal_h;               /* logical panel size */
-    int cal_win_x, cal_win_y;       /* logical counts a full sweep produces */
+    int plate_x[2];
+    int plate_y[2];
 
     uint32_t batt_value;
     uint32_t vddio_value;
@@ -179,34 +183,23 @@ static int clamp32(int v, int lo, int hi)
 }
 
 /*
- * Invert the driver's calibration for one axis: given the logical position
- * the UI reports, return the plate count that the driver's
+ * Converter count for one plate at a normalised position.
  *
- *      out = (sample * a + c) / div
- *
- * maps back to that position.  The requested position is first scaled across
- * the panel's measured raw span (a finger that touches the left edge produces
- * raw LEFT, not raw 0), then pushed through the inverse of the driver's
- * transform, and the result stays clamped inside that span, so the extremes
- * remain reachable and no count outside the panel's range is ever reported.
+ * pos is the UI's 0..INPUT_EVENT_ABS_MAX absolute axis, which QEMU scales over
+ * the front end's surface, so pos/32767 is the finger's fractional travel
+ * across the panel; at_most is the count the glass produces at fraction 1.0.
+ * Round to nearest (truncation costs a systematic half pixel on every sample),
+ * and clamp only to the converter's own rails -- the endpoints of the panel are
+ * what they are, and clamping to a "calibrated span" is what made the outer
+ * part of the glass unreachable.
  */
-static int mxs_lradc_inverse_cal(int a, int c, int div, int raw_lo, int raw_hi,
-                                 int window, int logical, int pos)
+static int mxs_lradc_plate_count(int pos, int at_first, int at_last)
 {
-    int64_t num = (int64_t)pos * window * a;
-    int64_t den = (int64_t)div * MAX(logical - 1, 1);
-    int v;
+    int64_t span = (int64_t)at_last - at_first;
+    int64_t v = at_first + (span * pos + INPUT_EVENT_ABS_MAX / 2)
+                / INPUT_EVENT_ABS_MAX;
 
-    if (den == 0) {
-        return 0;
-    }
-    /*
-     * Absolute converter counts = c + pos*win*a / (div*(panel-1)).
-     * round-to-nearest, then stay inside the panel's own span.
-     */
-    v = (int)((num + den / 2) / den) + c;
-    v = clamp32(v, raw_lo, raw_hi) - raw_lo;
-    return clamp32(v, 0, raw_hi - raw_lo);
+    return clamp32((int)v, 0, LRADC_MAX_VALUE);
 }
 
 static bool brain_touch_debug(void)
@@ -276,7 +269,6 @@ static void mxs_lradc_update_irq(MXSLradcState *s)
 static uint32_t mxs_lradc_sample(MXSLradcState *s, int ch, uint32_t trigger)
 {
     uint32_t x, y;
-    int ax, ay;
     int sx, sy;
     bool down;
 
@@ -306,20 +298,13 @@ static uint32_t mxs_lradc_sample(MXSLradcState *s, int ch, uint32_t trigger)
     s->run_valid = false;
 
     /*
-     * The UI delivers normalised absolute coordinates over the whole panel;
-     * the calibrated plate span is what a finger on the glass produces, so
-     * map [0, 0x7fff] -> [LEFT, RIGHT] with round-to-nearest.  Truncating
-     * instead costs a systematic half-to-one pixel and pushes the extreme
-     * column outside the driver's rectangle test.
+     * The UI delivers the finger as a normalised position over the whole
+     * surface; the panel law turns that into the counts the plates produce.
+     * Nothing here knows about the driver's calibration: the round trip to a
+     * pixel is a property of a calibrated panel, not something to force.
      */
-    ax = mxs_lradc_inverse_cal(s->cal_ax, s->cal_acx, s->cal_div,
-                               BRAIN_RAW_X_LO, BRAIN_RAW_X_HI, s->cal_win_x,
-                               s->cal_w, sx);
-    ay = mxs_lradc_inverse_cal(s->cal_by, s->cal_bcy, s->cal_div,
-                               BRAIN_RAW_Y_LO, BRAIN_RAW_Y_HI, s->cal_win_y,
-                               s->cal_h, sy);
-    x = BRAIN_RAW_X_LO + ax;
-    y = BRAIN_RAW_Y_LO + ay;
+    x = mxs_lradc_plate_count(sx, s->plate_x[0], s->plate_x[1]);
+    y = mxs_lradc_plate_count(sy, s->plate_y[0], s->plate_y[1]);
 
     if (!down) {
         x = 0;
@@ -435,9 +420,10 @@ static void mxs_lradc_convert(MXSLradcState *s, uint32_t channels)
         s->regs[LRADC_CTRL1] |= 1u << i;
         if (brain_touch_debug()) {
             fprintf(stderr, "[brain] lradc convert: vch%d phys%d -> 0x%x "
-                    "(touch_down=%d x=%d y=%d ctrl4=0x%08x)\n",
+                    "(touch_down=%d x=%d y=%d ctrl4=0x%08x) vnow=%lld\n",
                     i, phys, sample, s->touch_down, s->touch_x, s->touch_y,
-                    s->regs[LRADC_CTRL4]);
+                    s->regs[LRADC_CTRL4],
+                    (long long)qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
         }
     }
     mxs_lradc_update_irq(s);
@@ -712,42 +698,6 @@ void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
     qemu_irq_pulse(s->panel_wake);
 }
 
-void mxs_lradc_set_calibration(DeviceState *dev, int ax, int acx,
-                               int by, int bcy, int div,
-                               int win_x, int win_y,
-                               int width, int height)
-{
-    MXSLradcState *s = MXS_LRADC(dev);
-
-    /*
-     * The model's job is to hand the converter the counts a finger would
-     * produce, and the only honest definition of those counts is "whatever the
-     * driver's own calibration maps to the requested pixel": invert
-     *     logical = (raw * a + c) / div
-     * into
-     *     raw = (logical * win * div / panel + c) / a
-     * where win is how many logical counts a full sweep of the plate produces
-     * and panel is the surface the driver scales them onto.  With the identity
-     * calibration (a = div = 1, win = 4096, panel = 4096) this degenerates to
-     * "raw is proportional to the axis", which is what the guest's defaults
-     * describe until the driver publishes something else.
-     *
-     * BRAIN_TOUCH_CAL=ax,acx,by,bcy,div,win_x,win_y,w,h overrides it, so the
-     * coefficients can be fitted against a measured sweep without reflashing
-     * the guest.
-     */
-    s->cal_ax = ax;
-    s->cal_acx = acx;
-    s->cal_by = by;
-    s->cal_bcy = bcy;
-    s->cal_div = div;
-    s->cal_win_x = win_x;
-    s->cal_win_y = win_y;
-    s->cal_w = width;
-    s->cal_h = height;
-    s->cal_valid = true;
-}
-
 static void mxs_lradc_touch_event(DeviceState *dev, QemuConsole *src,
                                   InputEvent *evt)
 {
@@ -801,6 +751,8 @@ static void mxs_lradc_reset(DeviceState *dev)
     s->run_valid = false;
 }
 
+static void mxs_lradc_init_panel(MXSLradcState *s);
+
 static void mxs_lradc_realize(DeviceState *dev, Error **errp)
 {
     MXSLradcState *s = MXS_LRADC(dev);
@@ -808,7 +760,6 @@ static void mxs_lradc_realize(DeviceState *dev, Error **errp)
     s->input = qemu_input_handler_register(dev, &mxs_lradc_input_handler);
 }
 
-static void mxs_lradc_init_calibration(MXSLradcState *s);
 
 static void mxs_lradc_init(Object *obj)
 {
@@ -832,46 +783,32 @@ static void mxs_lradc_init(Object *obj)
     s->delay_timer[2] = timer_new_ns(QEMU_CLOCK_VIRTUAL, mxs_lradc_delay2, s);
     s->delay_timer[3] = timer_new_ns(QEMU_CLOCK_VIRTUAL, mxs_lradc_delay3, s);
 
-    mxs_lradc_init_calibration(s);
+    mxs_lradc_init_panel(s);
 }
 
-static void mxs_lradc_init_calibration(MXSLradcState *s)
+static void mxs_lradc_init_panel(MXSLradcState *s)
 {
-    const char *e = getenv("BRAIN_TOUCH_CAL");
-    /*
-     * Default = the factory-calibrated plate response of the real panel.
-     * The Brain's 4-wire resistive digitiser does not span the full 12-bit
-     * converter range: the on-unit CalibrationData registry value
-     * ("1931,1961 889,2993 888,906 2961,920 2958,3039") pins the physical
-     * endpoints at raw 888..2961 (X) and 906..3039 (Y), non-inverted, so a
-     * finger at fraction f of an axis physically produces
-     *     raw = raw_lo + f * (raw_hi - raw_lo).
-     * With the QEMU ABS input's 0..INPUT_EVENT_ABS_MAX position range this
-     * is v = pos * span / ABS_MAX, i.e.  a = span, div = win = panel =
-     * ABS_MAX+1 in the generic formula  v = pos*win*a / (div*(panel-1)).
-     *
-     * The previous default (a = c = div = 1, win = panel = 4096) instead
-     * treated the ABS position as a 12-bit value, giving
-     *     raw = clamp(pos * 4096/4095, raw_lo, raw_hi),
-     * which is saturated 1:1 outside a top-left ~9%/~13% ramp: every tap
-     * right of pos 2961 (X) / 3039 (Y) reported the panel max and every
-     * tap left of the raw-undershoot floor reported the panel min, so most
-     * of the panel collapsed onto the far edges downstream of the calibrated
-     * driver transform — the observed "tap misses / drag freezes / edges
-     * unreachable" geometry.  Measured live (t02 run): ui pos 1024 -> raw
-     * 0x400; ui pos 8192 -> raw 0xb91 (2961, already X-max).
-     */
-    int ax = BRAIN_RAW_X_HI - BRAIN_RAW_X_LO, acx = BRAIN_RAW_X_LO;
-    int by = BRAIN_RAW_Y_HI - BRAIN_RAW_Y_LO, bcy = BRAIN_RAW_Y_LO;
-    int div = INPUT_EVENT_ABS_MAX + 1;
-    int wx = INPUT_EVENT_ABS_MAX + 1, wy = INPUT_EVENT_ABS_MAX + 1;
-    int w = INPUT_EVENT_ABS_MAX + 1, h = INPUT_EVENT_ABS_MAX + 1;
+    const char *e = getenv("BRAIN_PLATE");
+    int r = 0;
 
+    /*
+     * Default: the panel law documented above.  BRAIN_PLATE=x0,x1,y0,y1 lets a
+     * measured sweep check or refit those four counts without reflashing the
+     * guest -- it is a fitting knob, not a mapping the model relies on.
+     */
+    s->plate_x[0] = BRAIN_PLATE_X_AT_LEFT;
+    s->plate_x[1] = BRAIN_PLATE_X_AT_RIGHT;
+    s->plate_y[0] = BRAIN_PLATE_Y_AT_TOP;
+    s->plate_y[1] = BRAIN_PLATE_Y_AT_BOTTOM;
     if (e) {
-        sscanf(e, "%d,%d,%d,%d,%d,%d,%d,%d,%d", &ax, &acx, &by, &bcy, &div,
-               &wx, &wy, &w, &h);
+        r = sscanf(e, "%d,%d,%d,%d", &s->plate_x[0], &s->plate_x[1],
+                   &s->plate_y[0], &s->plate_y[1]);
     }
-    mxs_lradc_set_calibration(DEVICE(s), ax, acx, by, bcy, div, wx, wy, w, h);
+    if (brain_touch_debug()) {
+        fprintf(stderr, "[brain] lradc panel raw X %d..%d  Y %d..%d (%s)\n",
+                s->plate_x[0], s->plate_x[1], s->plate_y[0], s->plate_y[1],
+                r == 4 ? "BRAIN_PLATE" : "factory");
+    }
 }
 
 static const Property mxs_lradc_properties[] = {
