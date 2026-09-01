@@ -201,7 +201,8 @@ class VMLab:
             if m:
                 convs.append({"vch": int(m[1]), "phys": int(m[2]),
                               "val": int(m[3], 16), "down": int(m[4]),
-                              "vnow": int(m[7])})
+                              "axis_x": int(m[5]), "axis_y": int(m[6]),
+                              "ctrl4": int(m[7], 16), "vnow": int(m[8])})
         return sets, convs, text
 
     # -- observation: guest RAM ----------------------------------------
@@ -353,9 +354,14 @@ class VMLab:
 
     # -- reporting ------------------------------------------------------
     def report(self, label, sets, convs, extra=""):
-        plat = [c for c in convs if c["phys"] in (2, 3, 5)]
-        raw_x = max([c["val"] for c in plat if c["phys"] == 2], default=None)
-        raw_y = max([c["val"] for c in plat if c["phys"] == 5], default=None)
+        # Under this guest's CTRL4 (identity) the X wiper is read on CH3 and
+        # the Y wiper on CH2/CH5; a channel's role follows the drive plate, so
+        # label by what the driver actually triggers, not by the channel index.
+        plat = [c for c in convs if c["phys"] in (2, 3, 5) and c["down"]]
+        raw_x = max([c["val"] for c in plat if c["phys"] == 3]
+                    or [c["val"] for c in plat], default=None)
+        raw_y = max([c["val"] for c in plat if c["phys"] in (2, 5)],
+                    default=None)
         pos = (sets[0]["x"], sets[0]["y"]) if sets else None
         downs = sum(1 for s in sets if s["down"])
         print("%-20s sets=%-3d down=%d pos=%-12s plate=(%5s,%5s) %s"
@@ -442,10 +448,21 @@ def mode_corners(lab):
            ("UL", 0, 0), ("UR", w - 1, 0), ("LL", 0, h - 1), ("LR", w - 1, h - 1)]
     for name, x, y in pts:
         sets, convs, _ = lab.tap(x, y)
-        lab.report("%s (%d,%d)" % (name, x, y), sets, convs)
+        # what the panel law says a finger here produces, against everything the
+        # converter actually reported during the burst (a channel's role follows
+        # the drive plate, so the readings are compared as a set)
+        want = (160 + 3552 * x / float(w), 3964 - 3753 * y / float(h))
+        got = sorted({c["val"] for c in convs
+                      if c["phys"] in (2, 3, 5) and c["down"]})
+        ok = all(any(abs(g - v) <= 2 for g in got) for v in want)
+        print("%-8s (%3d,%3d) axis=%-12s want=(%5.0f,%5.0f) saw=%s %s"
+              % (name, x, y, (sets[0]["x"], sets[0]["y"]) if sets else None,
+                 want[0], want[1], got, "OK" if ok else "CHECK"))
 
 
 def mode_slide(lab, steps):
+    """Continuous travel across the panel: does every step arrive, and is the
+    distance 1:1 with the finger?"""
     print("\n== slides (%d steps, button held) ==" % steps)
     w, h = lab.width, lab.height
     ym, xm = h // 2, w // 2
@@ -454,13 +471,39 @@ def mode_slide(lab, steps):
             "U->D": (xm, 0, xm, h - 1), "D->U": (xm, h - 1, xm, 0),
             "diag": (0, 0, w - 1, h - 1)}.items():
         sets, convs, _ = lab.slide(x0, y0, x1, y1, steps=steps)
-        plat = [c for c in convs if c["phys"] in (2, 3, 5)]
-        xs = [c["val"] for c in plat if c["phys"] == 2]
-        ys = [c["val"] for c in plat if c["phys"] == 5]
-        posx = [s["x"] for s in sets if s["down"]]
-        print("%-6s press+drag updates=%d  axisX=%s" % (name, len(sets), posx))
-        print("       plateX=%s" % (xs,))
-        print("       plateY=%s" % (ys,))
+        down = [s for s in sets if s["down"]]
+        # the driver reads three samples per burst, so collapse repeats: one
+        # value per conversion time stamp, then look at what moved
+        per = {}
+        for c in convs:
+            if c["down"] and c["phys"] in (2, 3, 5):
+                per.setdefault(c["vnow"], {})[c["phys"]] = c["val"]
+        series = sorted(per.items())
+        px = [v.get(3) for _, v in series if v.get(3) is not None]
+        py = [v.get(2, v.get(5)) for _, v in series
+              if v.get(2, v.get(5)) is not None]
+        px = [v for v in px if v is not None]
+        py = [v for v in py if v is not None]
+        def summ(vals, a, b, counts_per_px):
+            """What the guest latched over the whole drag.
+
+            uniq counts the *distinct* plate readings: one per drag step means
+            nothing froze mid-way, and span/expected is the distance ratio the
+            finger would see.  Ordering is not asserted per channel: the driver
+            re-arms the drive plates while it reads, so a channel carries the
+            other axis in part of the sequence.
+            """
+            uniq = sorted(set(vals))
+            if len(uniq) < 2:
+                return "no movement (%d samples)" % len(vals)
+            span = uniq[-1] - uniq[0]
+            want = abs(b - a) * counts_per_px
+            return ("%d distinct readings %s..%s, span %d of %.0f expected = "
+                    "%.3f px/px" % (len(uniq), uniq[0], uniq[-1], span, want,
+                                    span / want if want else 0))
+        print("  %-5s updates while held=%d  X: %s"
+              % (name, len(down), summ(px, x0, x1, 3552 / float(w))))
+        print("        %-21s Y: %s" % ("", summ(py, y0, y1, 3753 / float(h))))
 
 
 def mode_guest(lab, points):
@@ -605,8 +648,9 @@ def mode_ui(lab):
         _, _, cur = lab.shot("ui_%02d.ppm" % i)
         n, box = lab.frame_diff(prev, cur, w, h)
         plat = [c for c in convs if c["phys"] in (2, 3, 5) and c["down"]]
-        raw_x = max([c["val"] for c in plat if c["phys"] == 2], default=0)
-        raw_y = max([c["val"] for c in plat if c["phys"] == 5], default=0)
+        raw_x = max([c["val"] for c in plat if c["phys"] == 3]
+                    or [c["val"] for c in plat], default=0)
+        raw_y = max([c["val"] for c in plat if c["phys"] in (2, 5)], default=0)
         print("  %s tap(%3d,%3d) plate=(%4d,%4d) redrawn=%3d  markers %s -> %s"
               % (name, x, y, raw_x, raw_y, n,
                  " ".join("(%d,%d)" % (b[0], b[1]) for b in lab.markers(prev, w, h)),
