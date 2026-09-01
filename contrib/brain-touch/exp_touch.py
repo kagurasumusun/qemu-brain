@@ -73,6 +73,7 @@ class VMLab:
             m = re.search(r"Geometry: (\d+)x(\d+)", geom)
             self.width, self.height = int(m[1]), int(m[2])
         self.logpos = self._logsize()
+        self.quiet = False
         self.kbd_thread = threading.Thread(target=self._keepalive, daemon=True)
         self.kbd_thread.start()
 
@@ -121,23 +122,56 @@ class VMLab:
         raise SystemExit("[lab] boot timeout")
 
     def _keepalive(self):
-        while not self.stop.wait(12):
+        # WinCE suspends a few minutes into this boot and a suspended guest
+        # answers nothing (measured: one timer tick per 4 s, no reactions).
+        # Any delivered input resets the idle timer; a *key* would too, but
+        # the boot dialog eats digits, so poke the panel in the empty band
+        # above the field row instead -- same thing a resting hand does.
+        while not self.stop.wait(8):
+            if self.quiet:
+                continue
             try:
-                self.qmp.hmp("sendkey 1")
+                self.tap(400, 46, hold=0.02, settle=0.05)
             except Exception:                    # noqa: BLE001
                 return
 
     def alive(self):
         return self.proc is None or self.proc.poll() is None
 
+    def shutdown(self):
+        """Ask the guest to power off, then make sure the process is gone.
+
+        A run that leaves a QEMU behind holds the emmc image and the monitor
+        sockets, and the guest's own idle-suspend makes the next measurement
+        ambiguous, so the harness is responsible for tearing its VM down.
+        """
+        self.stop.set()
+        if self.proc is not None:
+            try:
+                self.qmp.rpc("system_powerdown")
+                self.proc.wait(timeout=25)
+            except Exception:                    # noqa: BLE001
+                self.proc.terminate()
+                try:
+                    self.proc.wait(timeout=10)
+                except Exception:                # noqa: BLE001
+                    self.proc.kill()
+        try:
+            print("[lab] qemu exit status: %s" % self.proc.returncode)
+        except AttributeError:
+            pass
+        self.proc = None
+
     def close(self):
         self.stop.set()
         try:
             if getattr(self, "vnc", None):
                 self.vnc.close()
-            if getattr(self, "qmp", None):
-                self.qmp.close()
         except OSError:
+            pass
+        try:
+            self.qmp.close()
+        except (OSError, AttributeError):
             pass
 
     # -- observation: model log ----------------------------------------
@@ -171,6 +205,90 @@ class VMLab:
         return sets, convs, text
 
     # -- observation: guest RAM ----------------------------------------
+    # -- observation: guest framebuffer --------------------------------
+    def shot(self, name="shot.ppm"):
+        """Grab the console surface (QEMU's own dump: no VNC encoding, so no
+        dependence on the front end being able to keep up)."""
+        full = os.path.join(RUN, name)
+        try:
+            os.unlink(full)
+        except OSError:
+            pass
+        self.qmp.hmp("screendump %s" % name)
+        for _ in range(80):
+            if os.path.exists(full) and time.time() - os.path.getmtime(full) < 5:
+                break
+            time.sleep(0.05)
+        with open(full, "rb") as f:
+            d = f.read()
+        parts = d.split(b"\n")
+        w, h = (int(v) for v in parts[1].split())
+        off = len(parts[0]) + len(parts[1]) + len(parts[2]) + 3
+        return w, h, d[off:off + w * h * 3]
+
+    @staticmethod
+    def markers(buf, w, h, y0=100, y1=330):
+        """Centres of the dialog's filled selection boxes, from the pixels.
+
+        The 【日付と時刻の設定】 panel marks the field the touch stack picked
+        with a solid box, so this reads the delivered coordinate back out of
+        the guest's own drawing instead of trusting any side channel.
+        """
+        hh = y1 - y0
+        mask = bytearray(w * hh)
+        for y in range(y0, y1):
+            ro = y * w * 3
+            mo = (y - y0) * w
+            for x in range(w):
+                o = ro + x * 3
+                if buf[o] < 100 and buf[o + 1] < 100 and buf[o + 2] < 100:
+                    mask[mo + x] = 1
+        seen = bytearray(w * hh)
+        out = []
+        for y in range(hh):
+            for x in range(w):
+                i = y * w + x
+                if not mask[i] or seen[i]:
+                    continue
+                st, seen[i] = [i], 1
+                pts = []
+                while st:
+                    a = st.pop()
+                    pts.append(a)
+                    ax, ay = a % w, a // w
+                    for nx, ny in ((ax + 1, ay), (ax - 1, ay), (ax, ay + 1),
+                                   (ax, ay - 1)):
+                        if 0 <= nx < w and 0 <= ny < hh:
+                            b = ny * w + nx
+                            if mask[b] and not seen[b]:
+                                seen[b] = 1
+                                st.append(b)
+                xs = [p % w for p in pts]
+                ys = [p // w + y0 for p in pts]
+                wd, ht = max(xs) - min(xs) + 1, max(ys) - min(ys) + 1
+                if len(pts) / float(wd * ht) > 0.65 and 25 <= wd <= 200 \
+                        and 28 <= ht <= 60:
+                    out.append((sum(xs) // len(xs), sum(ys) // len(ys), wd))
+        return sorted(out)
+
+    @staticmethod
+    def frame_diff(a, b, w, h, blk=16, thresh=24):
+        """Where did the guest actually redraw?  Returns (n, bbox)."""
+        pts = []
+        for y in range(0, h - 1, blk):
+            ro = y * w * 3
+            for x in range(0, w - 1, blk):
+                o = ro + x * 3
+                d = (abs(a[o] - b[o]) + abs(a[o + 1] - b[o + 1])
+                     + abs(a[o + 2] - b[o + 2]))
+                if d > thresh:
+                    pts.append((x, y))
+        if not pts:
+            return 0, None
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        return len(pts), (min(xs), max(xs), min(ys), max(ys))
+
     def dump_ram(self, path):
         """Snapshot all guest RAM (PA space) into *path* via the QEMU aid."""
         rel = os.path.basename(path)
@@ -458,11 +576,112 @@ def mode_track(lab, axis="x"):
     return hits
 
 
+# Targets read off the live frame (see markers(): the dialog marks the field
+# the touch stack selected with a solid box, which is what we compare with the
+# pixel the front end was clicked at).
+TARGETS = [
+    ("year field      ", 252, 130),
+    ("month field     ", 456, 130),
+    ("day field       ", 596, 128),
+    ("hour field      ", 342, 203),
+    ("minute field    ", 430, 203),
+    ("PM half         ", 540, 282),
+    ("far right, empty", 799, 128),
+    ("left dead margin", 40, 128),
+]
+
+
+def mode_ui(lab):
+    """Where did the guest's own UI put the selection for each front-end tap?"""
+    print("\n== delivered position, read from the guest's drawing ==")
+    lab.quiet = True                      # no keepalive taps inside the burst
+    w, h = lab.width, lab.height
+    _, _, buf = lab.shot("ui_base.ppm")
+    print("   baseline markers: %s" % (lab.markers(buf, w, h),))
+    prev = buf
+    for i, (name, x, y) in enumerate(TARGETS):
+        m = lab.mark()
+        sets, convs, _ = lab.tap(x, y, hold=0.25, settle=0.6)
+        _, _, cur = lab.shot("ui_%02d.ppm" % i)
+        n, box = lab.frame_diff(prev, cur, w, h)
+        plat = [c for c in convs if c["phys"] in (2, 3, 5) and c["down"]]
+        raw_x = max([c["val"] for c in plat if c["phys"] == 2], default=0)
+        raw_y = max([c["val"] for c in plat if c["phys"] == 5], default=0)
+        print("  %s tap(%3d,%3d) plate=(%4d,%4d) redrawn=%3d  markers %s -> %s"
+              % (name, x, y, raw_x, raw_y, n,
+                 " ".join("(%d,%d)" % (b[0], b[1]) for b in lab.markers(prev, w, h)),
+                 " ".join("(%d,%d)" % (b[0], b[1]) for b in lab.markers(cur, w, h))))
+        prev = cur
+    for i in range(len(TARGETS)):
+        try:
+            os.unlink(os.path.join(RUN, "ui_%02d.ppm" % i))
+        except OSError:
+            pass
+    lab.quiet = False
+
+
+def _scan(path, off, needle):
+    """Byte offset of `needle` in path beyond off, or None."""
+    with open(path, errors="replace") as f:
+        f.seek(off)
+        txt = f.read()
+    return needle in txt, txt
+
+
+def mode_latency(lab, at=(5, 45, 105)):
+    """Where does the time go between the button and a sample the guest holds?
+
+    Two wall-clock segments, both read off the model's own log growth:
+      press -> model:   the front end, QEMU's input layer and the device
+      model -> plate:   the guest's read (its DELAY kick arms the conversion)
+    Measured at a few points after boot, because the complaint is specifically
+    about input feeling late during the boot/first-use window.
+    """
+    import statistics
+    print("\n== wall-clock input latency ==")
+    w, h = lab.width, lab.height
+    t0 = time.time()
+    for target in at:
+        while time.time() - t0 < target:
+            time.sleep(0.5)
+        seg_a, seg_b = [], []
+        for k in range(5):
+            x = 200 + 60 * k
+            lab.ptr(x, h // 2, None)
+            time.sleep(0.05)
+            off = os.path.getsize(QLOG)
+            t_press = time.time()
+            lab.ptr(x, h // 2, 1)
+            seen_model = seen_conv = None
+            while time.time() - t_press < 6.0:
+                got, txt = _scan(QLOG, off, "SETTOUCH")
+                if got and seen_model is None:
+                    seen_model = time.time()
+                if "touch_down=1" in txt:
+                    seen_conv = time.time()
+                    break
+                time.sleep(0.004)
+            lab.ptr(x, h // 2, 0)
+            time.sleep(0.35)
+            if seen_model:
+                seg_a.append((seen_model - t_press) * 1000)
+            if seen_conv and seen_model:
+                seg_b.append((seen_conv - seen_model) * 1000)
+        def fmt(v):
+            if not v:
+                return "n/a"
+            v = sorted(v)
+            return ("median %.1f ms (min %.1f, max %.1f)"
+                    % (statistics.median(v), v[0], v[-1]))
+        print("  t+%3ds  front-end->model: %-34s  model->plate conversion: %s"
+              % (target, fmt(seg_a), fmt(seg_b)))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", default="sweep",
                     choices=["paths", "sweep", "corners", "slide", "guest",
-                             "track", "all", "shots"])
+                             "track", "ui", "latency", "all", "shots"])
     ap.add_argument("--n", type=int, default=9)
     ap.add_argument("--steps", type=int, default=9)
     ap.add_argument("--axis", default="x", choices=["x", "y"])
@@ -481,6 +700,10 @@ def main():
             mode_corners(lab)
         if a.mode in ("slide", "all"):
             mode_slide(lab, a.steps)
+        if a.mode in ("ui", "all"):
+            mode_ui(lab)
+        if a.mode == "latency":
+            mode_latency(lab)
         if a.mode == "guest":
             w = lab.width
             mode_guest(lab, [0, w // 4, w // 2, 3 * w // 4, w - 1])
@@ -493,6 +716,9 @@ def main():
     finally:
         print("\n[lab] vm alive: %s" % lab.alive())
         lab.close()
+        if not a.attach:
+            lab.shutdown()
+            print("[lab] vm shut down: %s" % (not lab.alive(),))
 
 
 if __name__ == "__main__":
