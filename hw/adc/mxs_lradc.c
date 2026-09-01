@@ -13,6 +13,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include <stdlib.h>
 #include "qemu/module.h"
 #include "qemu/timer.h"
 #include "hw/arm/mxs.h"
@@ -62,6 +63,9 @@
 
 #define LRADC_NCHANNELS     8
 
+/* the 12-bit converter's full scale */
+#define LRADC_MAX_VALUE     4095
+
 /*
  * Plate span of the fitted panel, from the boot registry CalibrationData
  * (HARDWARE\DEVICEMAP\TOUCH, "1931,1961 889,2993 888,906 2961,920
@@ -91,6 +95,16 @@
 #define BRAIN_RAW_X_HI      2961
 #define BRAIN_RAW_Y_LO      906
 #define BRAIN_RAW_Y_HI      3039
+
+/*
+ * Panel geometry the WinCE touch stack actually transforms into.  The device
+ * is an 800x480 LCD, but the shell runs at 320x240 and every measurement of
+ * the live guest shows the delivered coordinate in that space (a tap on the
+ * logical centre arrives as (160,120) before GWES' own scaling): runs/acc13,
+ * x=400 -> 156*4 and y=240 -> 120*4.  Model the surface, not the glass.
+ */
+#define BRAIN_PANEL_W        320
+#define BRAIN_PANEL_H        240
 
 typedef struct MXSLradcState {
     SysBusDevice parent_obj;
@@ -147,9 +161,11 @@ typedef struct MXSLradcState {
      * pixel it was taken at instead of through a separately hand-tuned span.
      */
     bool cal_valid;
-    int cal_ay, cal_acx, cal_div;   /* x' = (x*cal_ay + cal_acx) / cal_div */
+    int cal_ax, cal_acx;            /* x' = (x*cal_ax + cal_acx) / cal_div */
     int cal_by, cal_bcy;            /* y' = (y*cal_by + cal_bcy) / cal_div */
+    int cal_div;
     int cal_w, cal_h;               /* logical panel size */
+    int cal_win_x, cal_win_y;       /* logical counts a full sweep produces */
 
     uint32_t batt_value;
     uint32_t vddio_value;
@@ -175,18 +191,19 @@ static int clamp32(int v, int lo, int hi)
  * remain reachable and no count outside the panel's range is ever reported.
  */
 static int mxs_lradc_inverse_cal(int a, int c, int div, int raw_lo, int raw_hi,
-                                 int logical, int pos)
+                                 int window, int logical, int pos)
 {
-    int64_t want = (int64_t)pos * (raw_hi - raw_lo) / MAX(logical - 1, 1);
-    int64_t num = want * div - (int64_t)c;
+    int64_t num = (int64_t)pos * window * a;
+    int64_t den = (int64_t)div * MAX(logical - 1, 1);
     int v;
 
-    if (a == 0) {
+    if (den == 0) {
         return 0;
     }
-    /* round-to-nearest signed division */
-    v = (int)((num >= 0 ? (num + a / 2) : (num - a / 2)) / a);
-    return clamp32(v - raw_lo, 0, raw_hi - raw_lo);
+    /* round-to-nearest, then stay inside the converter's own range */
+    v = (int)((num + den / 2) / den);
+    v = clamp32(v, raw_lo, raw_hi) - raw_lo;
+    return clamp32(v, 0, raw_hi - raw_lo);
 }
 
 static bool brain_touch_debug(void)
@@ -207,7 +224,18 @@ static void mxs_lradc_update_irq(MXSLradcState *s)
     bool touch;
     int i;
 
-    touch = (c1 & CTRL1_TOUCH_DETECT_IRQ) && (c1 & CTRL1_TOUCH_DETECT_IRQ_EN);
+    /*
+     * TOUCH_DETECT is a *level* on silicon: the comparator keeps the line
+     * asserted for as long as the plate is pressed, and it stays high through
+     * the release until the last conversion has been read.  Only latching the
+     * status bit on the press edge made a held finger look like a single
+     * event: a slide then produced exactly one delivered point (runs/acc11
+     * drag: 9 motion positions -> one pen-down sample), because the driver only
+     * re-enters its sampling path while the line is high.
+     */
+    touch = ((c1 & CTRL1_TOUCH_DETECT_IRQ) ||
+             s->pen_state != MXS_LRADC_PEN_UP) &&
+            (c1 & CTRL1_TOUCH_DETECT_IRQ_EN);
     qemu_set_irq(s->irq_touch, touch);
 
     for (i = 0; i < LRADC_NCHANNELS; i++) {
@@ -265,14 +293,14 @@ static uint32_t mxs_lradc_sample(MXSLradcState *s, int ch, uint32_t trigger)
     down = s->run_valid ? s->run_down : s->touch_down;
 
     /*
-     * A conversion result exists once it has been produced, so the burst's
-     * latch is consumed by this read: the transitional (pen-lifting) sample
-     * must not be handed out twice, while a still-held finger keeps being
-     * reported for every subsequent burst.
+     * The latch is per *burst*: it exists so that the three samples one read
+     * takes are consistent (the worker's jitter filter rejects a read whose
+     * samples disagree), but the next burst must see the finger where it is
+     * now.  Keeping it alive across bursts froze a held finger at its press
+     * position -- measured as exactly the "slide does nothing" symptom
+     * (runs/acc11, acc12 drag: 9 motion positions produced one delivered x).
      */
-    if (s->run_valid && s->pen_state != MXS_LRADC_PEN_DOWN) {
-        s->run_valid = false;
-    }
+    s->run_valid = false;
 
     /*
      * The UI delivers normalised absolute coordinates over the whole panel;
@@ -281,26 +309,14 @@ static uint32_t mxs_lradc_sample(MXSLradcState *s, int ch, uint32_t trigger)
      * instead costs a systematic half-to-one pixel and pushes the extreme
      * column outside the driver's rectangle test.
      */
-    if (s->cal_valid) {
-        ax = mxs_lradc_inverse_cal(s->cal_ay, s->cal_acx, s->cal_div,
-                                   BRAIN_RAW_X_LO, BRAIN_RAW_X_HI,
-                                   s->cal_w ? s->cal_w : 800, sx);
-        ay = mxs_lradc_inverse_cal(s->cal_by, s->cal_bcy, s->cal_div,
-                                   BRAIN_RAW_Y_LO, BRAIN_RAW_Y_HI,
-                                   s->cal_h ? s->cal_h : 480, sy);
-    } else {
-        /*
-         * No published calibration: fall back to the measured plate span,
-         * linear over [0, 0x7fff].  Round to nearest -- truncating costs a
-         * systematic half-to-one count and pushes the extreme column outside
-         * the driver's rectangle test.
-         */
-        ax = DIV_ROUND_UP(sx * (BRAIN_RAW_X_HI - BRAIN_RAW_X_LO), 0x7fff);
-        ay = DIV_ROUND_UP(sy * (BRAIN_RAW_Y_HI - BRAIN_RAW_Y_LO), 0x7fff);
-    }
-    /* 12-bit converter: a plate reading can never exceed 0xfff */
-    x = MIN(BRAIN_RAW_X_LO + ax, 0xfff);
-    y = MIN(BRAIN_RAW_Y_LO + ay, 0xfff);
+    ax = mxs_lradc_inverse_cal(s->cal_ax, s->cal_acx, s->cal_div,
+                               BRAIN_RAW_X_LO, BRAIN_RAW_X_HI, s->cal_win_x,
+                               s->cal_w, sx);
+    ay = mxs_lradc_inverse_cal(s->cal_by, s->cal_bcy, s->cal_div,
+                               BRAIN_RAW_Y_LO, BRAIN_RAW_Y_HI, s->cal_win_y,
+                               s->cal_h, sy);
+    x = BRAIN_RAW_X_LO + ax;
+    y = BRAIN_RAW_Y_LO + ay;
 
     if (!down) {
         x = 0;
@@ -656,6 +672,9 @@ void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
     }
 
     if (!down) {
+        /* the plate is open: the detector line drops with it */
+        s->regs[LRADC_CTRL1] &= ~CTRL1_TOUCH_DETECT_IRQ;
+        mxs_lradc_update_irq(s);
         return;
     }
 
@@ -692,19 +711,35 @@ void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
 
 void mxs_lradc_set_calibration(DeviceState *dev, int ax, int acx,
                                int by, int bcy, int div,
+                               int win_x, int win_y,
                                int width, int height)
 {
     MXSLradcState *s = MXS_LRADC(dev);
 
-    if (div <= 0) {
-        s->cal_valid = false;
-        return;
-    }
-    s->cal_ay = ax;
+    /*
+     * The model's job is to hand the converter the counts a finger would
+     * produce, and the only honest definition of those counts is "whatever the
+     * driver's own calibration maps to the requested pixel": invert
+     *     logical = (raw * a + c) / div
+     * into
+     *     raw = (logical * win * div / panel + c) / a
+     * where win is how many logical counts a full sweep of the plate produces
+     * and panel is the surface the driver scales them onto.  With the identity
+     * calibration (a = div = 1, win = 4096, panel = 4096) this degenerates to
+     * "raw is proportional to the axis", which is what the guest's defaults
+     * describe until the driver publishes something else.
+     *
+     * BRAIN_TOUCH_CAL=ax,acx,by,bcy,div,win_x,win_y,w,h overrides it, so the
+     * coefficients can be fitted against a measured sweep without reflashing
+     * the guest.
+     */
+    s->cal_ax = ax;
     s->cal_acx = acx;
     s->cal_by = by;
     s->cal_bcy = bcy;
     s->cal_div = div;
+    s->cal_win_x = win_x;
+    s->cal_win_y = win_y;
     s->cal_w = width;
     s->cal_h = height;
     s->cal_valid = true;
@@ -770,6 +805,8 @@ static void mxs_lradc_realize(DeviceState *dev, Error **errp)
     s->input = qemu_input_handler_register(dev, &mxs_lradc_input_handler);
 }
 
+static void mxs_lradc_init_calibration(MXSLradcState *s);
+
 static void mxs_lradc_init(Object *obj)
 {
     mxs_lradc_trace = mxs_trace_enabled("lradc");
@@ -791,6 +828,22 @@ static void mxs_lradc_init(Object *obj)
     s->delay_timer[1] = timer_new_ns(QEMU_CLOCK_VIRTUAL, mxs_lradc_delay1, s);
     s->delay_timer[2] = timer_new_ns(QEMU_CLOCK_VIRTUAL, mxs_lradc_delay2, s);
     s->delay_timer[3] = timer_new_ns(QEMU_CLOCK_VIRTUAL, mxs_lradc_delay3, s);
+
+    mxs_lradc_init_calibration(s);
+}
+
+static void mxs_lradc_init_calibration(MXSLradcState *s)
+{
+    const char *e = getenv("BRAIN_TOUCH_CAL");
+    int ax = 1, acx = 0, by = 1, bcy = 0, div = 1;
+    int wx = LRADC_MAX_VALUE + 1, wy = LRADC_MAX_VALUE + 1;
+    int w = 4096, h = 4096;
+
+    if (e) {
+        sscanf(e, "%d,%d,%d,%d,%d,%d,%d,%d,%d", &ax, &acx, &by, &bcy, &div,
+               &wx, &wy, &w, &h);
+    }
+    mxs_lradc_set_calibration(DEVICE(s), ax, acx, by, bcy, div, wx, wy, w, h);
 }
 
 static const Property mxs_lradc_properties[] = {
