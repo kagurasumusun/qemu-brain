@@ -672,6 +672,14 @@ def _scan(path, off, needle):
     return needle in txt, txt
 
 
+def _roi(buf, w, y0=100, y1=170, x0=300, x1=700):
+    """Bytes of one band of a frame.  Comparing the whole frame is useless as
+    an "did the input land" test (the battery indicator repaints on its own),
+    and comparing the field row is exactly the thing the tap must change."""
+    return b"".join(buf[(y * w + x0) * 3:(y * w + x1) * 3]
+                    for y in range(y0, y1))
+
+
 def mode_latency(lab, at=(5, 45, 105)):
     """Where does the time go between the button and a sample the guest holds?
 
@@ -719,6 +727,54 @@ def mode_latency(lab, at=(5, 45, 105)):
                     % (statistics.median(v), v[0], v[-1]))
         print("  t+%3ds  front-end->model: %-34s  model->plate conversion: %s"
               % (target, fmt(seg_a), fmt(seg_b)))
+
+    # and the leg the user actually feels: press -> the guest has repainted
+    print("  press -> the guest's own drawing changed (field-row band).")
+    print("  NOTE this leg is sampled by capturing the frame, so it is an "
+          "upper bound; the capture cost is printed below and subtracted.")
+    t0 = time.time()
+    for _ in range(5):
+        lab.shot("lat_cal.ppm")
+    cap = (time.time() - t0) / 5 * 1000
+    print("     one frame capture: %.1f ms" % cap)
+    w, h = lab.width, lab.height
+    lat = []
+    for k in range(6):
+        # alternate between two fields so *every* tap has to move the selection
+        x = 456 if k % 2 == 0 else 596
+        y = 130
+        m = lab.mark()
+        _, _, prev = lab.shot("lat_prev.ppm")
+        prev = _roi(prev, w)
+        t0 = time.time()
+        lab.ptr(x, y, None)
+        time.sleep(0.05)
+        lab.ptr(x, y, 1)
+        seen_model = seen_paint = None
+        while time.time() - t0 < 15.0:
+            if seen_model is None:
+                got, _t = _scan(QLOG, m, "SETTOUCH")
+                if got:
+                    seen_model = time.time() - t0
+            _, _, cur = lab.shot("lat_cur.ppm")
+            if _roi(cur, w) != prev:
+                seen_paint = time.time() - t0
+                break
+            time.sleep(0.01)
+        lab.ptr(x, y, 0)
+        time.sleep(0.5)
+        if seen_model is not None and seen_paint is not None:
+            lat.append((x, seen_model * 1000, seen_paint * 1000))
+            print("     tap (%3d,%d): input %6.1f ms   painted %7.1f ms "
+                  "(%7.1f ms less one capture)"
+                  % (x, y, seen_model * 1000, seen_paint * 1000,
+                     max(0.0, seen_paint * 1000 - cap)))
+    if lat:
+        v = sorted(x[2] - x[1] for x in lat)
+        print("     input->painted, after the first: median %.0f ms (min %.0f, "
+              "max %.0f); the first tap of this burst took %+.0f ms more"
+              % (statistics.median(v[1:]) if len(v) > 1 else v[0], v[0], v[-1],
+                 (lat[0][2] - lat[0][1]) - statistics.median(v[1:])))
 
 
 def main():
