@@ -879,249 +879,6 @@ static void brain_bwatch_arm(Monitor *mon, CPUState *cs, vaddr va,
     }
 }
 
-void hmp_brain_bwatch(Monitor *mon, const QDict *qdict)
-{
-    BrainMachineState *bms;
-    CPUState *cs;
-
-    if (!current_machine) {
-        return;
-    }
-    bms = BRAIN_MACHINE(current_machine);
-    cs = CPU(bms->cpu);
-    brain_bwatch_arm(mon, cs, qdict_get_int(qdict, "va"),
-                     qdict_haskey(qdict, "count") ?
-                     qdict_get_int(qdict, "count") : 1);
-}
-
-void hmp_brain_watch(Monitor *mon, const QDict *qdict)
-{
-    uint64_t addr = qdict_get_int(qdict, "addr");
-    uint64_t len = qdict_get_int(qdict, "len");
-    BrainMachineState *bms = BRAIN_MACHINE(current_machine);
-    CPUWatchpoint *wp = NULL;
-    CPUState *cs = CPU(bms->cpu);
-
-    brain_chain_debug_handler(cs);
-    cpu_watchpoint_insert(cs, addr, len,
-                          BP_MEM_ACCESS | BP_STOP_BEFORE_ACCESS, &wp);
-    monitor_printf(mon, "brain_watch: 0x%llx len %llu inserted (%p)\n",
-                   (unsigned long long)addr, (unsigned long long)len,
-                   (void *)wp);
-}
-
-/*
- * brain_wwatch <addr> [len] -- write-only watchpoint (BP_MEM_WRITE).
- * Like brain_watch but fires only on stores, so read-heavy globals
- * (e.g. keybd g_keydata at 0xc087a750, read by the scan every cycle)
- * do not trip it on every read.
- */
-void hmp_brain_wwatch(Monitor *mon, const QDict *qdict)
-{
-    uint64_t addr = qdict_get_int(qdict, "addr");
-    uint64_t len = qdict_get_int(qdict, "len");
-    BrainMachineState *bms = BRAIN_MACHINE(current_machine);
-    CPUWatchpoint *wp = NULL;
-    CPUState *cs = CPU(bms->cpu);
-
-    brain_chain_debug_handler(cs);
-    cpu_watchpoint_insert(cs, addr, len,
-                          BP_MEM_WRITE | BP_STOP_BEFORE_ACCESS, &wp);
-    monitor_printf(mon, "brain_wwatch: 0x%llx len %llu inserted (%p)\n",
-                   (unsigned long long)addr, (unsigned long long)len,
-                   (void *)wp);
-}
-
-void hmp_brain_unwatch(Monitor *mon, const QDict *qdict)
-{
-    uint64_t addr = qdict_get_int(qdict, "addr");
-    uint64_t len = qdict_get_int(qdict, "len");
-    BrainMachineState *bms = BRAIN_MACHINE(current_machine);
-
-    cpu_watchpoint_remove(CPU(bms->cpu), addr, len, BP_MEM_ACCESS);
-    monitor_printf(mon, "brain_unwatch: 0x%llx len %llu removed\n",
-                   (unsigned long long)addr, (unsigned long long)len);
-}
-
-/*
- * DUART shadow (env BRAIN_UARTWATCH="<substring>"): watch the guest's
- * serial output byte stream; when the recent window ends with the
- * substring, dump the vCPU registers and stack of the writer (the
- * whole DebugPrint call chain is live while a message is output).
- * The shadow dispatches to the pl011's own MemoryRegion so there is
- * no address-space re-entry (and no second chardev).
- */
-static MemoryRegion brain_duart_shadow;
-static char brain_duart_win[64];
-static int brain_duart_winlen;
-static bool brain_duart_armed;
-
-static uint64_t brain_duart_shadow_read(void *opaque, hwaddr offset,
-                                        unsigned size)
-{
-    SysBusDevice *sbd = opaque;
-    MemoryRegion *mr = sysbus_mmio_get_region(sbd, 0);
-    uint64_t v = 0;
-
-    memory_region_dispatch_read(mr, offset, &v, size_memop(size),
-                                MEMTXATTRS_UNSPECIFIED);
-    return v;
-}
-
-static void brain_duart_shadow_write(void *opaque, hwaddr offset,
-                                     uint64_t value, unsigned size)
-{
-    SysBusDevice *sbd = opaque;
-    MemoryRegion *mr = sysbus_mmio_get_region(sbd, 0);
-    const char *needle;
-    int i;
-
-    memory_region_dispatch_write(mr, offset, value, size_memop(size),
-                                 MEMTXATTRS_UNSPECIFIED);
-    if (!brain_duart_armed || offset != 0 /* UARTDR */) {
-        return;
-    }
-    needle = getenv("BRAIN_UARTWATCH");
-    if (!needle || !*needle) {
-        return;
-    }
-    if (brain_duart_winlen < (int)sizeof(brain_duart_win) - 1) {
-        brain_duart_win[brain_duart_winlen++] = value & 0xff;
-    } else {
-        memmove(brain_duart_win, brain_duart_win + 1,
-                sizeof(brain_duart_win) - 1);
-        brain_duart_win[sizeof(brain_duart_win) - 2] = value & 0xff;
-    }
-    brain_duart_win[brain_duart_winlen] = '\0';
-    if (strlen(needle) <= (size_t)brain_duart_winlen &&
-        !strcmp(brain_duart_win + brain_duart_winlen - strlen(needle),
-                needle)) {
-        CPUState *cs = current_cpu;
-        CPUARMState *env = &ARM_CPU(cs)->env;
-        uint8_t buf[128];
-        int w;
-
-        fprintf(stderr,
-                "[brain-uartwatch] MATCH %s pc=%08x lr=%08x sp=%08x "
-                "r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x "
-                "r6=%08x r7=%08x\n",
-                needle, (unsigned)env->regs[15], (unsigned)env->regs[14],
-                (unsigned)env->regs[13], (unsigned)env->regs[0],
-                (unsigned)env->regs[1], (unsigned)env->regs[2],
-                (unsigned)env->regs[3], (unsigned)env->regs[4],
-                (unsigned)env->regs[5], (unsigned)env->regs[6],
-                (unsigned)env->regs[7]);
-        for (w = 0; w < 16; w++) {
-            if (cpu_memory_rw_debug(cs, env->regs[13] + w * 0x80,
-                                    buf, sizeof(buf), 0) == 0) {
-                fprintf(stderr, "[brain-uartwatch] stack+0x%03x:",
-                        w * 0x80);
-                for (i = 0; i < 32; i++) {
-                    fprintf(stderr, " %08x", ldl_le_p(buf + i * 4));
-                }
-                fprintf(stderr, "\n");
-            }
-        }
-        /* message buffer at r4 and the arg pointers */
-        for (w = 0; w < 8; w++) {
-            vaddr p = (w == 0) ? env->regs[4] :
-                      (w == 1) ? env->regs[5] :
-                      (w == 2) ? env->regs[0] :
-                      (w == 3) ? env->regs[1] :
-                      (w == 4) ? env->regs[2] :
-                      (w == 5) ? env->regs[3] :
-                      (w == 6) ? env->regs[14] :
-                                 env->regs[15];
-            if (cpu_memory_rw_debug(cs, p, buf, sizeof(buf), 0) == 0) {
-                fprintf(stderr, "[brain-uartwatch] reg%dbuf(0x%08x):",
-                        w, (unsigned)p);
-                for (i = 0; i < 32; i++) {
-                    fprintf(stderr, " %08x", ldl_le_p(buf + i * 4));
-                }
-                fprintf(stderr, "\n");
-            }
-        }
-        brain_duart_armed = false;
-        brain_duart_winlen = 0;
-    }
-}
-
-static const MemoryRegionOps brain_duart_shadow_ops = {
-    .read = brain_duart_shadow_read,
-    .write = brain_duart_shadow_write,
-    .endianness = DEVICE_NATIVE_ENDIAN,
-    .impl = { .min_access_size = 1, .max_access_size = 4 },
-    .valid = { .min_access_size = 1, .max_access_size = 4 },
-};
-
-/*
- * Read 32 bits from a physical address and print them.  Used for
- * poking at the WinCE NK image at runtime to figure out where the
- * BSP keeps its state (e.g. `g_bPwmInit`, `g_BklData`,
- * `BSP_PRESENT_CH_MASK`) so we can patch it on the fly.
- */
-/*
- * brain_pdump <pa> <len> <file>: copy guest physical memory out raw, so a
- * whole RAM image can be searched offline instead of one 256-byte page per
- * monitor round trip (960 KiB is 3840 of those).
- */
-void hmp_brain_pdump(Monitor *mon, const QDict *qdict)
-{
-    hwaddr addr = qdict_get_int(qdict, "addr");
-    int64_t len = qdict_get_int(qdict, "len");
-    const char *to = qdict_get_str(qdict, "to");
-    size_t n = MIN(len, (int64_t)(8 << 20));
-    g_autofree uint8_t *b = g_malloc0(n);
-
-    if (!current_machine) {
-        return;
-    }
-    if (address_space_read(&address_space_memory, addr,
-                           MEMTXATTRS_UNSPECIFIED, b, n) != MEMTX_OK) {
-        monitor_printf(mon, "brain_pdump: read failed at 0x%08x\n",
-                       (unsigned)(addr & 0xffffffff));
-        return;
-    }
-    if (!g_file_set_contents(to, (const char *)b, n, NULL)) {
-        monitor_printf(mon, "brain_pdump: cannot write %s\n", to);
-        return;
-    }
-    monitor_printf(mon, "brain_pdump 0x%08x +0x%zx -> %s\n",
-                   (unsigned)(addr & 0xffffffff), n, to);
-}
-
-void hmp_brain_pread(Monitor *mon, const QDict *qdict)
-{
-    hwaddr addr = qdict_get_int(qdict, "addr");
-
-    if (!current_machine) {
-        return;
-    }
-    uint8_t buf[256];
-    MemTxResult r = address_space_read(&address_space_memory, addr,
-                                       MEMTXATTRS_UNSPECIFIED, buf,
-                                       sizeof(buf));
-    if (r != MEMTX_OK) {
-        monitor_printf(mon, "brain_pread: read failed at 0x%08x\n",
-                       (unsigned)(addr & 0xffffffff));
-        return;
-    }
-    monitor_printf(mon, "brain_pread 0x%08x:\n", (unsigned)(addr & 0xffffffff));
-    for (int i = 0; i < 256; i += 16) {
-        monitor_printf(mon, "  %08llx:",
-                       (unsigned long long)(addr + i));
-        for (int j = 0; j < 16; j++) {
-            monitor_printf(mon, " %02x", buf[i + j]);
-        }
-        monitor_printf(mon, "  ");
-        for (int j = 0; j < 16; j++) {
-            unsigned char c = buf[i + j];
-            monitor_printf(mon, "%c",
-                           (c >= 0x20 && c < 0x7f) ? c : '.');
-        }
-        monitor_printf(mon, "\n");
-    }
-}
 
 /*
  * brain_vread <va> [len] -- read guest *virtual* memory.
@@ -1135,114 +892,6 @@ void hmp_brain_pread(Monitor *mon, const QDict *qdict)
  * actually resolves to, so we can inspect the runtime value of
  * variables like 0xc087a750 (SetDirectKey guard).
  */
-/*
- * Guest VA -> PA for debug reads.
- *
- * This is QEMU's debug translation hook.  It is NOT reliable for this guest's
- * kernel XIP window: for 0xc07c71c8 it hands the address back unchanged, and
- * that PA is not host-mapped, so a read returns zeros and a write fails with
- * MEMTX_ERROR -- which is exactly how the earlier "calibration injection"
- * tooling managed to report success while changing nothing.  Kept for
- * `brain_vread`, with the caveat spelled out in hmp-commands.hx; nothing in
- * the model writes guest memory through it.
- */
-static hwaddr brain_dbg_va_to_pa(BrainMachineState *bms, hwaddr va)
-{
-    MemTxAttrs attrs = {};
-    hwaddr pa;
-
-    pa = arm_cpu_get_phys_page_attrs_debug(CPU(bms->cpu), va & ~0xfff,
-                                           &attrs);
-    if (pa == (hwaddr)-1) {
-        return (hwaddr)-1;
-    }
-    return pa + (va & 0xfff);
-}
-
-
-/*
- * brain_vread <va> [len]: debug read through QEMU's translation hook.  See
- * brain_dbg_va_to_pa() for why a zero result does NOT prove the guest sees
- * zero.
- */
-void hmp_brain_vread(Monitor *mon, const QDict *qdict)
-{
-    vaddr va = qdict_get_int(qdict, "va");
-    int len = qdict_get_try_int(qdict, "len", 64);
-    BrainMachineState *bms = BRAIN_MACHINE(current_machine);
-    hwaddr pa;
-    uint8_t buf[256];
-
-    if (!current_machine) {
-        return;
-    }
-    if (len > (int)sizeof(buf)) {
-        len = sizeof(buf);
-    }
-    pa = brain_dbg_va_to_pa(bms, va);
-    if (pa == (hwaddr)-1) {
-        monitor_printf(mon, "brain_vread: no translation for VA 0x%08lx\n",
-                       (unsigned long)va);
-        return;
-    }
-    memset(buf, 0, sizeof(buf));
-    address_space_read(&address_space_memory, pa, MEMTXATTRS_UNSPECIFIED,
-                       buf, len);
-    monitor_printf(mon, "brain_vread VA 0x%08lx -> PA 0x%08llx:\n",
-                   (unsigned long)va, (unsigned long long)pa);
-    for (int i = 0; i < len; i += 16) {
-        monitor_printf(mon, "  %08lx:",
-                       (unsigned long)(va + i));
-        for (int j = 0; j < 16 && i + j < len; j++) {
-            monitor_printf(mon, " %02x", buf[i + j]);
-        }
-        monitor_printf(mon, "  ");
-        for (int j = 0; j < 16 && i + j < len; j++) {
-            unsigned char c = buf[i + j];
-            monitor_printf(mon, "%c",
-                           (c >= 0x20 && c < 0x7f) ? c : '.');
-        }
-        monitor_printf(mon, "\n");
-    }
-}
-
-/*
- * Write 32 bits to a physical address.  Used to flip bits in the
- * WinCE NK's `.data` / `.bss` section at runtime (for instance to
- * set `g_bPwmInit = TRUE` once we have located the symbol, or to
- * rewrite the BSP's `BSP_PRESENT_CH_MASK` constant).
- */
-void hmp_brain_pwrite(Monitor *mon, const QDict *qdict)
-{
-    hwaddr addr = qdict_get_int(qdict, "addr");
-    uint64_t value = qdict_get_int(qdict, "value");
-    unsigned size = qdict_get_try_int(qdict, "size", 4);
-    uint8_t buf[8];
-
-    if (!current_machine) {
-        return;
-    }
-    if (size == 1) {
-        buf[0] = value & 0xff;
-    } else if (size == 2) {
-        stl_le_p(buf, value & 0xffff);
-    } else if (size == 4) {
-        stl_le_p(buf, value & 0xffffffff);
-    } else {
-        monitor_printf(mon, "brain_pwrite: size must be 1, 2 or 4\n");
-        return;
-    }
-    MemTxResult r = address_space_write(&address_space_memory, addr,
-                                        MEMTXATTRS_UNSPECIFIED, buf, size);
-    if (r != MEMTX_OK) {
-        monitor_printf(mon, "brain_pwrite: write failed at 0x%08x\n",
-                       (unsigned)(addr & 0xffffffff));
-        return;
-    }
-    monitor_printf(mon, "brain_pwrite 0x%08x <- 0x%lx (size %u)\n",
-                   (unsigned)(addr & 0xffffffff), (unsigned long)value,
-                   (unsigned)size);
-}
 
 /*
  * Toggle live tracing of every MXS MMIO access (with guest PC) to
@@ -1317,57 +966,6 @@ void hmp_brain_stats(Monitor *mon, const QDict *qdict)
 }
 
 /*
- * brain_pmemsave <addr> <len> "filename"
- *
- * Raw physical-memory dump side-channel for the Brain machine.
- * This fork's stock pmemsave is unreliable for our analysis flow
- * (gdb VA dumps can not see other processes' user pages on WinCE;
- * the HMP parser also requires quoted filename strings), so provide
- * a direct address_space_read -> FILE* pipe with hole-tolerant
- * zero fill.  128 MiB dumps in ~3 s.
- */
-void hmp_brain_pmemsave(Monitor *mon, const QDict *qdict)
-{
-    uint64_t addr = qdict_get_int(qdict, "addr");
-    uint64_t len = qdict_get_int(qdict, "size");
-    const char *filename = qdict_get_try_str(qdict, "filename");
-    FILE *fp;
-    uint8_t *buf;
-    uint64_t off = 0;
-    const uint64_t chunk = 64 * 1024;
-
-    if (!filename) {
-        monitor_printf(mon, "brain_pmemsave: filename required\n");
-        return;
-    }
-    fp = fopen(filename, "wb");
-    if (!fp) {
-        monitor_printf(mon, "brain_pmemsave: cannot open %s\n", filename);
-        return;
-    }
-    buf = g_malloc(chunk);
-    while (off < len) {
-        uint64_t n = MIN(chunk, len - off);
-        MemTxResult r;
-
-        r = address_space_read(&address_space_memory, addr + off,
-                               MEMTXATTRS_UNSPECIFIED, buf, n);
-        if (r != MEMTX_OK) {
-            memset(buf, 0, n);  /* unmapped hole: keep offsets stable */
-        }
-        if (fwrite(buf, 1, n, fp) != n) {
-            monitor_printf(mon, "brain_pmemsave: write error\n");
-            break;
-        }
-        off += n;
-    }
-    g_free(buf);
-    fclose(fp);
-    monitor_printf(mon, "brain_pmemsave: wrote 0x%llx bytes to %s\n",
-                   (unsigned long long)off, filename);
-}
-
-/*
  * Dump the tail of the Brain event ring (VECTOR ack/LEVELACK/suppress/
  * quirk defer+apply/...).  Optional argument: number of entries (max 256).
  */
@@ -1397,89 +995,6 @@ void hmp_brain_events(Monitor *mon, const QDict *qdict)
     buf[n] = '\0';
     fclose(f);
     monitor_printf(mon, "%s", buf);
-}
-
-/*
- * Inject a touch event from the QEMU monitor (e.g. when QEMU
- * runs headless and the SDL mouse isn't available).  Coordinates
- * are 0..0x7fff in the same space the SHARP Brain BSP reads back
- * from LRADC plate channels 2 (X) / 3 (Y).  The event is delivered
- * through the QEMU input handler bus, so the LRADC's
- * `mxs_lradc_touch_event` callback updates the same touch state
- * that the SDL mouse would have.
- */
-void hmp_brain_lcdfb(Monitor *mon, const QDict *qdict)
-{
-    BrainMachineState *bms = BRAIN_MACHINE(current_machine);
-    const char *path = qdict_get_try_str(qdict, "path");
-
-    if (!current_machine || !bms->lcdif) {
-        monitor_printf(mon, "brain_lcdfb: no machine / no LCDIF\n");
-        return;
-    }
-    if (!path || !*path) {
-        monitor_printf(mon, "brain_lcdfb: path required\n");
-        return;
-    }
-    {
-        uint32_t base = qdict_get_try_int(qdict, "base", 0);
-        uint32_t w = qdict_get_try_int(qdict, "width", 0);
-        uint32_t h = qdict_get_try_int(qdict, "height", 0);
-        int bpp = qdict_get_try_int(qdict, "bpp", 0);
-        if (mxs_lcdif_dump_fb_opt(bms->lcdif, path, base, w, h, bpp) == 0) {
-            monitor_printf(mon, "brain_lcdfb: wrote %s\n", path);
-        } else {
-            monitor_printf(mon,
-                           "brain_lcdfb: no frame latched or write failed\n");
-        }
-    }
-}
-
-void hmp_brain_touch(Monitor *mon, const QDict *qdict)
-{
-    BrainMachineState *bms;
-    int x = qdict_get_int(qdict, "x");
-    int y = qdict_get_int(qdict, "y");
-    int down = qdict_get_int(qdict, "down");
-
-    if (!current_machine) {
-        return;
-    }
-    bms = BRAIN_MACHINE(current_machine);
-    InputEvent evt;
-    InputMoveEvent move_x = { .axis = INPUT_AXIS_X, .value = x & 0x7fff };
-    InputMoveEvent move_y = { .axis = INPUT_AXIS_Y, .value = y & 0x7fff };
-    InputBtnEvent btn = { .button = INPUT_BUTTON_LEFT, .down = !!down };
-
-    evt.type = INPUT_EVENT_KIND_ABS;
-    evt.u.abs.data = &move_x;
-    qemu_input_event_send_impl(NULL, &evt);
-
-    evt.u.abs.data = &move_y;
-    qemu_input_event_send_impl(NULL, &evt);
-
-    evt.type = INPUT_EVENT_KIND_BTN;
-    evt.u.btn.data = &btn;
-    qemu_input_event_send_impl(NULL, &evt);
-
-    /*
-     * The headless machine has no active UI console, so the input
-     * handler bus above can race with (or miss) console binding.
-     * Drive the LRADC model state directly as well so that
-     * brain_touch is deterministic regardless of the input layer.
-     */
-    if (bms->lradc) {
-        mxs_lradc_set_touch(bms->lradc, x, y, !!down);
-    }
-
-    /*
-     * The panel wake path belongs to the touch device, not to this command:
-     * mxs_lradc_set_touch() pulses the EDNA2 attention line on every press
-     * edge, so the SDL/gtk pointer and `brain_touch` behave identically and a
-     * press is not duplicated here.
-     */
-
-    monitor_printf(mon, "brain_touch: x=%d y=%d down=%d\n", x, y, down);
 }
 
 /*
@@ -1745,11 +1260,6 @@ static void brain_edna2_mcu_kick(BrainMachineState *bms)
  * on.  The backing store is copied from / to the DRAM page so guest
  * behaviour is unchanged.  Release builds should drop the overlay.
  */
-#define BRAIN_PANEL_W          800
-#define BRAIN_PANEL_H          480
-#define BRAIN_TOUCH_CAL_VA   0xc07c71c8u
-#define BRAIN_TOUCH_CAL_PAGE 0xc07c7000u
-#define BRAIN_TOUCH_AFF_VA   0xc07c71f4u
 
 static uint64_t brain_edna2_mb_read(void *opaque, hwaddr offset, unsigned size)
 {
@@ -1757,11 +1267,6 @@ static uint64_t brain_edna2_mb_read(void *opaque, hwaddr offset, unsigned size)
     uint64_t v = 0;
 
     memcpy(&v, bms->edna2_mb + offset, size);
-    if (mxs_trace_live || brain_mb_trace_live) {
-        fprintf(stderr, "[edna2-mb] R +0x%03x -> 0x%llx pc=0x%08x\n",
-                (unsigned)offset, (unsigned long long)v,
-                (unsigned)mxs_trace_guest_pc());
-    }
     return v;
 }
 
@@ -1770,11 +1275,6 @@ static void brain_edna2_mb_write(void *opaque, hwaddr offset, uint64_t value,
 {
     BrainMachineState *bms = opaque;
 
-    if (mxs_trace_live || brain_mb_trace_live) {
-        fprintf(stderr, "[edna2-mb] W +0x%03x <- 0x%llx pc=0x%08x\n",
-                (unsigned)offset, (unsigned long long)value,
-                (unsigned)mxs_trace_guest_pc());
-    }
     memcpy(bms->edna2_mb + offset, &value, size);
 
     /* Doorbell: the guest kicks the MCU by writing 1 to +0x3C. */
@@ -2175,8 +1675,8 @@ static void brain_init(MachineState *machine)
 
     /* display */
     dev = qdev_new(TYPE_MXS_LCDIF);
-    qdev_prop_set_uint32(dev, "width", bms->lcd_width);
-    qdev_prop_set_uint32(dev, "height", bms->lcd_height);
+    qdev_prop_set_uint32(dev, "panel-w", bms->lcd_width);
+    qdev_prop_set_uint32(dev, "panel-h", bms->lcd_height);
     qdev_prop_set_uint32(dev, "rotate", bms->lcd_rotate);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, MXS_LCDIF_BASE);
@@ -2185,18 +1685,8 @@ static void brain_init(MachineState *machine)
     bms->lcdif = dev;
 
     /* debug UART is a PL011 */
-    DeviceState *duart = pl011_create(MXS_DUART_BASE,
-                    qdev_get_gpio_in(icoll, MXS_IRQ_DUART), serial_hd(0));
-
-    /* analysis aid: shadow the DUART when BRAIN_UARTWATCH is set */
-    if (getenv("BRAIN_UARTWATCH")) {
-        brain_duart_armed = true;
-        memory_region_init_io(&brain_duart_shadow, NULL,
-                              &brain_duart_shadow_ops, SYS_BUS_DEVICE(duart),
-                              "brain-duart-shadow", 0x1000);
-        memory_region_add_subregion_overlap(sysmem, MXS_DUART_BASE,
-                                            &brain_duart_shadow, 2);
-    }
+    pl011_create(MXS_DUART_BASE, qdev_get_gpio_in(icoll, MXS_IRQ_DUART),
+                 serial_hd(0));
 
     /* application UARTs */
     for (i = 0; i < 5; i++) {
@@ -2210,6 +1700,13 @@ static void brain_init(MachineState *machine)
 
     /* LRADC: battery monitoring and the resistive touch screen */
     dev = qdev_new(TYPE_MXS_LRADC);
+    /*
+     * The digitizer is optically bonded to the display module, so the LRADC
+     * needs the panel's geometry to say where a finger is.  This is board
+     * wiring, not a debugging convenience.
+     */
+    object_property_set_link(OBJECT(dev), "panel", OBJECT(bms->lcdif),
+                             &error_abort);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     bms->lradc = dev;
     sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, MXS_LRADC_BASE);
@@ -2536,7 +2033,20 @@ static void brain_instance_init(Object *obj)
      */
     bms->lcd_width = 480;
     bms->lcd_height = 854;
-    bms->lcd_rotate = 270;
+    /*
+     * The panel scans a 480 x 854 portrait array; the Brain uses it as a
+     * landscape display, so the glass is mounted turned.  90 degrees is the
+     * direction that puts the guest's picture on the console the way the
+     * device shows it -- measured as the date/time dialog reading left to
+     * right with the soft-key column down its left edge (runs/s89).  This used
+     * to
+     * be 270, which was compensating for the LCDIF ignoring MADCTL: the boot
+     * loader programs MADCTL = 0xd0 (MY|MX, a half turn of the scan order) and
+     * the model now applies that itself, so the mount must not add the same
+     * half turn again.  With both, the console came out upside down and every
+     * tap landed on the field diagonally opposite the one the user clicked.
+     */
+    bms->lcd_rotate = 90;
     bms->verbose = true;
 
     bms->edna2_mcu_busy = false;

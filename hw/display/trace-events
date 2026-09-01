@@ -226,3 +226,11 @@ apple_gfx_iosfc_unmap_memory(void *a, void *b, void *c, void *d, void *e, void *
 apple_gfx_iosfc_unmap_memory_region(void* mem, void *region) "unmapping @ %p from memory region %p"
 apple_gfx_iosfc_raise_irq(uint32_t vector) "vector=0x%x"
 
+# mxs_lcdif.c -- the LCDIF and the MIPI-DBI panel it drives
+mxs_lcdif_window(const char *which, uint32_t start, uint32_t end) "%s window %u..%u"
+mxs_lcdif_ramwr(uint32_t x, uint32_t y) "RAMWR, write pointer at %u,%u"
+mxs_lcdif_madctl(uint32_t old, uint32_t val) "MADCTL 0x%02x -> 0x%02x"
+mxs_lcdif_dbi(uint32_t cmd, uint32_t first) "DBI command 0x%02x (first byte 0x%02x)"
+mxs_lcdif_dbi_read(void) "panel read requested (model is write-only)"
+mxs_lcdif_push(uint32_t words, uint32_t lines, uint64_t base, int bpp) "push %ux%u from 0x%" PRIx64 " at bpp %d"
+mxs_lcdif_update(int32_t x0, int32_t y0, int32_t x1, int32_t y1) "console update for GRAM %d,%d..%d,%d"

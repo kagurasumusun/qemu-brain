@@ -6,3 +6,8 @@ npcm7xx_adc_write(const char *id, uint64_t offset, uint32_t value) "%s offset: 0
 
 aspeed_adc_engine_read(uint32_t engine_id, uint64_t addr, uint64_t value) "engine[%u] 0x%" PRIx64 " 0x%" PRIx64
 aspeed_adc_engine_write(uint32_t engine_id, uint64_t addr, uint64_t value) "engine[%u] 0x%" PRIx64 " 0x%" PRIx64
+
+# mxs_lradc.c -- 4-wire resistive touch panel on the i.MX28 converter
+mxs_lradc_set_touch(int32_t axis_x, int32_t axis_y, bool down, uint32_t ctrl0, uint32_t ctrl1, int64_t vnow) "axis %d,%d down=%d ctrl0 0x%08x ctrl1 0x%08x vnow=%" PRId64
+mxs_lradc_convert(int32_t vch, int32_t phys, uint32_t value, bool down, int32_t axis_x, int32_t axis_y, int64_t vnow) "vch%d phys%d -> 0x%04x (down=%d axis %d,%d) vnow=%" PRId64
+mxs_lradc_kick(int32_t n, uint32_t loops, int32_t delay_us, uint32_t channels) "DELAY%d armed: %u extra, %d us, channels 0x%02x"

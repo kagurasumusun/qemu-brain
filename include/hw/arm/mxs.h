@@ -130,14 +130,17 @@
 #define TYPE_MXS_GPMI       "mxs-gpmi"
 #define TYPE_MXS_SSP        "mxs-ssp"
 #define TYPE_MXS_LCDIF      "mxs-lcdif"
-int mxs_lcdif_dump_fb(DeviceState *dev, const char *path);
-int mxs_lcdif_dump_fb_opt(DeviceState *dev, const char *path,
-                          uint32_t base, uint32_t w, uint32_t h, int bpp);
+/*
+ * The panel's GRAM is what a finger is on top of: convert a normalised
+ * absolute input axis into a GRAM coordinate.  Returns false if there is no
+ * panel to ask.
+ */
+bool mxs_lcdif_touch_position(DeviceState *dev, int axis_x, int axis_y,
+                              int *px, int *py);
 #define TYPE_MXS_PXP        "mxs-pxp"
 #define TYPE_MXS_LRADC      "mxs-lradc"
 
-/* touch screen input (also used by the headless HMP brain_touch) */
-void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down);
+/* (the LRADC takes touch input only through QEMU's input pipeline) */
 #define TYPE_MXS_AUART      "mxs-auart"
 #define TYPE_BRAIN_KBD      "brain-keyboard"
 
