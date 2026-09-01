@@ -120,8 +120,24 @@ typedef struct MXSLradcState {
     bool run_down;
     bool run_valid;
 
+    /*
+     * Pen state as the converter sees it.  On silicon a conversion that nobody
+     * reads leaves its value standing in the channel data register, so a press
+     * that arrives while the driver is in its OFF power state is not lost: the
+     * next burst -- the one the wake causes -- samples the plate while the
+     * finger is still on it.  Reporting pen-up to a burst armed after the
+     * release is what made a suspended guest swallow taps: measured in
+     * runs/acc10, a 12 s hold produced 5822 conversions and every single one
+     * reported touch_down=0, i.e. the panel looked open for the whole time the
+     * finger was on it, so the driver had nothing to deliver.
+     */
+    enum {
+        MXS_LRADC_PEN_UP = 0,       /* plate open */
+        MXS_LRADC_PEN_DOWN,         /* finger on the glass, re-latch position */
+        MXS_LRADC_PEN_LIFTING       /* report the release position once */
+    } pen_state;
+
     uint32_t loop_count[4];         /* conversions left per DELAY channel */
-    bool touch_up_pending;          /* deliver one transitional sample */
 
     /*
      * The touch PDD's calibration (sx8650_touchscreen.dll affine block,
@@ -249,6 +265,16 @@ static uint32_t mxs_lradc_sample(MXSLradcState *s, int ch, uint32_t trigger)
     down = s->run_valid ? s->run_down : s->touch_down;
 
     /*
+     * A conversion result exists once it has been produced, so the burst's
+     * latch is consumed by this read: the transitional (pen-lifting) sample
+     * must not be handed out twice, while a still-held finger keeps being
+     * reported for every subsequent burst.
+     */
+    if (s->run_valid && s->pen_state != MXS_LRADC_PEN_DOWN) {
+        s->run_valid = false;
+    }
+
+    /*
      * The UI delivers normalised absolute coordinates over the whole panel;
      * the calibrated plate span is what a finger on the glass produces, so
      * map [0, 0x7fff] -> [LEFT, RIGHT] with round-to-nearest.  Truncating
@@ -339,15 +365,29 @@ static void mxs_lradc_run_start(MXSLradcState *s, bool force)
     if (s->run_valid && !force) {
         return;
     }
-    s->run_x = s->touch_x;
-    s->run_y = s->touch_y;
-    s->run_down = s->touch_down;
-    if (!s->touch_down && s->touch_up_pending) {
-        /* the pen lifted since the last sample: report the release position */
+    switch (s->pen_state) {
+    case MXS_LRADC_PEN_DOWN:
+        /* finger still on the glass: report where it is pressing now */
+        s->run_x = s->touch_x;
+        s->run_y = s->touch_y;
+        s->run_down = true;
+        break;
+    case MXS_LRADC_PEN_LIFTING:
+        /*
+         * The pen lifted before (or while) the driver was sampling.  Hand out
+         * the release position as the transitional sample the worker's jitter
+         * filter expects, exactly once, then return to the open-plate state.
+         */
         s->run_x = s->last_x;
         s->run_y = s->last_y;
         s->run_down = true;
-        s->touch_up_pending = false;
+        s->pen_state = MXS_LRADC_PEN_UP;
+        break;
+    default:
+        s->run_x = s->touch_x;
+        s->run_y = s->touch_y;
+        s->run_down = false;
+        break;
     }
     s->run_valid = true;
 }
@@ -589,7 +629,11 @@ void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
     if (s->touch_down && !down) {
         s->last_x = s->touch_x;
         s->last_y = s->touch_y;
-        s->touch_up_pending = true;
+        /* deliver the transitional sample from the *next* burst, whenever
+         * that is -- including one armed long after the release */
+        s->pen_state = MXS_LRADC_PEN_LIFTING;
+    } else if (down) {
+        s->pen_state = MXS_LRADC_PEN_DOWN;
     }
     bool down_edge = !s->touch_down && down;
 
@@ -715,7 +759,7 @@ static void mxs_lradc_reset(DeviceState *dev)
         s->loop_count[i] = 0;
     }
     s->touch_down = false;
-    s->touch_up_pending = false;
+    s->pen_state = MXS_LRADC_PEN_UP;
     s->run_valid = false;
 }
 
