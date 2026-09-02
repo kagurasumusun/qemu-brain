@@ -134,7 +134,6 @@
 #define TYPE_MXS_DIGCTL     "mxs-digctl"
 #define TYPE_MXS_OCOTP      "mxs-ocotp"
 #define TYPE_MXS_RTC        "mxs-rtc"
-#define TYPE_MXS_I2C        "mxs-i2c"
 #define TYPE_MXS_I2C_REAL   "mxs-i2c-real"
 #define TYPE_MXS_USBPHY     "mxs-usbphy"
 #define TYPE_MXS_USBCTRL    "mxs-usbctrl"

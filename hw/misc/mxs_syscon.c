@@ -51,9 +51,6 @@ enum {
     MXS_KIND_OCOTP,
     MXS_KIND_RTC,
     MXS_KIND_USBPHY,
-    MXS_KIND_I2C,        /* pretend to be a working I2C controller so the */
-                         /* WinCE BSP does not time out talking to the    */
-                         /* audio CODEC / battery monitor on the bus.     */
 };
 
 /*
@@ -271,42 +268,6 @@ static uint32_t mxs_syscon_reg_read(MXSSysconState *s, unsigned idx)
         }
         break;
 
-    case MXS_KIND_I2C:
-        /*
-         * The WinCE BSP uses I2C0 to talk to an audio CODEC and I2C1 for
-         * the battery monitor.  None of those chips exist in the
-         * emulation but the BSP still needs a well behaved controller
-         * or the kernel's I2C layer will time out on every transfer.
-         * We just return the controller's idle state plus any pending
-         * completion interrupt.  The data register always reads zero,
-         * which is the same response a disconnected device would give
-         * on the real bus.  Register 0xb0 (HW_I2C_DATA extension in
-         * some revisions) is treated as the read-completion flag: it
-         * reads 1 once the most recent START command has been "latched"
-         * by the model, which convinces the BSP that the byte has been
-         * received and stops the polling loop.
-         */
-        switch (idx) {
-        case 0x0:         /* CTRL0 - report idle, no error */
-            val = (val & ~0xffu) | 0x00u;   /* !RUN, !BUSY, !MSTEN */
-            break;
-        case 0x3:         /* DATA - no bytes received */
-            val = 0;
-            break;
-        case 0x4:         /* DEBUG0 - bus idle, no arbitration lost */
-            val = 0;
-            break;
-        case 0x6:         /* VERSION */
-            val = 0x03000000;
-            break;
-        case 0xb:         /* extension register used by the BSP to poll */
-            val = 1;     /* transfer "complete" */
-            break;
-        default:
-            break;
-        }
-        break;
-
     case MXS_KIND_USBPHY:
         if (idx == USBPHY_STATUS) {
             /* no cable, no device: only the (floating, pulled up) ID pin */
@@ -362,29 +323,6 @@ static void mxs_syscon_write(void *opaque, hwaddr offset, uint64_t value,
 
     if (unlikely(s->trace || mxs_trace_live)) {
         mxs_trace_access(s->name, true, offset, (uint32_t)value);
-    }
-
-    /*
-     * I2C writes: pretend to be a working I2C controller.  The WinCE
-     * BSP toggles CTRL0.MSTEN (bit 7) to start a transfer and then
-     * polls CTRL1 holding the slave address or the DATA register, and
-     * waits for CTRL0.RUN (bit 8) to drop - so the only thing we have
-     * to do on the way out is acknowledge the command: keep MSTEN set
-     * and clear RUN, and raise the IRQ.  This convinces the guest that
-     * the transfer completed (with no data, since the audio CODEC and
-     * battery monitor are not modelled).
-     */
-    if (s->kind == MXS_KIND_I2C) {
-        if (idx == 0x0) {
-            /* the BSP sets MSTEN|RUN, the controller model clears RUN
-             * and raises IRQ on its own below.  Just keep the request. */
-        } else if (idx == 0x2) {
-            /* a START/STOP command was issued: clear RUN, raise IRQ. */
-            s->regs[0x0] &= ~(1u << 8);        /* CTRL0.RUN */
-            s->regs[0x0] |= (1u << 5);         /* CTRL0.IRQ pending */
-            /* IRQEN is bit 7 of CTRL0; pulse the interrupt line */
-            qemu_set_irq(s->irq, 1);
-        }
     }
 
     if (s->kind == MXS_KIND_POWER && idx == PWR_RESET) {
@@ -561,7 +499,6 @@ MXS_SYSCON_SUBTYPE(mxs_power, MXS_KIND_POWER)
 MXS_SYSCON_SUBTYPE(mxs_digctl, MXS_KIND_DIGCTL)
 MXS_SYSCON_SUBTYPE(mxs_ocotp, MXS_KIND_OCOTP)
 MXS_SYSCON_SUBTYPE(mxs_rtc, MXS_KIND_RTC)
-MXS_SYSCON_SUBTYPE(mxs_i2c, MXS_KIND_I2C)
 
 static void mxs_usbphy_init(Object *obj)
 {
@@ -597,11 +534,6 @@ static const TypeInfo mxs_syscon_types[] = {
         .name           = TYPE_MXS_OCOTP,
         .parent         = TYPE_MXS_SYSCON,
         .instance_init  = mxs_ocotp_init,
-    },
-    {
-        .name           = TYPE_MXS_I2C,
-        .parent         = TYPE_MXS_SYSCON,
-        .instance_init  = mxs_i2c_init,
     },
     {
         .name           = TYPE_MXS_USBPHY,
