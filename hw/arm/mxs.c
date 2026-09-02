@@ -2119,7 +2119,20 @@ static void brain_init(MachineState *machine)
         }
         bms->apbx = dev;
     }
-    mxs_create_dummy("dcp", MXS_DCP_BASE, 0x2000);
+    /*
+     * DCP: the crypto/blit/copy engine.  A real i.MX28 block and the one
+     * peripheral in this list that the board's own device tree enables
+     * (imx28-pwsh6.dts: dcp@80028000 status = "okay"), so it gets a real
+     * model (hw/misc/mxs_dcp.c) rather than a placeholder.  Channel 0
+     * drives dcp_vmi_irq, channels 1..3 the shared dcp_irq.
+     */
+    dev = qdev_new(TYPE_MXS_DCP);
+    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
+    sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, MXS_DCP_BASE);
+    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
+                       qdev_get_gpio_in(icoll, MXS_IRQ_DCP));
+    sysbus_connect_irq(SYS_BUS_DEVICE(dev), 1,
+                       qdev_get_gpio_in(icoll, MXS_IRQ_DCP_VMI));
     mxs_create_simple(TYPE_MXS_PXP, MXS_PXP_BASE, icoll, MXS_IRQ_PXP);
     mxs_create_dummy("axi-ahb0", MXS_AXI_AHB0_BASE, 0x2000);
     mxs_create_dummy("can0", MXS_CAN0_BASE, 0x2000);
