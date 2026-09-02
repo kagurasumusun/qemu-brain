@@ -701,3 +701,5 @@ config MXS
     select SD
     select FRAMEBUFFER
     select UNIMP
+    select I2C
+    select SGTL5000

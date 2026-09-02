@@ -194,6 +194,9 @@ const MXSDmaOps *mxs_ssp_get_dma_ops(void);
 /* keyboard: needs to know which pinctrl it is wired to */
 void brain_kbd_set_pinctrl(DeviceState *kbd, DeviceState *pinctrl);
 
+/* mxs-i2c-real: board codec (SGTL5000) attached at realize time, or NULL */
+DeviceState *mxs_i2c_codec_device(DeviceState *dev);
+
 #endif /* HW_ARM_MXS_H */
 
 /* EDNA2 MCU touchkey report word (mailbox +0x404) */

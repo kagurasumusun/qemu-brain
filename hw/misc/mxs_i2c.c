@@ -67,6 +67,12 @@ typedef struct MXSI2CState {
     bool trace;
     qemu_irq irq;
     I2CBus *bus;
+
+    /* Optional board codec attached at a single address (SGTL5000). */
+    char *codec_type;
+    uint8_t codec_addr;
+    char *codec_audiodev;
+    I2CSlave *codec;
 } MXSI2CState;
 
 #define TYPE_MXS_I2C_REAL "mxs-i2c-real"
@@ -328,7 +334,26 @@ static void mxs_i2c_realize(DeviceState *dev, Error **errp)
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
     s->bus = i2c_init_bus(dev, "i2c-bus");
+    /*
+     * A real board codec (SGTL5000 @ 0x0a) occupies its address: create
+     * it first so the ack-all sweep below does not shadow it.  The codec
+     * carries its own "audiodev" property (standard QEMU device audio);
+     * when the machine has one we pass it through.
+     */
+    if (s->codec_type && *s->codec_type && s->codec_addr < 0x80) {
+        I2CSlave *sl = I2C_SLAVE(qdev_new(s->codec_type));
+
+        qdev_prop_set_uint8(DEVICE(sl), "address", s->codec_addr);
+        if (s->codec_audiodev && *s->codec_audiodev) {
+            qdev_prop_set_string(DEVICE(sl), "audiodev", s->codec_audiodev);
+        }
+        i2c_slave_realize_and_unref(sl, s->bus, &error_fatal);
+        s->codec = sl;
+    }
     for (unsigned a = 0; a < 0x80; a++) {
+        if (s->codec && a == s->codec_addr) {
+            continue;   /* real slave owns this address */
+        }
         DeviceState *sl = qdev_new(TYPE_MXS_I2C_ACK);
         qdev_prop_set_uint8(sl, "address", a);
         qdev_realize_and_unref(sl, BUS(s->bus), &error_fatal);
@@ -336,10 +361,20 @@ static void mxs_i2c_realize(DeviceState *dev, Error **errp)
     s->trace = mxs_trace_enabled(s->name ? s->name : "i2c");
 }
 
+DeviceState *mxs_i2c_codec_device(DeviceState *dev)
+{
+    MXSI2CState *s = MXS_I2C_REAL(dev);
+
+    return DEVICE(s->codec);
+}
+
 static const Property mxs_i2c_props[] = {
     DEFINE_PROP_STRING("name", MXSI2CState, name),
     DEFINE_PROP_UINT64("size", MXSI2CState, size, 0x2000),
     DEFINE_PROP_UINT32("ctrl-idx", MXSI2CState, ctrl_idx, 0),
+    DEFINE_PROP_STRING("codec-type", MXSI2CState, codec_type),
+    DEFINE_PROP_UINT8("codec-addr", MXSI2CState, codec_addr, 0),
+    DEFINE_PROP_STRING("codec-audiodev", MXSI2CState, codec_audiodev),
 };
 
 static const VMStateDescription vmstate_mxs_i2c = {

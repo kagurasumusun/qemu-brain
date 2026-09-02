@@ -297,6 +297,43 @@ ERST
     
 
     {
+        .name       = "brain_i2c",
+        .args_type  = "reg:i,val:i?",
+        .params     = "reg [val]",
+        .help       = "write/read a register of the board SGTL5000 codec over"
+                      " its I2C bus (reg = 16-bit address; without 'val' the"
+                      " register is read back)",
+        .cmd        = hmp_brain_i2c,
+    },
+
+SRST
+``brain_i2c`` *reg* [*val*]
+  Perform a real I2C transaction against the SGTL5000 codec at address
+  0x0a.  With *val* the 16-bit value is written to the 16-bit register
+  *reg*; without it the register is read back.  This is a test aid that
+  exercises exactly the same emulated codec path the WinCE audio driver
+  uses, so audio plumbing can be verified before the guest reaches the
+  pronunciation UI.
+ERST
+
+    {
+        .name       = "brain_sgtl",
+        .args_type  = "",
+        .params     = "",
+        .help       = "dump SGTL5000 codec state: DAC/ADC frame counters and"
+                      " key power/mute/volume registers",
+        .cmd        = hmp_brain_sgtl,
+    },
+
+SRST
+``brain_sgtl``
+  Dump the SGTL5000 codec model state: frames fed by the SAIF engine,
+  frames delivered to / dropped from the audio backend (playback), frames
+  consumed by the capture SAIF, bytes taken from the host audio input,
+  and the power/mute/volume registers that gate the paths.
+ERST
+
+    {
         .name       = "brain_stats",
         .args_type  = "",
         .params     = "",

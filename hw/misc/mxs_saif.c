@@ -44,6 +44,8 @@
 #include "qemu/module.h"
 #include "qemu/timer.h"
 #include "hw/arm/mxs.h"
+#include "hw/arm/mxs_saif.h"
+#include "hw/audio/sgtl5000.h"
 #include "hw/misc/mxs_bank.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/irq.h"
@@ -105,6 +107,14 @@ typedef struct MXSSAIFState {
     uint32_t fifo[SAIF_FIFO_LEN];
     unsigned fifo_len;
     bool engine_on;
+
+    /*
+     * Board-level codec links (see mxs_saif_set_codec).  Playback SAIF
+     * (saif0) drains its TX FIFO into the codec DAC; capture SAIF (saif1)
+     * fills its RX FIFO from the codec ADC.
+     */
+    DeviceState *dac_codec;
+    DeviceState *adc_codec;
 } MXSSAIFState;
 
 #define TYPE_MXS_SAIF "mxs-saif"
@@ -188,19 +198,36 @@ static void saif_timer(void *opaque)
 
     st = s->regs[SAIF_STAT >> 4];
     if (saif_ctrl(s) & CTRL_READ_MODE) {
-        /* record: engine produces silence samples */
+        /*
+         * Record: the serial engine clocks one frame in from the codec
+         * ADC (real host capture when a codec is linked; silence when
+         * the board has no capture link or no audio backend).
+         */
         if (s->fifo_len < SAIF_FIFO_LEN) {
-            s->fifo[(0 + s->fifo_len) % SAIF_FIFO_LEN] = 0;
+            uint32_t frame = 0;
+
+            if (s->adc_codec) {
+                frame = sgtl5000_adc_output(SGTL5000(s->adc_codec));
+            }
+            s->fifo[(0 + s->fifo_len) % SAIF_FIFO_LEN] = frame;
             s->fifo_len++;
         } else {
             st |= STAT_FIFO_OVERFLOW_IRQ;
         }
     } else {
-        /* playback: engine consumes one frame */
+        /* Playback: the engine consumes one frame from the TX FIFO. */
+        uint32_t frame = 0;
+
         if (s->fifo_len > 0) {
+            frame = s->fifo[0];
+            memmove(&s->fifo[0], &s->fifo[1],
+                    (s->fifo_len - 1) * sizeof(uint32_t));
             s->fifo_len--;
         } else {
             st |= STAT_FIFO_UNDERFLOW_IRQ;
+        }
+        if (s->dac_codec) {
+            sgtl5000_dac_input(SGTL5000(s->dac_codec), frame);
         }
     }
     s->regs[SAIF_STAT >> 4] = st;
@@ -379,6 +406,17 @@ static const MXSDmaOps mxs_saif_dma_ops = {
 const MXSDmaOps *mxs_saif_get_dma_ops(void)
 {
     return &mxs_saif_dma_ops;
+}
+
+void mxs_saif_set_codec(DeviceState *saif, DeviceState *codec, bool playback)
+{
+    MXSSAIFState *s = MXS_SAIF(saif);
+
+    if (playback) {
+        s->dac_codec = codec;
+    } else {
+        s->adc_codec = codec;
+    }
 }
 
 MXS_TRACE_WRAP(mxs_saif, "saif")
