@@ -185,6 +185,30 @@ static void saif_recompute_stat(MXSSAIFState *s)
     saif_update_irq(s);
 }
 
+static void saif_rx_frame(MXSSAIFState *s)
+{
+    /*
+     * Capture: the serial engine clocks one frame in from the codec ADC
+     * (real host capture when a codec is linked; silence when the board
+     * has no capture link or no audio backend).  Overflow sets the IRQ
+     * bit and drops the frame.
+     */
+    uint32_t st = s->regs[SAIF_STAT >> 4];
+
+    if (s->fifo_len < SAIF_FIFO_LEN) {
+        uint32_t frame = 0;
+
+        if (s->adc_codec) {
+            frame = sgtl5000_adc_output(SGTL5000(s->adc_codec));
+        }
+        s->fifo[(0 + s->fifo_len) % SAIF_FIFO_LEN] = frame;
+        s->fifo_len++;
+    } else {
+        st |= STAT_FIFO_OVERFLOW_IRQ;
+    }
+    s->regs[SAIF_STAT >> 4] = st;
+}
+
 static void saif_timer(void *opaque)
 {
     MXSSAIFState *s = opaque;
@@ -198,22 +222,7 @@ static void saif_timer(void *opaque)
 
     st = s->regs[SAIF_STAT >> 4];
     if (saif_ctrl(s) & CTRL_READ_MODE) {
-        /*
-         * Record: the serial engine clocks one frame in from the codec
-         * ADC (real host capture when a codec is linked; silence when
-         * the board has no capture link or no audio backend).
-         */
-        if (s->fifo_len < SAIF_FIFO_LEN) {
-            uint32_t frame = 0;
-
-            if (s->adc_codec) {
-                frame = sgtl5000_adc_output(SGTL5000(s->adc_codec));
-            }
-            s->fifo[(0 + s->fifo_len) % SAIF_FIFO_LEN] = frame;
-            s->fifo_len++;
-        } else {
-            st |= STAT_FIFO_OVERFLOW_IRQ;
-        }
+        saif_rx_frame(s);
     } else {
         /* Playback: the engine consumes one frame from the TX FIFO. */
         uint32_t frame = 0;
@@ -268,14 +277,15 @@ static uint64_t mxs_saif_read(void *opaque, hwaddr off, unsigned size)
         break;
     case SAIF_DATA >> 4:
         if (s->fifo_len > 0) {
-            /* pop from the head */
+            /* pop from the head and return the frame actually consumed */
+            v = s->fifo[0];
             memmove(&s->fifo[0], &s->fifo[1],
                     (s->fifo_len - 1) * sizeof(uint32_t));
             s->fifo_len--;
         } else {
             s->regs[SAIF_STAT >> 4] |= STAT_FIFO_UNDERFLOW_IRQ;
+            v = 0;
         }
-        v = s->fifo[0];
         saif_recompute_stat(s);
         saif_engine_sync(s);
         break;
@@ -417,6 +427,25 @@ void mxs_saif_set_codec(DeviceState *saif, DeviceState *codec, bool playback)
     } else {
         s->adc_codec = codec;
     }
+}
+
+unsigned mxs_saif_pump_capture(DeviceState *saif, unsigned nframes)
+{
+    MXSSAIFState *s = MXS_SAIF(saif);
+    unsigned n;
+
+    if (!(saif_ctrl(s) & CTRL_READ_MODE)) {
+        return 0;   /* not in capture mode */
+    }
+    for (n = 0; n < nframes; n++) {
+        if (s->fifo_len >= SAIF_FIFO_LEN) {
+            saif_rx_frame(s);   /* records overflow, pushes nothing */
+            break;
+        }
+        saif_rx_frame(s);
+        saif_recompute_stat(s);
+    }
+    return n;
 }
 
 MXS_TRACE_WRAP(mxs_saif, "saif")

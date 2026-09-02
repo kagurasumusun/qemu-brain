@@ -39,6 +39,10 @@ typedef struct SGTL5000Stats {
     uint64_t adc_in_bytes;
     /* capture: frames produced while the host provided no samples */
     uint64_t adc_underrun;
+    /* capture: frames returned as silence while the ADC is powered down */
+    uint64_t adc_gated;
+    /* capture: bytes currently buffered in the ADC ring (snapshot) */
+    unsigned adc_pending;
 } SGTL5000Stats;
 
 /* Playback: hand one 32-bit stereo frame (L << 16 | R) to the codec DAC. */
@@ -46,6 +50,12 @@ void sgtl5000_dac_input(SGTL5000State *s, uint32_t frame);
 
 /* Capture: pull one 32-bit stereo frame (L << 16 | R) from the codec ADC. */
 uint32_t sgtl5000_adc_output(SGTL5000State *s);
+
+/* Analysis aid: fill the ADC capture ring with a deterministic PCM pattern
+ * as if the host microphone had delivered it (seed modulates the samples).
+ * Returns the number of frames actually stored (ring capacity bound). */
+unsigned sgtl5000_debug_fill(SGTL5000State *s, uint32_t seed,
+                             uint32_t nframes);
 
 void sgtl5000_get_stats(SGTL5000State *s, SGTL5000Stats *st);
 

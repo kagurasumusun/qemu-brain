@@ -192,6 +192,8 @@ typedef struct BrainMachineState {
     /* Board codec: SGTL5000 created on I2C0 (address 0x0a), wired to
      * SAIF0 (playback DAC) and SAIF1 (capture ADC). */
     DeviceState *sgtl5000;
+    DeviceState *saif0_dev;
+    DeviceState *saif1_dev;
     struct arm_boot_info boot_info;
 } BrainMachineState;
 
@@ -720,6 +722,63 @@ void hmp_brain_i2c(Monitor *mon, const QDict *qdict)
     }
 }
 
+void hmp_brain_micfill(Monitor *mon, const QDict *qdict)
+{
+    BrainMachineState *bms;
+    uint32_t seed, n;
+    unsigned done;
+
+    if (!mon || !current_machine) {
+        return;
+    }
+    bms = BRAIN_MACHINE(current_machine);
+    if (!bms->sgtl5000) {
+        monitor_printf(mon, "brain_micfill: no SGTL5000 codec attached\n");
+        return;
+    }
+    seed = (uint32_t)qdict_get_int(qdict, "seed") & 0xffff;
+    n = qdict_haskey(qdict, "nframes") ?
+        (uint32_t)qdict_get_int(qdict, "nframes") : 0x4000;
+    done = sgtl5000_debug_fill(SGTL5000(bms->sgtl5000), seed, n);
+    monitor_printf(mon,
+                   "brain_micfill: injected %u frames (seed 0x%04x) into the "
+                   "ADC capture ring\n", done, seed);
+}
+
+void hmp_brain_saifpump(Monitor *mon, const QDict *qdict)
+{
+    BrainMachineState *bms;
+    DeviceState *saif;
+    unsigned n, done;
+
+    if (!mon || !current_machine) {
+        return;
+    }
+    bms = BRAIN_MACHINE(current_machine);
+    /* default: one full RX FIFO (8 stereo frames) */
+    n = qdict_haskey(qdict, "nframes") ?
+        (unsigned)qdict_get_int(qdict, "nframes") : 8;
+    switch (qdict_get_int(qdict, "idx")) {
+    case 0:
+        saif = bms->saif0_dev;
+        break;
+    case 1:
+        saif = bms->saif1_dev;
+        break;
+    default:
+        monitor_printf(mon, "brain_saifpump: idx must be 0 (saif0) or 1 "
+                       "(saif1)\n");
+        return;
+    }
+    if (!saif) {
+        monitor_printf(mon, "brain_saifpump: SAIF not attached\n");
+        return;
+    }
+    done = mxs_saif_pump_capture(saif, n);
+    monitor_printf(mon, "brain_saifpump: saif%ld pumped %u frame(s) into the "
+                   "RX FIFO\n", qdict_get_int(qdict, "idx"), done);
+}
+
 void hmp_brain_sgtl(Monitor *mon, const QDict *qdict)
 {
     BrainMachineState *bms;
@@ -738,11 +797,13 @@ void hmp_brain_sgtl(Monitor *mon, const QDict *qdict)
                    "SGTL5000: dac_in=%" PRIu64 " dac_out=%" PRIu64
                    " dac_drop=%" PRIu64 "\n"
                    "          adc_out=%" PRIu64 " adc_inB=%" PRIu64
-                   " adc_underrun=%" PRIu64 "\n"
+                   " adc_undr=%" PRIu64 " adc_gated=%" PRIu64
+                   " adc_pend=%u\n"
                    "          DIG_POWER=0x%04x ANA_POWER=0x%04x "
                    "ADCDAC_CTRL=0x%04x DAC_VOL=0x%04x MIC_CTRL=0x%04x\n",
                    st.dac_in_frames, st.dac_out_frames, st.dac_dropped,
                    st.adc_out_frames, st.adc_in_bytes, st.adc_underrun,
+                   st.adc_gated, st.adc_pending,
                    sgtl5000_get_reg(SGTL5000(bms->sgtl5000), 0x0002),
                    sgtl5000_get_reg(SGTL5000(bms->sgtl5000), 0x0030),
                    sgtl5000_get_reg(SGTL5000(bms->sgtl5000), 0x000e),
@@ -1889,9 +1950,11 @@ static void brain_init(MachineState *machine)
     saif0 = mxs_create_named_irq(TYPE_MXS_SAIF, "saif0", MXS_SAIF0_BASE,
                                  0x2000, icoll, 59);
     mxs_apbx_attach(bms->apbx, 4, mxs_saif_get_dma_ops(), saif0);
+    bms->saif0_dev = saif0;
     saif1 = mxs_create_named_irq(TYPE_MXS_SAIF, "saif1", MXS_SAIF1_BASE,
                                  0x2000, icoll, 58);
     mxs_apbx_attach(bms->apbx, 5, mxs_saif_get_dma_ops(), saif1);
+    bms->saif1_dev = saif1;
     mxs_create_dummy("audioout", MXS_AUDIOOUT_BASE, 0x4000);
     mxs_create_dummy("audioin", MXS_AUDIOIN_BASE, 0x4000);
     mxs_create_dummy("spdif", MXS_SPDIF_BASE, 0x2000);

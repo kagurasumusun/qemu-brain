@@ -17,4 +17,13 @@
  */
 void mxs_saif_set_codec(DeviceState *saif, DeviceState *codec, bool playback);
 
+/*
+ * Analysis aid: synchronously pump up to nframes in from the linked
+ * capture codec into the RX FIFO, exactly as the serial engine timer
+ * would, but without depending on virtual time advancing (the guest may
+ * be idle).  Only meaningful when the SAIF is in READ_MODE (capture).
+ * Returns the number of frames actually pushed (FIFO bound).
+ */
+unsigned mxs_saif_pump_capture(DeviceState *saif, unsigned nframes);
+
 #endif /* HW_MXS_SAIF_H */

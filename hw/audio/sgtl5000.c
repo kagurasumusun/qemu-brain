@@ -286,6 +286,16 @@ uint32_t sgtl5000_adc_output(SGTL5000State *s)
     int16_t l = 0, r = 0;
 
     s->stats.adc_out_frames++;
+    if (!sgtl_adc_on(s)) {
+        /*
+         * The codec's ADC/I2S-out section is powered down: in real
+         * hardware its I2S output is inactive, so the capture SAIF
+         * clocks in silence.  The ring may hold host samples, but they
+         * must not leak out while the ADC is off.
+         */
+        s->stats.adc_gated++;
+        return 0;
+    }
     if (s->in_len >= 4) {
         uint8_t b0 = s->inbuf[s->in_start];
         uint8_t b1 = s->inbuf[(s->in_start + 1) % SGTL_RING];
@@ -312,6 +322,34 @@ uint32_t sgtl5000_adc_output(SGTL5000State *s)
 void sgtl5000_get_stats(SGTL5000State *s, SGTL5000Stats *st)
 {
     *st = s->stats;
+    st->adc_pending = s->in_len;
+}
+
+unsigned sgtl5000_debug_fill(SGTL5000State *s, uint32_t seed,
+                             uint32_t nframes)
+{
+    /*
+     * Stand in for the host microphone: write a deterministic stereo
+     * S16LE pattern (left ramps by seed, right by seed + 3 * i) over
+     * the whole ADC capture ring so the codec -> SAIF capture path can
+     * be verified sample-by-sample without host audio hardware.
+     */
+    unsigned cap = SGTL_RING / 4;
+    unsigned n = MIN(nframes, cap);
+
+    for (unsigned i = 0; i < n; i++) {
+        uint32_t l = 0x2000 + ((seed + i) & 0x1fff);
+        uint32_t r = 0x2000 + ((seed + (i * 3u)) & 0x1fff);
+        unsigned wp = (i * 4) % SGTL_RING;
+
+        s->inbuf[wp] = l & 0xff;
+        s->inbuf[(wp + 1) % SGTL_RING] = (l >> 8) & 0xff;
+        s->inbuf[(wp + 2) % SGTL_RING] = r & 0xff;
+        s->inbuf[(wp + 3) % SGTL_RING] = (r >> 8) & 0xff;
+    }
+    s->in_start = 0;
+    s->in_len = n * 4;
+    return n;
 }
 
 uint16_t sgtl5000_get_reg(SGTL5000State *s, uint16_t reg)

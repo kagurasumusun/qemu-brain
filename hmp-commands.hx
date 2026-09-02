@@ -317,6 +317,45 @@ SRST
 ERST
 
     {
+        .name       = "brain_micfill",
+        .args_type  = "seed:i,nframes:i?",
+        .params     = "seed [nframes]",
+        .help       = "fill the SGTL5000 ADC capture ring with a "
+                      "deterministic PCM pattern (analysis aid: stands in "
+                      "for the host microphone)",
+        .cmd        = hmp_brain_micfill,
+    },
+
+SRST
+``brain_micfill`` *seed* [*nframes*]
+  Fill the codec's ADC capture ring with a deterministic stereo pattern
+  as if the host microphone had delivered it.  With the ADC powered and
+  the capture SAIF running, the samples then travel codec ADC -> SAIF1
+  RX FIFO -> guest, exactly like a real recording.  This is a test aid
+  used to verify the capture path sample-by-sample without host audio
+  hardware.
+ERST
+
+    {
+        .name       = "brain_saifpump",
+        .args_type  = "idx:i,nframes:i?",
+        .params     = "idx [nframes]",
+        .help       = "pump nframes in from the linked capture codec into "
+                      "the SAIF RX FIFO (analysis aid; deterministic, "
+                      "independent of guest virtual time)",
+        .cmd        = hmp_brain_saifpump,
+    },
+
+SRST
+``brain_saifpump`` *idx* [*nframes*]
+  Synchronously pump frames from the SAIF's linked capture codec (ADC)
+  into its RX FIFO, as the serial engine timer would, without waiting on
+  guest virtual time.  *idx* selects the SAIF (0 = saif0 playback link,
+  1 = saif1 capture link); the SAIF must be in READ_MODE.  Used with
+  ``brain_micfill`` to verify the mic capture path sample-by-sample.
+ERST
+
+    {
         .name       = "brain_sgtl",
         .args_type  = "",
         .params     = "",
