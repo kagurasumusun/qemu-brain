@@ -19,7 +19,7 @@
  *  - DAC/ADC data path with the same 48 kHz stereo frame plumbing as
  *    the SGTL5000 model so mxs_saif can drive either codec.  Power
  *    gating is derived from the BU26154 power-management registers
- *    (VMIDCON, DACREN/DACLEN, ADCREN/ADCEN, AVMUTE).  No QEMU host
+ *    (VMIDCON, DACREN/DACLEN, ADCEN, AVMUTE).  No QEMU host
  *    audiodev backend yet: with no backend the codec is the register
  *    model with a silent sink (same fallback as SGTL5000 without an
  *    audiodev); host audio plumbing is a P1 item.
@@ -28,6 +28,13 @@
  * Rev.002 datasheet tables (evidence_s97 text extraction).  Core audio
  * registers are precise; rarely-used fields (ALC/noise-gate, MAP1/MAP2
  * tails) are best-effort and each uncertain entry is marked "~".
+ *
+ * S101 audit: AREFPW (HPREN|HPLEN|HPVDDEN|MICBEN|VMIDCON), AINPW
+ * (PGAATT|PGAEN|ADCEN, no ADCREN bit), SPPW (SPMDSEL|AVREN|COEFSEL|SPEN|
+ * AVLEN with b02 hard-wired high) and AVOL[5:0] (0x10 = +9 dB) were
+ * re-verified against Rev.002 pp.46-55 and the wavedev2_BU26154.dll
+ * register trace; AINPW/SPPW masks, the SPPW reset value and the AVVOL
+ * width/gain law were corrected accordingly.
  */
 #include "qemu/osdep.h"
 #include <math.h>
@@ -70,7 +77,7 @@
 #define BU_BIT_DVMUTE    0x10    /* DVMUTE register b04                   */
 #define BU_BIT_PGAATT    0x20    /* AINPW b05: mic amp 0 dB / -9 dB       */
 #define BU_BIT_PGAEN     0x08    /* AINPW b03: microphone amplifier power */
-#define BU_BIT_ADCEN     0x06    /* AINPW b02|b01: ADCREN | ADCEN         */
+#define BU_BIT_ADCEN     0x02    /* AINPW b01: ADC power                  */
 #define BU_BIT_MICBEN    0x04    /* AREFPW b02: microphone bias circuit   */
 #define BU_BIT_DACEN     0x06    /* DACPW b02|b01: DACREN | DACLEN        */
 #define BU_BIT_AVMUTE    0x02    /* AVMUTE register b01                   */
@@ -98,13 +105,13 @@ static const BURegInit bu_map0_init[] = {
     { BU_REG_MCTIME,  0x00, 0x1f }, /* 0x14/0x15 MCTIME[4:0] */
     { BU_REG_MAPCON,  0x00, 0x03 }, /* 0x1c/0x1d MAPCON[1:0] (global) */
     { BU_REG_AREFPW,  0x00, 0xcf }, /* 0x20/0x21 HPREN|HPLEN|HPVDDEN|MICBEN|VMIDCON[1:0] */
-    { BU_REG_AINPW,   0x00, 0x2e }, /* 0x22/0x23 PGAATT|PGAEN|ADCREN|ADCEN */
+    { BU_REG_AINPW,   0x00, 0x2a }, /* 0x22/0x23 PGAATT|PGAEN|ADCEN */
     { BU_REG_DACPW,   0x00, 0x06 }, /* 0x24/0x25 DACREN|DACLEN */
-    { BU_REG_SPPW,    0x00, 0x9e }, /* 0x26/0x27 SPMDSEL|AVREN|COEFSEL|SPEN|AVLEN (rv ~) */
+    { BU_REG_SPPW,    0x04, 0x9b }, /* 0x26/0x27 SPMDSEL|AVREN|COEFSEL|SPEN|AVLEN; b02 H-fix=1 */
     { BU_REG_TSDEN,   0x01, 0x01 }, /* 0x2c/0x2d TSDEN=1 */
     { BU_REG_ZCEN,    0x00, 0x02 }, /* 0x2e/0x2f ZCEN */
     { BU_REG_MICB,    0x00, 0x03 }, /* 0x30/0x31 MICBCON[1:0] */
-    { BU_REG_AVVOL,   0x0a, 0x1f }, /* 0x3a/0x3b AVVOL[4:0] init 01010b */
+    { BU_REG_AVVOL,   0x0a, 0x3f }, /* 0x3a/0x3b AVOL[5:0] init 01010b */
     { BU_REG_PDATT,   0xff, 0xff }, /* 0x3e/0x3f PDATT (0 dB) */
     { 0x23,           0x00, 0x3e }, /* 0x46/0x47 Play HPF2 setting */
     { BU_REG_AVMUTE,  0x00, 0x03 }, /* 0x48/0x49 AVMUTE|AVFADE */
@@ -288,13 +295,13 @@ struct BU26154State {
      * (Q15 linear).  pdatt[]/rdvol[] index the 0.5 dB playback and
      * record digital attenuator law (0x70..0xFF = -71.5..0.0 dB,
      * 0x6F = mute, 0x00..0x6E = "prohibited from setting" and treated
-     * as mute); avvol[] indexes the analog volume law of AVVOL[4:0];
+     * as mute); avvol[] indexes the analog volume law of AVOL[5:0];
      * pga[2] is the microphone amplifier gain (0 dB / -9 dB).
      */
     uint32_t pdatt[256];
     uint32_t rdvol[256];
     uint32_t effect[256];
-    uint32_t avvol[0x20];
+    uint32_t avvol[0x40];
     uint32_t pga[2];
 
     BU26154Stats stats;
@@ -366,7 +373,7 @@ static void bu_build_atten_law(uint32_t *tab)
 }
 
 /*
- * Analog Volume (AVVOL[4:0], datasheet "Analog Volume Control
+ * Analog Volume (AVOL[5:0], datasheet "Analog Volume Control
  * Register").  0x00 = MUTE, 0x01..0x09 = -28..-2 dB, 0x0a = 0 dB,
  * 0x0b..0x19 = +2..+18 dB and 0x1a..0x3f are undefined ("-").
  * Undefined codes are clamped to the loudest defined step (+18 dB)
@@ -380,11 +387,11 @@ static void bu_build_avvol_law(uint32_t *tab)
         /* 0x01 */  -28.0, -24.0, -20.0, -16.0, -12.0,
         /* 0x06 */   -8.0,  -6.0,  -4.0,  -2.0,   0.0,
         /* 0x0b */    2.0,   4.0,   6.0,   7.0,   8.0,
-        /* 0x10 */   10.0,  11.0,  12.0,  13.0,  14.0,
-        /* 0x15 */   15.0,  16.0,  17.0,  18.0,
+        /* 0x10 */    9.0,  10.0,  11.0,  12.0,  13.0,
+        /* 0x15 */   14.0,  15.0,  16.0,  17.0,  18.0,
     };
 
-    for (unsigned v = 0; v < 0x20; v++) {
+    for (unsigned v = 0; v < 0x40; v++) {
         unsigned idx = MIN(v, 0x19u);
 
         tab[v] = db[idx] < -1e8 ? 0 : bu_db_to_q15(db[idx]);
@@ -556,6 +563,9 @@ static void bu26154_reg_write(BU26154State *s, uint8_t idx, uint8_t v)
     }
     if (w >= BU26154_WORDS) {
         return;
+    }
+    if (s->map == BU26154_MAP0 && w == BU_REG_SPPW) {
+        v |= 0x04;   /* SPPW b02 is hard-wired high ("H fix") on the part */
     }
     s->regs[BU_REG_IDX(s->map, w)] = v;  /* pre-masked by caller */
     if (s->map == BU26154_MAP0) {
@@ -743,7 +753,7 @@ void bu26154_dac_input(BU26154State *s, uint32_t frame)
     bool coefb = (sppw & 0x08) != 0;          /* COEFSEL b03 */
     uint8_t pd = bu_get(s, BU26154_MAP0, coefb ? 0x39 : BU_REG_PDATT);
     uint8_t ev = bu_get(s, BU26154_MAP0, 0x38);
-    uint8_t av = bu_get(s, BU26154_MAP0, BU_REG_AVVOL) & 0x1f;
+    uint8_t av = bu_get(s, BU26154_MAP0, BU_REG_AVVOL) & 0x3f;
     uint64_t gp = ((uint64_t)s->pdatt[pd] * s->effect[ev]) >> 15;
     uint64_t ga = s->avvol[av];
     uint64_t g = (gp * ga) >> 15;
@@ -855,7 +865,7 @@ void bu26154_get_stats(BU26154State *s, BU26154Stats *st)
     st->dac_pwr = bu_get(s, BU26154_MAP0, BU_REG_DACPW);
     st->sp_pwr = bu_get(s, BU26154_MAP0, BU_REG_SPPW);
     st->pdatt = bu_get(s, BU26154_MAP0, BU_REG_PDATT);
-    st->avvol = bu_get(s, BU26154_MAP0, BU_REG_AVVOL) & 0x1f;
+    st->avvol = bu_get(s, BU26154_MAP0, BU_REG_AVVOL) & 0x3f;
     st->rdvol = bu_get(s, BU26154_MAP0, BU_REG_RDVOL);
     st->avmute = bu_get(s, BU26154_MAP0, BU_REG_AVMUTE);
     st->dvmute = bu_get(s, BU26154_MAP0, BU_REG_DVMUTE);
