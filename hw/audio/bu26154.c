@@ -30,12 +30,15 @@
  * tails) are best-effort and each uncertain entry is marked "~".
  */
 #include "qemu/osdep.h"
+#include <math.h>
 #include "qemu/module.h"
 #include "qemu/timer.h"
 #include "hw/i2c/i2c.h"
 #include "hw/audio/bu26154.h"
+#include "qemu/audio.h"
 #include "qapi/error.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-properties-system.h"
 #include "migration/vmstate.h"
 #include "qom/object.h"
 
@@ -57,6 +60,20 @@
 #define BU_REG_AVVOL     0x1d    /* Analog Volume Control             */
 #define BU_REG_PDATT     0x1f    /* Playback Digital Attenuator       */
 #define BU_REG_AVMUTE    0x24    /* Amplifier Volume Ctrl Fn Enable   */
+#define BU_REG_EFFECT    0x38    /* Playback Effect Volume (0x70/71)  */
+#define BU_REG_PDATTB    0x39    /* Playback Digital Attenuator B     */
+#define BU_REG_DVMUTE    0x34    /* Digital Volume Control (0x68/69)  */
+#define BU_REG_RDVOL     0x36    /* Record Digital Attenuator         */
+
+/* bit positions within the registers above (datasheet bit maps) */
+#define BU_BIT_COEFSEL   0x08    /* SPPW b03: select the "B" coefficients */
+#define BU_BIT_DVMUTE    0x10    /* DVMUTE register b04                   */
+#define BU_BIT_PGAATT    0x20    /* AINPW b05: mic amp 0 dB / -9 dB       */
+#define BU_BIT_PGAEN     0x08    /* AINPW b03: microphone amplifier power */
+#define BU_BIT_ADCEN     0x06    /* AINPW b02|b01: ADCREN | ADCEN         */
+#define BU_BIT_MICBEN    0x04    /* AREFPW b02: microphone bias circuit   */
+#define BU_BIT_DACEN     0x06    /* DACPW b02|b01: DACREN | DACLEN        */
+#define BU_BIT_AVMUTE    0x02    /* AVMUTE register b01                   */
 
 /* bit helpers */
 #define BU_BIT(n) (1u << (n))
@@ -237,13 +254,16 @@ struct BU26154State {
     I2CSlave parent_obj;
 
     /*
-     * Accepted for machine wiring compatibility with the I2C container
-     * (mxs_i2c forwards machine->audiodev as the codec "audiodev"
-     * property).  The register-level model does not open a host audio
-     * backend yet (P1); the string is stored so a future audiodev
-     * round can use it.
+     * Host audio endpoint.  The machine forwards -audiodev as the codec
+     * "audiodev" property (hw/arm/mxs.c -> mxs_i2c "codec-audiodev").
+     * When a backend is present the DAC path really renders to the host
+     * output and the ADC path really captures from the host input; with
+     * no -audiodev the register model stays alive and the paths are a
+     * silent sink (same fallback as the SGTL5000 model).
      */
-    char *audiodev;
+    AudioBackend *audio_be;
+    SWVoiceOut *dac_voice;
+    SWVoiceIn  *adc_voice;
 
     /* register files: regs[map][word] (masked values only) */
     uint8_t regs[3 * BU26154_WORDS];
@@ -253,15 +273,29 @@ struct BU26154State {
     uint8_t cur_idx;             /* register index byte of this txn */
     bool    want_idx;            /* next send byte is an index byte */
 
-    /* playback staging (silent sink when no backend) */
+    /* playback staging -> host output */
     uint8_t outbuf[BU_RING];
     unsigned out_start, out_len;
     bool    dac_on;
 
-    /* capture staging <- injected ring */
+    /* capture staging <- host input */
     uint8_t inbuf[BU_RING];
     unsigned in_start, in_len;
     bool    adc_on;
+
+    /*
+     * Gain tables built once from the datasheet transfer tables
+     * (Q15 linear).  pdatt[]/rdvol[] index the 0.5 dB playback and
+     * record digital attenuator law (0x70..0xFF = -71.5..0.0 dB,
+     * 0x6F = mute, 0x00..0x6E = "prohibited from setting" and treated
+     * as mute); avvol[] indexes the analog volume law of AVVOL[4:0];
+     * pga[2] is the microphone amplifier gain (0 dB / -9 dB).
+     */
+    uint32_t pdatt[256];
+    uint32_t rdvol[256];
+    uint32_t effect[256];
+    uint32_t avvol[0x20];
+    uint32_t pga[2];
 
     BU26154Stats stats;
 
@@ -296,6 +330,77 @@ static uint8_t bu_get(BU26154State *s, unsigned map, unsigned w)
  * values and clear the map select. */
 static void bu26154_reset_file(BU26154State *s);
 
+/* ---- gain laws transcribed from the datasheet transfer tables ---- */
+
+/* Q15 linear gain for a dB value. */
+static uint32_t bu_db_to_q15(double db)
+{
+    double lin = pow(10.0, db / 20.0);
+    double q15 = lin * 32768.0;
+
+    if (q15 > (double)0x7fffffffu) {
+        q15 = (double)0x7fffffffu;
+    }
+    return (uint32_t)(q15 + 0.5);
+}
+
+/*
+ * The playback digital attenuator (PDATT / PDATTB), the record digital
+ * attenuator (RDVOL) and the playback Effect Volume all share the same
+ * law: 0x00..0x6E are "prohibited from setting", 0x6F is MUTE and
+ * 0x70..0xFF run -71.5 dB .. 0.0 dB in 0.5 dB steps.  Prohibited codes
+ * are modelled as mute: they are out of spec and must not produce a
+ * louder-than-0 dB path.
+ */
+static void bu_build_atten_law(uint32_t *tab)
+{
+    for (unsigned v = 0; v < 256; v++) {
+        if (v < 0x6f) {
+            tab[v] = 0;                      /* prohibited -> mute */
+        } else if (v == 0x6f) {
+            tab[v] = 0;                      /* MUTE */
+        } else {
+            tab[v] = bu_db_to_q15(-71.5 + 0.5 * (double)(v - 0x70));
+        }
+    }
+}
+
+/*
+ * Analog Volume (AVVOL[4:0], datasheet "Analog Volume Control
+ * Register").  0x00 = MUTE, 0x01..0x09 = -28..-2 dB, 0x0a = 0 dB,
+ * 0x0b..0x19 = +2..+18 dB and 0x1a..0x3f are undefined ("-").
+ * Undefined codes are clamped to the loudest defined step (+18 dB)
+ * rather than muted: the datasheet marks them unsettable, so any value
+ * there is a programming error and must not silence a working path.
+ */
+static void bu_build_avvol_law(uint32_t *tab)
+{
+    static const double db[0x1a] = {
+        /* 0x00 */  -1e9,
+        /* 0x01 */  -28.0, -24.0, -20.0, -16.0, -12.0,
+        /* 0x06 */   -8.0,  -6.0,  -4.0,  -2.0,   0.0,
+        /* 0x0b */    2.0,   4.0,   6.0,   7.0,   8.0,
+        /* 0x10 */   10.0,  11.0,  12.0,  13.0,  14.0,
+        /* 0x15 */   15.0,  16.0,  17.0,  18.0,
+    };
+
+    for (unsigned v = 0; v < 0x20; v++) {
+        unsigned idx = MIN(v, 0x19u);
+
+        tab[v] = db[idx] < -1e8 ? 0 : bu_db_to_q15(db[idx]);
+    }
+}
+
+static void bu26154_build_gains(BU26154State *s)
+{
+    bu_build_atten_law(s->pdatt);
+    bu_build_atten_law(s->rdvol);
+    bu_build_atten_law(s->effect);
+    bu_build_avvol_law(s->avvol);
+    s->pga[0] = bu_db_to_q15(0.0);      /* PGAATT=0: normal mode  */
+    s->pga[1] = bu_db_to_q15(-9.0);     /* PGAATT=1: attenuation  */
+}
+
 /* ---- register effects / power gating (datasheet-derived) ---- */
 
 static bool bu_vmid_on(BU26154State *s)
@@ -306,29 +411,124 @@ static bool bu_vmid_on(BU26154State *s)
 
 static bool bu_dac_on(BU26154State *s)
 {
-    uint8_t pwr = bu_get(s, BU26154_MAP0, BU_REG_DACPW);   /* DACREN|DACLEN */
-    uint8_t mute = bu_get(s, BU26154_MAP0, BU_REG_AVMUTE); /* AVMUTE b01 */
+    uint8_t pwr = bu_get(s, BU26154_MAP0, BU_REG_DACPW);
+    uint8_t mute = bu_get(s, BU26154_MAP0, BU_REG_AVMUTE);
 
-    return bu_vmid_on(s) && (pwr & 0x06) && !(mute & 0x02);
+    return bu_vmid_on(s) && (pwr & BU_BIT_DACEN) && !(mute & BU_BIT_AVMUTE);
 }
 
 static bool bu_adc_on(BU26154State *s)
 {
-    uint8_t pw = bu_get(s, BU26154_MAP0, BU_REG_AINPW);    /* ADCREN|ADCEN */
+    uint8_t pw = bu_get(s, BU26154_MAP0, BU_REG_AINPW);
 
-    return bu_vmid_on(s) && (pw & 0x06);
+    return bu_vmid_on(s) && (pw & BU_BIT_ADCEN);
+}
+
+/*
+ * The microphone path additionally needs the mic bias circuit (MICBEN)
+ * and the microphone amplifier (PGAEN) powered up.  With either down the
+ * PGA drives nothing into the ADC, so a real chip clocks out silence.
+ */
+static bool bu_mic_on(BU26154State *s)
+{
+    uint8_t ref = bu_get(s, BU26154_MAP0, BU_REG_AREFPW);
+    uint8_t in = bu_get(s, BU26154_MAP0, BU_REG_AINPW);
+
+    return (ref & BU_BIT_MICBEN) && (in & BU_BIT_PGAEN);
+}
+
+/* PGAATT (AINPW b05): 0 = normal mode 0 dB, 1 = attenuation mode -9 dB */
+static unsigned bu_adc_pgaatt(BU26154State *s)
+{
+    return (bu_get(s, BU26154_MAP0, BU_REG_AINPW) & BU_BIT_PGAATT) ? 1 : 0;
 }
 
 static void bu26154_update_paths(BU26154State *s)
 {
-    s->dac_on = bu_dac_on(s);
-    s->adc_on = bu_adc_on(s);
-    if (!s->dac_on) {
-        /* DAC powered down / muted: drain nothing, discard staging */
-        s->out_start = s->out_len = 0;
+    bool dac = bu_dac_on(s);
+    bool adc = bu_adc_on(s);
+
+    if (dac != s->dac_on) {
+        s->dac_on = dac;
+        if (!dac) {
+            /* DAC powered down / muted: discard staged playback data */
+            s->out_start = s->out_len = 0;
+        }
+        if (s->audio_be && s->dac_voice) {
+            audio_be_set_active_out(s->audio_be, s->dac_voice, dac);
+        }
+        BU26154_DBG(s, "DAC path %s\n", dac ? "on" : "off");
     }
-    if (!s->adc_on) {
-        s->in_start = s->in_len = 0;
+    if (adc != s->adc_on) {
+        s->adc_on = adc;
+        if (!adc) {
+            s->in_start = s->in_len = 0;
+        }
+        if (s->audio_be && s->adc_voice) {
+            audio_be_set_active_in(s->audio_be, s->adc_voice, adc);
+        }
+        BU26154_DBG(s, "ADC path %s\n", adc ? "on" : "off");
+    }
+}
+
+/* ---- host audio backend ---- */
+
+static void bu26154_out_cb(void *opaque, int free_b)
+{
+    BU26154State *s = opaque;
+
+    if (!s->audio_be || !s->dac_voice) {
+        return;   /* no backend: register-only model, silent sink */
+    }
+    if (!s->dac_on || !s->out_len) {
+        return;
+    }
+    size_t done = 0;
+
+    while (done < s->out_len) {
+        size_t chunk = MIN(s->out_len - done, BU_RING - s->out_start);
+        size_t n = audio_be_write(s->audio_be, s->dac_voice,
+                                  s->outbuf + s->out_start, chunk);
+
+        if (!n) {
+            break;   /* backend busy; the callback will come again */
+        }
+        s->out_start = (s->out_start + n) % BU_RING;
+        s->out_len -= n;
+        done += n;
+        s->stats.dac_out_frames += n / 4;
+        s->stats.dac_out_bytes += n;
+    }
+}
+
+static void bu26154_in_cb(void *opaque, int avail_b)
+{
+    BU26154State *s = opaque;
+    uint8_t tmp[4096];
+
+    if (!s->audio_be || !s->adc_voice) {
+        return;   /* no backend: register-only model */
+    }
+    if (!s->adc_on || avail_b <= 0) {
+        return;
+    }
+    while (avail_b > 0 && s->in_len < BU_RING) {
+        size_t want = MIN((size_t)avail_b, sizeof(tmp));
+        size_t got;
+
+        want = MIN(want, BU_RING - s->in_len);
+        got = audio_be_read(s->audio_be, s->adc_voice, tmp, want);
+        if (!got) {
+            break;
+        }
+        for (size_t i = 0; i < got; i++) {
+            unsigned wp = (s->in_start + s->in_len) % BU_RING;
+
+            s->inbuf[wp] = tmp[i];
+        }
+        s->in_len += got;
+        s->stats.adc_in_bytes += got;
+        avail_b -= got;
     }
 }
 
@@ -530,20 +730,51 @@ void bu26154_dac_input(BU26154State *s, uint32_t frame)
         s->stats.dac_dropped++;   /* staging overrun: drop frame */
         return;
     }
-    /* Mono codec; keep the stereo container the SAIF engine uses
-     * (L << 16 | R, stored S16LE like sgtl5000). */
-    int16_t l = (int16_t)(frame >> 16);
-    int16_t r = (int16_t)(frame & 0xffff);
+
+    /*
+     * Playback gain chain of the real part (datasheet block diagram:
+     * SAI_SDIN -> DAC -> digital attenuator -> Effect Volume -> Sound
+     * Effect -> analog volume -> SP/HP amplifier).  PDATT and Effect
+     * VOL share the 0.5 dB attenuator law; AVVOL is the analog stage.
+     * COEFSEL (Speaker Amplifier Power Management register) selects the
+     * "B" coefficient set, so PDATTB/Effect VOLB apply instead.
+     */
+    uint8_t sppw = bu_get(s, BU26154_MAP0, BU_REG_SPPW);
+    bool coefb = (sppw & 0x08) != 0;          /* COEFSEL b03 */
+    uint8_t pd = bu_get(s, BU26154_MAP0, coefb ? 0x39 : BU_REG_PDATT);
+    uint8_t ev = bu_get(s, BU26154_MAP0, 0x38);
+    uint8_t av = bu_get(s, BU26154_MAP0, BU_REG_AVVOL) & 0x1f;
+    uint64_t gp = ((uint64_t)s->pdatt[pd] * s->effect[ev]) >> 15;
+    uint64_t ga = s->avvol[av];
+    uint64_t g = (gp * ga) >> 15;
+
+    if (g > 0x7fffffffu) {
+        g = 0x7fffffffu;
+    }
+
+    /*
+     * Mono codec: the datasheet has a single DAC/ADC pair, so both
+     * halves of the stereo container the SAIF engine carries get the
+     * same mono result.  Keep the stereo S16LE framing so the SAIF and
+     * the host backend need no special case.
+     */
+    int32_t l = (int16_t)(frame >> 16);
+    int32_t r = (int16_t)(frame & 0xffff);
+    int32_t mono = (l + r) / 2;
+    int32_t o = (int32_t)(((int64_t)mono * (int64_t)g) >> 15);
+
+    o = MAX(-32768, MIN(32767, o));
+
     unsigned wp = (s->out_start + s->out_len) % BU_RING;
-    s->outbuf[wp] = l & 0xff;
-    s->outbuf[(wp + 1) % BU_RING] = (l >> 8) & 0xff;
-    s->outbuf[(wp + 2) % BU_RING] = r & 0xff;
-    s->outbuf[(wp + 3) % BU_RING] = (r >> 8) & 0xff;
+    s->outbuf[wp] = o & 0xff;
+    s->outbuf[(wp + 1) % BU_RING] = (o >> 8) & 0xff;
+    s->outbuf[(wp + 2) % BU_RING] = o & 0xff;
+    s->outbuf[(wp + 3) % BU_RING] = (o >> 8) & 0xff;
     s->out_len += 4;
 
-    /* No QEMU audio backend in this model yet: the staging ring is a
-     * silent sink (dac_out_frames stays 0), mirroring SGTL5000's
-     * no-audiodev fallback.  Host audio is a P1 item. */
+    /* Push to the host backend now; without one this is a silent sink. */
+    bu26154_out_cb(s, 0);
+
     if (s->dbg) {
         int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         if (now - s->last_dbg_ns > 1000000000ll) {
@@ -551,21 +782,22 @@ void bu26154_dac_input(BU26154State *s, uint32_t frame)
             BU26154_DBG(s,
                 "dac_in=%" PRIu64 " dac_out=%" PRIu64 " drop=%" PRIu64
                 " adc_out=%" PRIu64 " inB=%" PRIu64 " und=%" PRIu64
-                " map=%u vmid=0x%02x dacpwr=0x%02x pdatt=0x%02x\n",
+                " map=%u vmid=0x%02x dacpwr=0x%02x pdatt=0x%02x"
+                " avvol=0x%02x be=%d\n",
                 s->stats.dac_in_frames, s->stats.dac_out_frames,
                 s->stats.dac_dropped, s->stats.adc_out_frames,
                 s->stats.adc_in_bytes, s->stats.adc_underrun,
                 s->map,
                 bu_get(s, BU26154_MAP0, BU_REG_AREFPW),
                 bu_get(s, BU26154_MAP0, BU_REG_DACPW),
-                bu_get(s, BU26154_MAP0, BU_REG_PDATT));
+                pd, av, s->audio_be != NULL);
         }
     }
 }
 
 uint32_t bu26154_adc_output(BU26154State *s)
 {
-    int16_t l = 0, r = 0;
+    int32_t l = 0, r = 0;
 
     s->stats.adc_out_frames++;
     if (!s->adc_on) {
@@ -578,13 +810,33 @@ uint32_t bu26154_adc_output(BU26154State *s)
         uint8_t b1 = s->inbuf[(s->in_start + 1) % BU_RING];
         uint8_t b2 = s->inbuf[(s->in_start + 2) % BU_RING];
         uint8_t b3 = s->inbuf[(s->in_start + 3) % BU_RING];
+
         l = (int16_t)(b0 | (b1 << 8));
         r = (int16_t)(b2 | (b3 << 8));
         s->in_start = (s->in_start + 4) % BU_RING;
         s->in_len -= 4;
     } else {
-        s->stats.adc_underrun++;
+        s->stats.adc_underrun++;   /* no host samples yet: silence */
     }
+
+    /*
+     * Capture gain chain (datasheet block diagram: MIN -> PGA -> ADC ->
+     * ALC -> record digital attenuator -> SAI_SDOUT).  With the mic bias
+     * or the microphone amplifier powered down the PGA feeds nothing to
+     * the ADC, so a real part clocks out silence regardless of what the
+     * host input delivered.  DVMUTE silences the digital stage.
+     */
+    uint8_t dvm = bu_get(s, BU26154_MAP0, BU_REG_DVMUTE);
+    uint32_t g = s->rdvol[bu_get(s, BU26154_MAP0, BU_REG_RDVOL)];
+
+    g = (uint32_t)(((uint64_t)g * s->pga[bu_adc_pgaatt(s)]) >> 15);
+    if (!bu_mic_on(s) || (dvm & 0x10)) {
+        g = 0;
+    }
+
+    l = MAX(-32768, MIN(32767, (int32_t)(((int64_t)l * g) >> 15)));
+    r = MAX(-32768, MIN(32767, (int32_t)(((int64_t)r * g) >> 15)));
+
     return ((uint32_t)(uint16_t)l << 16) | (uint16_t)r;
 }
 
@@ -595,9 +847,20 @@ void bu26154_get_stats(BU26154State *s, BU26154Stats *st)
     st->mapcon = s->map;
     st->sr = bu_get(s, BU26154_MAP0, BU_REG_SR);
     st->vmicon = bu_get(s, BU26154_MAP0, BU_REG_AREFPW) & 0x03;
+    st->micben = (bu_get(s, BU26154_MAP0, BU_REG_AREFPW) >> 2) & 0x01;
+    st->micbcon = bu_get(s, BU26154_MAP0, BU_REG_MICB) & 0x03;
+    st->adc_pwr = bu_get(s, BU26154_MAP0, BU_REG_AINPW);
+    st->pgaen = (st->adc_pwr >> 3) & 0x01;
+    st->pgaatt = (st->adc_pwr >> 5) & 0x01;
     st->dac_pwr = bu_get(s, BU26154_MAP0, BU_REG_DACPW);
     st->sp_pwr = bu_get(s, BU26154_MAP0, BU_REG_SPPW);
     st->pdatt = bu_get(s, BU26154_MAP0, BU_REG_PDATT);
+    st->avvol = bu_get(s, BU26154_MAP0, BU_REG_AVVOL) & 0x1f;
+    st->rdvol = bu_get(s, BU26154_MAP0, BU_REG_RDVOL);
+    st->avmute = bu_get(s, BU26154_MAP0, BU_REG_AVMUTE);
+    st->dvmute = bu_get(s, BU26154_MAP0, BU_REG_DVMUTE);
+    st->backend_out = s->audio_be && s->dac_voice;
+    st->backend_in = s->audio_be && s->adc_voice;
 }
 
 unsigned bu26154_debug_fill(BU26154State *s, uint32_t seed,
@@ -618,7 +881,9 @@ unsigned bu26154_debug_fill(BU26154State *s, uint32_t seed,
     }
     s->in_start = 0;
     s->in_len = n * 4;
-    s->stats.adc_in_bytes += n * 4;
+    /* Accounted separately from adc_in_bytes: those count bytes really
+     * read from the host input, these are the analysis aid's stand-in. */
+    s->stats.adc_fill_bytes += n * 4;
     return n;
 }
 
@@ -641,20 +906,84 @@ uint8_t bu26154_get_reg(BU26154State *s, uint8_t idx)
 static void bu26154_realize(DeviceState *dev, Error **errp)
 {
     BU26154State *s = BU26154(dev);
+    struct audsettings as = {
+        .freq = BU26154_FREQ_HZ,
+        .nchannels = 2,
+        .fmt = AUDIO_FORMAT_S16,
+        .big_endian = false,
+    };
 
     s->dbg = bu26154_debug();
     s->last_dbg_ns = 0;
+    bu26154_build_gains(s);
+
+    /*
+     * The codec is always present on the board (I2C register model).
+     * With a host audio backend the DAC path really renders to the host
+     * output and the ADC path really captures from the host input.
+     * Without -audiodev the register model stays alive and both paths
+     * are a silent sink, which is the correct fallback for a machine
+     * booted headless.
+     *
+     * The stream rate follows the SAIF frame clock (BU26154_FREQ_HZ):
+     * on real hardware the SAIF supplies LRCLK/BCLK, so the codec's
+     * Sampling Rate register (SR[3:0]) is a programming contract the
+     * guest must match to that clock.  SR is reported in the stats so a
+     * mismatch is visible rather than silently resampled.
+     */
+    Error *local_err = NULL;
+
+    if (audio_be_check(&s->audio_be, &local_err)) {
+        s->dac_voice = audio_be_open_out(s->audio_be, NULL, "bu26154.dac",
+                                         s, bu26154_out_cb, &as);
+        s->adc_voice = audio_be_open_in(s->audio_be, NULL, "bu26154.adc",
+                                        s, bu26154_in_cb, &as);
+        audio_be_set_active_out(s->audio_be, s->dac_voice, false);
+        audio_be_set_active_in(s->audio_be, s->adc_voice, false);
+    } else {
+        error_free(local_err);
+        s->audio_be = NULL;
+        s->dac_voice = NULL;
+        s->adc_voice = NULL;
+    }
     bu26154_update_paths(s);
 }
 
+static void bu26154_exit(DeviceState *dev)
+{
+    BU26154State *s = BU26154(dev);
+
+    if (s->audio_be) {
+        if (s->dac_voice) {
+            audio_be_close_out(s->audio_be, s->dac_voice);
+        }
+        if (s->adc_voice) {
+            audio_be_close_in(s->audio_be, s->adc_voice);
+        }
+    }
+}
+
+static int bu26154_post_load(void *opaque, int version_id)
+{
+    BU26154State *s = opaque;
+
+    /* dac_on/adc_on are derived from the register file; recompute them so
+     * the host streams are re-armed to match the restored state. */
+    s->dac_on = false;
+    s->adc_on = false;
+    bu26154_update_paths(s);
+    return 0;
+}
+
 static const Property bu26154_props[] = {
-    DEFINE_PROP_STRING("audiodev", BU26154State, audiodev),
+    DEFINE_AUDIO_PROPERTIES(BU26154State, audio_be),
 };
 
 static const VMStateDescription vmstate_bu26154 = {
     .name = "bu26154",
     .version_id = 1,
     .minimum_version_id = 1,
+    .post_load = bu26154_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT8_ARRAY(regs, BU26154State, 3 * BU26154_WORDS),
         VMSTATE_UINT8(map, BU26154State),
@@ -674,6 +1003,7 @@ static void bu26154_class_init(ObjectClass *oc, const void *data)
     I2CSlaveClass *sc = I2C_SLAVE_CLASS(oc);
 
     dc->realize = bu26154_realize;
+    dc->unrealize = bu26154_exit;
     device_class_set_legacy_reset(dc, bu26154_reset);
     dc->vmsd = &vmstate_bu26154;
     device_class_set_props(dc, bu26154_props);

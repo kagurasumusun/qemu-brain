@@ -543,6 +543,23 @@ static const VMStateDescription vmstate_mxs_saif = {
     },
 };
 
+bool mxs_saif_push_playback(DeviceState *saif, uint32_t frame)
+{
+    MXSSAIFState *s = MXS_SAIF(saif);
+
+    if (!s->dac_codec) {
+        return false;   /* no board codec linked on this SAIF */
+    }
+    /*
+     * Same action the serial engine performs for one TX frame: the word
+     * leaves the TX FIFO and is clocked into the codec.  The FIFO is not
+     * touched here because the caller supplies the word directly, which
+     * keeps the aid usable while the guest has the engine stopped.
+     */
+    saif_codec_dac_input(s, frame);
+    return true;
+}
+
 static void mxs_saif_class_init(ObjectClass *k, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(k);

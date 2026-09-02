@@ -356,6 +356,26 @@ SRST
 ERST
 
     {
+        .name       = "brain_saifplay",
+        .args_type  = "idx:i,nframes:i?,tone:i?",
+        .params     = "idx [nframes [tone]]",
+        .help       = "clock nframes of a test tone out of the SAIF into the "
+                      "linked DAC codec (analysis aid; playback counterpart "
+                      "of brain_saifpump)",
+        .cmd        = hmp_brain_saifplay,
+    },
+
+SRST
+``brain_saifplay`` *idx* [*nframes* [*tone*]]
+  Synchronously clock *nframes* frames of a deterministic test tone out of
+  the SAIF's linked playback codec, as the serial engine timer would,
+  without waiting on guest virtual time.  *idx* selects the SAIF
+  (0 = saif0, the board's playback link); *tone* is the sample amplitude
+  (default 0x4000).  Used to verify the whole DAC chain -- SAIF, codec
+  gain stages, host audio backend -- with known data.
+ERST
+
+    {
         .name       = "brain_sgtl",
         .args_type  = "",
         .params     = "",

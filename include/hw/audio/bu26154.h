@@ -50,14 +50,18 @@ OBJECT_DECLARE_SIMPLE_TYPE(BU26154State, BU26154)
 typedef struct BU26154Stats {
     /* playback: frames handed over by the SAIF engine */
     uint64_t dac_in_frames;
-    /* playback: frames actually delivered to an audio sink */
+    /* playback: frames actually delivered to the host audio backend */
     uint64_t dac_out_frames;
+    /* playback: bytes handed to the host audio backend */
+    uint64_t dac_out_bytes;
     /* playback: frames dropped (DAC powered down / muted / full) */
     uint64_t dac_dropped;
     /* capture: frames pulled by the SAIF engine (incl. silence) */
     uint64_t adc_out_frames;
-    /* capture: bytes injected into the ADC ring (host mic stand-in) */
+    /* capture: bytes read from the host audio backend (real mic) */
     uint64_t adc_in_bytes;
+    /* capture: bytes injected by the brain_micfill analysis aid */
+    uint64_t adc_fill_bytes;
     /* capture: frames returned as silence while the ring was empty */
     uint64_t adc_underrun;
     /* capture: frames gated while the ADC was powered down */
@@ -68,9 +72,21 @@ typedef struct BU26154Stats {
     uint8_t mapcon;               /* current MAPCON value */
     uint8_t sr;                   /* Sampling Rate register (MAP0 w0) */
     uint8_t vmicon;               /* VMIDCON field (MAP0 w0x10) */
+    uint8_t micben;               /* MICBEN bit (MAP0 w0x10) */
+    uint8_t micbcon;              /* MICBCON field (MAP0 w0x18) */
+    uint8_t pgaen;                /* PGAEN bit (MAP0 w0x11) */
+    uint8_t pgaatt;               /* PGAATT bit (MAP0 w0x11) */
+    uint8_t adc_pwr;              /* ADC power reg (MAP0 w0x11) */
     uint8_t dac_pwr;              /* DAC power reg (MAP0 w0x12) */
     uint8_t sp_pwr;               /* SP amp power reg (MAP0 w0x13) */
     uint8_t pdatt;                /* Playback Digital Attenuator */
+    uint8_t avvol;                /* Analog Volume */
+    uint8_t rdvol;                /* Record Digital Attenuator */
+    uint8_t avmute;               /* Amplifier Volume Ctrl Fn Enable */
+    uint8_t dvmute;               /* Digital Volume Control */
+    /* true when a host audio backend is attached (not a silent sink) */
+    bool backend_out;
+    bool backend_in;
 } BU26154Stats;
 
 /* Playback: hand one 32-bit stereo frame (L << 16 | R) to the codec DAC. */

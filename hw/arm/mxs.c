@@ -844,6 +844,57 @@ void hmp_brain_saifpump(Monitor *mon, const QDict *qdict)
                    "RX FIFO\n", qdict_get_int(qdict, "idx"), done);
 }
 
+void hmp_brain_saifplay(Monitor *mon, const QDict *qdict)
+{
+    BrainMachineState *bms;
+    DeviceState *saif;
+    unsigned n, done = 0;
+    int32_t amp;
+    long idx;
+
+    if (!mon || !current_machine) {
+        return;
+    }
+    bms = BRAIN_MACHINE(current_machine);
+    /* default: one full TX FIFO worth of frames (8 stereo frames) */
+    n = qdict_haskey(qdict, "nframes") ?
+        (unsigned)qdict_get_int(qdict, "nframes") : 8;
+    amp = qdict_haskey(qdict, "tone") ?
+        (int32_t)qdict_get_int(qdict, "tone") : 0x4000;
+    idx = qdict_get_int(qdict, "idx");
+    switch (idx) {
+    case 0:
+        saif = bms->saif0_dev;
+        break;
+    case 1:
+        saif = bms->saif1_dev;
+        break;
+    default:
+        monitor_printf(mon, "brain_saifplay: idx must be 0 (saif0) or 1 "
+                       "(saif1)\n");
+        return;
+    }
+    if (!saif) {
+        monitor_printf(mon, "brain_saifplay: SAIF not attached\n");
+        return;
+    }
+    /*
+     * A decaying ramp so consecutive frames are distinguishable in a
+     * captured dump: frame i carries (amp - i) on both channels.
+     */
+    for (unsigned i = 0; i < n; i++) {
+        int32_t v = amp - (int32_t)i;
+        uint32_t frame = ((uint32_t)(uint16_t)v << 16) | (uint16_t)v;
+
+        if (!mxs_saif_push_playback(saif, frame)) {
+            break;
+        }
+        done++;
+    }
+    monitor_printf(mon, "brain_saifplay: saif%ld clocked %u frame(s) into the "
+                   "DAC codec (amp=0x%x)\n", idx, done, (unsigned)amp);
+}
+
 void hmp_brain_sgtl(Monitor *mon, const QDict *qdict)
 {
     BrainMachineState *bms;
@@ -884,17 +935,26 @@ void hmp_brain_sgtl(Monitor *mon, const QDict *qdict)
         bu26154_get_stats(BU26154(cd), &st);
         monitor_printf(mon,
                        "BU26154: dac_in=%" PRIu64 " dac_out=%" PRIu64
-                       " dac_drop=%" PRIu64 "\n"
+                       " dac_outB=%" PRIu64 " dac_drop=%" PRIu64 "\n"
                        "         adc_out=%" PRIu64 " adc_inB=%" PRIu64
-                       " adc_undr=%" PRIu64 " adc_gated=%" PRIu64
-                       " adc_pend=%u\n"
+                       " adc_fillB=%" PRIu64 " adc_undr=%" PRIu64
+                       " adc_gated=%" PRIu64 " adc_pend=%u\n"
                        "         MAPCON=%u SR=0x%02x VMIDCON=0x%02x "
-                       "DACPWR=0x%02x SPPWR=0x%02x PDATT=0x%02x\n",
-                       st.dac_in_frames, st.dac_out_frames, st.dac_dropped,
-                       st.adc_out_frames, st.adc_in_bytes, st.adc_underrun,
-                       st.adc_gated, st.adc_pending,
-                       st.mapcon, st.sr, st.vmicon, st.dac_pwr, st.sp_pwr,
-                       st.pdatt);
+                       "MICBEN=%u MICBCON=0x%02x\n"
+                       "         AINPW=0x%02x (PGAEN=%u PGAATT=%u) "
+                       "DACPWR=0x%02x SPPWR=0x%02x\n"
+                       "         PDATT=0x%02x AVVOL=0x%02x RDVOL=0x%02x "
+                       "AVMUTE=0x%02x DVMUTE=0x%02x\n"
+                       "         host backend: out=%s in=%s\n",
+                       st.dac_in_frames, st.dac_out_frames, st.dac_out_bytes,
+                       st.dac_dropped,
+                       st.adc_out_frames, st.adc_in_bytes, st.adc_fill_bytes,
+                       st.adc_underrun, st.adc_gated, st.adc_pending,
+                       st.mapcon, st.sr, st.vmicon, st.micben, st.micbcon,
+                       st.adc_pwr, st.pgaen, st.pgaatt, st.dac_pwr, st.sp_pwr,
+                       st.pdatt, st.avvol, st.rdvol, st.avmute, st.dvmute,
+                       st.backend_out ? "yes" : "no (silent sink)",
+                       st.backend_in ? "yes" : "no (silent sink)");
     } else {
         monitor_printf(mon, "brain_sgtl: unsupported codec type\n");
     }
@@ -2086,17 +2146,20 @@ static void brain_init(MachineState *machine)
      * and codec ADC -> SAIF1 (capture).  The pre-S97 SGTL5000 wiring
      * (0x0a) came from the Linux DTS codec node, which is disabled /
      * not what CE drives (S97 evidence).  The SGTL5000 model remains
-     * in the tree; the audiodev forward (host audio endpoint) applies
-     * to it, while the BU26154 model is a register-level codec with a
-     * silent sink until the P1 audio E2E round adds host plumbing.
+     * in the tree for that configuration.
+     *
+     * machine->audiodev (-audiodev id=...) is forwarded to the codec as
+     * its host audio endpoint: with it the BU26154 really renders the
+     * DAC stream to the host output and really captures the microphone
+     * from the host input; without it the codec keeps its register model
+     * and both paths are a silent sink.
      */
     dev = qdev_new(TYPE_MXS_I2C_REAL);
     qdev_prop_set_string(dev, "name", "i2c0");
     qdev_prop_set_uint64(dev, "size", 0x2000);
     qdev_prop_set_string(dev, "codec-type", TYPE_BU26154);
     qdev_prop_set_uint8(dev, "codec-addr", BU26154_I2C_ADDR);
-    /* Only the SGTL5000 model carries a QEMU audio backend ("audiodev"
-     * property); the BU26154 register model must not receive it. */
+    /* Both codec models expose an "audiodev" property (host endpoint). */
     if (machine->audiodev) {
         qdev_prop_set_string(dev, "codec-audiodev", machine->audiodev);
     }

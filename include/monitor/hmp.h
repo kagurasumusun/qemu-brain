@@ -99,6 +99,7 @@ void hmp_brain_lilo(Monitor *mon, const QDict *qdict);
 void hmp_brain_i2c(Monitor *mon, const QDict *qdict);
 void hmp_brain_micfill(Monitor *mon, const QDict *qdict);
 void hmp_brain_saifpump(Monitor *mon, const QDict *qdict);
+void hmp_brain_saifplay(Monitor *mon, const QDict *qdict);
 void hmp_brain_sgtl(Monitor *mon, const QDict *qdict);
 void hmp_brain_stats(Monitor *mon, const QDict *qdict);
 void hmp_brain_events(Monitor *mon, const QDict *qdict);
