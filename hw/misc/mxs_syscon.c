@@ -44,7 +44,7 @@ typedef struct MXSSysconState {
 } MXSSysconState;
 
 enum {
-    MXS_KIND_DUMMY = 0,
+    MXS_KIND_GENERIC = 0,
     MXS_KIND_CLKCTRL,
     MXS_KIND_POWER,
     MXS_KIND_DIGCTL,
@@ -526,7 +526,7 @@ static void mxs_syscon_realize(DeviceState *dev, Error **errp)
 static const Property mxs_syscon_properties[] = {
     DEFINE_PROP_STRING("name", MXSSysconState, name),
     DEFINE_PROP_UINT64("size", MXSSysconState, size, 0x2000),
-    DEFINE_PROP_UINT32("kind", MXSSysconState, kind, MXS_KIND_DUMMY),
+    DEFINE_PROP_UINT32("kind", MXSSysconState, kind, MXS_KIND_GENERIC),
     DEFINE_PROP_UINT32("ctrl-idx", MXSSysconState, ctrl_idx, 0),
 };
 
@@ -577,10 +577,6 @@ static const TypeInfo mxs_syscon_types[] = {
         .parent         = TYPE_SYS_BUS_DEVICE,
         .instance_size  = sizeof(MXSSysconState),
         .class_init     = mxs_syscon_class_init,
-    },
-    {
-        .name           = TYPE_MXS_DUMMY,
-        .parent         = TYPE_MXS_SYSCON,
     },
     {
         .name           = TYPE_MXS_CLKCTRL,

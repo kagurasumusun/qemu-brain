@@ -15,5 +15,6 @@
 #define TYPE_MXS_FLEXCAN   "mxs-flexcan"
 #define TYPE_MXS_ENET      "mxs-enet"
 #define TYPE_MXS_ENET_SWI  "mxs-enet-swi"
+#define TYPE_MXS_AUDIOOUT  "mxs-audioout"
 
 #endif /* HW_MISC_MXS_ROB_H */

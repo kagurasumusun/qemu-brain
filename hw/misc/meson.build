@@ -171,3 +171,4 @@ system_ss.add(when: 'CONFIG_MXS', if_true: files('mxs_bchlib.c', 'mxs_bch.c', 'm
 system_ss.add(when: 'CONFIG_MXS', if_true: files('mxs_dcp.c'))
 system_ss.add(when: 'CONFIG_MXS', if_true: files('mxs_perfmon.c'))
 system_ss.add(when: 'CONFIG_MXS', if_true: files('mxs_rob.c', 'mxs_dflpt.c'))
+system_ss.add(when: 'CONFIG_MXS', if_true: files('mxs_etm.c', 'mxs_reserved.c'))

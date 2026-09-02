@@ -24,6 +24,8 @@
 #include "hw/misc/mxs_bank.h"
 #include "hw/misc/mxs_rob.h"
 #include "hw/misc/mxs_dflpt.h"
+#include "hw/misc/mxs_etm.h"
+#include "hw/misc/mxs_reserved.h"
 #include "hw/arm/boot.h"
 #include "hw/arm/machines-qom.h"
 #include "qemu/option.h"
@@ -1798,18 +1800,6 @@ static void mxs_create_usb(const char *name, hwaddr base,
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, qdev_get_gpio_in(icoll, irq));
 }
 
-static void mxs_create_dummy(const char *name, hwaddr base, uint64_t size)
-{
-    DeviceState *dev = qdev_new(TYPE_MXS_DUMMY);
-
-    qdev_prop_set_string(dev, "name", name);
-    qdev_prop_set_uint64(dev, "size", size);
-    sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
-    sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, base);
-}
-
-
-
 static void brain_init(MachineState *machine)
 {
     BrainMachineState *bms = BRAIN_MACHINE(machine);
@@ -2116,7 +2106,13 @@ static void brain_init(MachineState *machine)
         sysbus_mmio_map(SYS_BUS_DEVICE(d), 0, MXS_GPMI_BASE);
         sysbus_connect_irq(SYS_BUS_DEVICE(d), 0, qdev_get_gpio_in(icoll, 41));
     }
-    mxs_create_dummy("etm", MXS_ETM_BASE, 0x2000);
+    /*
+     * ETM: the ARM CoreSight ETM9CSSingle trace macrocell for the
+     * ARM926EJ-S core (RM 2.4).  Real register model in hw/misc/mxs_etm.c
+     * (ETMv1.3 programmer's model + CoreSight IDs).  No interrupt line:
+     * it is a trace source, not an interrupt source.
+     */
+    mxs_create_named(TYPE_MXS_ETM, "etm", MXS_ETM_BASE, 0x2000);
     /* APBX DMA: SAIF/SPDIF/AUART/USB peripheral channels */
     {
         static const int apbx_irq[16] = {
@@ -2149,7 +2145,14 @@ static void brain_init(MachineState *machine)
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 1,
                        qdev_get_gpio_in(icoll, MXS_IRQ_DCP_VMI));
     mxs_create_simple(TYPE_MXS_PXP, MXS_PXP_BASE, icoll, MXS_IRQ_PXP);
-    mxs_create_dummy("axi-ahb0", MXS_AXI_AHB0_BASE, 0x2000);
+    /*
+     * AXI_AHB0 ("AXI Control"): the AXI-to-AHB bridge control block.  The
+     * RM memory map lists it but publishes no registers, it has no
+     * interrupt, and the guest never touches it -- modelled as documented
+     * reserved space (reads 0, writes ignored) in hw/misc/mxs_reserved.c.
+     */
+    mxs_create_named(TYPE_MXS_RESERVED, "axi-ahb0", MXS_AXI_AHB0_BASE,
+                     0x2000);
     /*
      * FlexCAN controllers (RM ch.25).  Real register file model
      * (hw/misc/mxs_rob.c) with the full MBn / RXIMRn RAM arrays; no
@@ -2159,7 +2162,13 @@ static void brain_init(MachineState *machine)
                          icoll, MXS_IRQ_CAN0);
     mxs_create_named_irq(TYPE_MXS_FLEXCAN, "can1", MXS_CAN1_BASE, 0x2000,
                          icoll, MXS_IRQ_CAN1);
-    mxs_create_dummy("simdbg", MXS_SIMDBG_BASE, 0x4000);
+    /*
+     * SIMDBG: the simulation/debug cluster (SIMDBG, SIMGPMISEL, SIMSSPSEL,
+     * SIMMEMSEL, GPIOMON, SIMENET, ARMJTAG).  Memory-mapped in the RM but
+     * with no register chapters, no interrupt and no guest access --
+     * documented reserved space in hw/misc/mxs_reserved.c.
+     */
+    mxs_create_named(TYPE_MXS_RESERVED, "simdbg", MXS_SIMDBG_BASE, 0x4000);
     /* SAIF FIFO/IRQ lines per the i.MX28 interrupt table */
     DeviceState *saif0, *saif1;
 
@@ -2171,8 +2180,19 @@ static void brain_init(MachineState *machine)
                                  0x2000, icoll, 58);
     mxs_apbx_attach(bms->apbx, 5, mxs_saif_get_dma_ops(), saif1);
     bms->saif1_dev = saif1;
-    mxs_create_dummy("audioout", MXS_AUDIOOUT_BASE, 0x4000);
-    mxs_create_dummy("audioin", MXS_AUDIOIN_BASE, 0x4000);
+    /*
+     * Audio filters on the DAC/ADC paths.  The RM never documents either
+     * block; HW_AUDIOOUT_CTRL0 (the DAC word count) is the only register
+     * of the pair ever named, and only inside a Ch.7 DMA example.  The
+     * AUDIOOUT model therefore carries that one R/W register (mxs_rob.c);
+     * AUDIOIN has no documented register at all and is modelled as
+     * reserved space.  No interrupts; neither block is touched by the
+     * guest (MXS_TRACE).
+     */
+    mxs_create_named(TYPE_MXS_AUDIOOUT, "audioout", MXS_AUDIOOUT_BASE,
+                     0x4000);
+    mxs_create_named(TYPE_MXS_RESERVED, "audioin", MXS_AUDIOIN_BASE,
+                     0x4000);
     /*
      * SPDIF transmitter (RM ch.36).  Real register file model; no frame
      * generation, so ICOLL 45 (SPDIF error) is wired but never asserted.

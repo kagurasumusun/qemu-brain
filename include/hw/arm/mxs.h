@@ -138,7 +138,6 @@
 #define TYPE_MXS_I2C_REAL   "mxs-i2c-real"
 #define TYPE_MXS_USBPHY     "mxs-usbphy"
 #define TYPE_MXS_USBCTRL    "mxs-usbctrl"
-#define TYPE_MXS_DUMMY      "mxs-dummy"
 #define TYPE_MXS_DCP        "mxs-dcp"
 #define TYPE_MXS_PERFMON    "mxs-perfmon"
 #define TYPE_MXS_PINCTRL    "mxs-pinctrl"
@@ -155,6 +154,9 @@
 #define TYPE_MXS_ENET       "mxs-enet"
 #define TYPE_MXS_ENET_SWI   "mxs-enet-swi"
 #define TYPE_MXS_DFLPT      "mxs-dflpt"
+#define TYPE_MXS_ETM        "mxs-etm"
+#define TYPE_MXS_RESERVED   "mxs-reserved"
+#define TYPE_MXS_AUDIOOUT   "mxs-audioout"
 /*
  * The panel's GRAM is what a finger is on top of: convert a normalised
  * absolute input axis into a GRAM coordinate.  Returns false if there is no

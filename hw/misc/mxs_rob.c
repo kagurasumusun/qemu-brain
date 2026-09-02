@@ -76,6 +76,7 @@ enum {
     MXS_ROB_CAN,
     MXS_ROB_ENET,
     MXS_ROB_SWI,
+    MXS_ROB_AUDIOOUT,
     MXS_ROB_NUM,
 };
 
@@ -326,6 +327,10 @@ static const uint32_t swi_ro[8192] = {
     [322] = 0xffffffff,
 };
 
+/* Freescale i.MX28 audio output filter (DAC path) */
+static const uint32_t audioout_reset[1] = { 0 };
+static const uint32_t audioout_ro[1] = { 0 };
+
 static const MXSRobDesc mxs_rob_descs[MXS_ROB_NUM] = {
     [MXS_ROB_HSADC] = { .type = "mxs-hsadc", .desc = "Freescale i.MX28 High-Speed ADC",
         .word = false, .sftrst = true, .size = 0x2000, .nwords = 12,
@@ -345,6 +350,9 @@ static const MXSRobDesc mxs_rob_descs[MXS_ROB_NUM] = {
     [MXS_ROB_SWI] = { .type = "mxs-enet-swi", .desc = "Freescale i.MX28 Ethernet switch",
         .word = true, .sftrst = false, .size = 0x8000, .nwords = 8192,
         .reset = swi_reset, .ro = swi_ro },
+    [MXS_ROB_AUDIOOUT] = { .type = "mxs-audioout", .desc = "Freescale i.MX28 audio output filter (DAC path)",
+        .word = true, .sftrst = false, .size = 0x4000, .nwords = 1,
+        .reset = audioout_reset, .ro = audioout_ro },
 };
 
 typedef struct MXSRobClass {
@@ -541,7 +549,9 @@ static const TypeInfo mxs_rob_concrete_types[] = {
     { .name = "mxs-enet", .parent = TYPE_MXS_ROB, .instance_size = sizeof(MXSRobState),
       .class_init = mxs_rob_class_init, .class_data = &mxs_rob_descs[MXS_ROB_ENET] },
     { .name = "mxs-enet-swi", .parent = TYPE_MXS_ROB, .instance_size = sizeof(MXSRobState),
-      .class_init = mxs_rob_class_init, .class_data = &mxs_rob_descs[MXS_ROB_SWI] }
+      .class_init = mxs_rob_class_init, .class_data = &mxs_rob_descs[MXS_ROB_SWI] },
+    { .name = "mxs-audioout", .parent = TYPE_MXS_ROB, .instance_size = sizeof(MXSRobState),
+      .class_init = mxs_rob_class_init, .class_data = &mxs_rob_descs[MXS_ROB_AUDIOOUT] }
 };
 
 DEFINE_TYPES(mxs_rob_concrete_types)
