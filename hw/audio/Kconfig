@@ -59,3 +59,7 @@ config VIRTIO_SND
 config SGTL5000
     bool
     depends on I2C
+
+config BU26154
+    bool
+    depends on I2C

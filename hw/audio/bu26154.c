@@ -1,0 +1,696 @@
+/*
+ * LAPIS Semiconductor / ROHM BU26154MUV monaural audio CODEC with
+ * touch-panel interface - QEMU device model.
+ *
+ * Register/protocol behaviour follows the ROHM BU26154MUV datasheet
+ * Rev.002 (26.Oct.2015); see include/hw/audio/bu26154.h for the
+ * control-interface summary and the evidence_s97 PDF for the source.
+ *
+ * Model scope (S97 phase A):
+ *  - I2C slave protocol: 8-bit register index, even = read address,
+ *    odd = write address of the same 8-bit word (word = index >> 1),
+ *    continuous transfers step the index by two.
+ *  - Three register maps selected by MAPCON (0x1c/0x1d); MAP0 = audio,
+ *    MAP1 = PLL + touch-panel ADC interface, MAP2 = PLL external /
+ *    "B"-variant coefficients.  Reset (power-on and SOFTRST=1 at
+ *    write index 0x11) restores the datasheet initial values.
+ *  - Register semantics: reserved bits read 0 and ignore writes;
+ *    empty indices read 0 and ignore writes.
+ *  - DAC/ADC data path with the same 48 kHz stereo frame plumbing as
+ *    the SGTL5000 model so mxs_saif can drive either codec.  Power
+ *    gating is derived from the BU26154 power-management registers
+ *    (VMIDCON, DACREN/DACLEN, ADCREN/ADCEN, AVMUTE).  No QEMU host
+ *    audiodev backend yet: with no backend the codec is the register
+ *    model with a silent sink (same fallback as SGTL5000 without an
+ *    audiodev); host audio plumbing is a P1 item.
+ *
+ * Caveat: bit-level initial values below were transcribed from the
+ * Rev.002 datasheet tables (evidence_s97 text extraction).  Core audio
+ * registers are precise; rarely-used fields (ALC/noise-gate, MAP1/MAP2
+ * tails) are best-effort and each uncertain entry is marked "~".
+ */
+#include "qemu/osdep.h"
+#include "qemu/module.h"
+#include "qemu/timer.h"
+#include "hw/i2c/i2c.h"
+#include "hw/audio/bu26154.h"
+#include "qapi/error.h"
+#include "hw/core/qdev-properties.h"
+#include "migration/vmstate.h"
+#include "qom/object.h"
+
+/* ---- register-word addresses (MAP0) ---- */
+#define BU_REG_SR        0x00    /* Sampling Rate Setting [3:0]      */
+#define BU_REG_CLKEN     0x06    /* Clock Enable                      */
+#define BU_REG_CLKIO     0x07    /* Clock Input/Output Control        */
+#define BU_REG_SOFTRST   0x08    /* Software Reset (write 0x11 bit0)  */
+#define BU_REG_RECPLAY   0x09    /* Record/Playback Running Control   */
+#define BU_REG_MCTIME    0x0a    /* Mic Input Charging Time           */
+#define BU_REG_MAPCON    0x0e    /* Register MAP Control (0x1c/0x1d)  */
+#define BU_REG_AREFPW    0x10    /* Analog Reference Power Mgmt       */
+#define BU_REG_AINPW     0x11    /* Analog Input Power Mgmt           */
+#define BU_REG_DACPW     0x12    /* DAC Power Management              */
+#define BU_REG_SPPW      0x13    /* Speaker Amplifier Power Mgmt      */
+#define BU_REG_TSDEN     0x16    /* Thermal Shutdown Control          */
+#define BU_REG_ZCEN      0x17    /* Zero Cross Comparator Power Mgmt  */
+#define BU_REG_MICB      0x18    /* MICBIAS Voltage Control           */
+#define BU_REG_AVVOL     0x1d    /* Analog Volume Control             */
+#define BU_REG_PDATT     0x1f    /* Playback Digital Attenuator       */
+#define BU_REG_AVMUTE    0x24    /* Amplifier Volume Ctrl Fn Enable   */
+
+/* bit helpers */
+#define BU_BIT(n) (1u << (n))
+
+/* ---- per-register initial value / writable-mask ---- */
+typedef struct BURegInit {
+    uint8_t w;        /* register word (index >> 1) */
+    uint8_t rv;       /* datasheet initial value    */
+    uint8_t mask;     /* defined (writable) bits    */
+} BURegInit;
+
+/*
+ * MAP0 (audio, datasheet pp.37-40).  w = index >> 1; index pairs are
+ * listed as (even read / odd write) in the comments.
+ */
+static const BURegInit bu_map0_init[] = {
+    { BU_REG_SR,      0x00, 0x0f }, /* 0x00/0x01 SR[3:0] */
+    { BU_REG_CLKEN,   0x00, 0x87 }, /* 0x0c/0x0d TCLKEN|PLLOE|PLLEN|MCLKEN */
+    { BU_REG_CLKIO,   0x00, 0x1f }, /* 0x0e/0x0f PLLISEL[1:0]|CLKSEL[2:0] */
+    { BU_REG_SOFTRST, 0x00, 0x01 }, /* 0x10/0x11 SOFTRST */
+    { BU_REG_RECPLAY, 0x00, 0x07 }, /* 0x12/0x13 RECPLAY (bit map ~) */
+    { BU_REG_MCTIME,  0x00, 0x1f }, /* 0x14/0x15 MCTIME[4:0] */
+    { BU_REG_MAPCON,  0x00, 0x03 }, /* 0x1c/0x1d MAPCON[1:0] (global) */
+    { BU_REG_AREFPW,  0x00, 0xcf }, /* 0x20/0x21 HPREN|HPLEN|HPVDDEN|MICBEN|VMIDCON[1:0] */
+    { BU_REG_AINPW,   0x00, 0x2e }, /* 0x22/0x23 PGAATT|PGAEN|ADCREN|ADCEN */
+    { BU_REG_DACPW,   0x00, 0x06 }, /* 0x24/0x25 DACREN|DACLEN */
+    { BU_REG_SPPW,    0x00, 0x9e }, /* 0x26/0x27 SPMDSEL|AVREN|COEFSEL|SPEN|AVLEN (rv ~) */
+    { BU_REG_TSDEN,   0x01, 0x01 }, /* 0x2c/0x2d TSDEN=1 */
+    { BU_REG_ZCEN,    0x00, 0x02 }, /* 0x2e/0x2f ZCEN */
+    { BU_REG_MICB,    0x00, 0x03 }, /* 0x30/0x31 MICBCON[1:0] */
+    { BU_REG_AVVOL,   0x0a, 0x1f }, /* 0x3a/0x3b AVVOL[4:0] init 01010b */
+    { BU_REG_PDATT,   0xff, 0xff }, /* 0x3e/0x3f PDATT (0 dB) */
+    { 0x23,           0x00, 0x3e }, /* 0x46/0x47 Play HPF2 setting */
+    { BU_REG_AVMUTE,  0x00, 0x03 }, /* 0x48/0x49 AVMUTE|AVFADE */
+    { 0x25,           0x00, 0x03 }, /* 0x4a/0x4b AVFCON[1:0] */
+    { 0x26,           0x00, 0xff }, /* 0x4c/0x4d PHPF2C0L */
+    { 0x27,           0x00, 0x3f }, /* 0x4e/0x4f PHPF2C0H */
+    { 0x2c,           0x00, 0x30 }, /* 0x58/0x59 OSRSEL[1:0] */
+    { 0x2d,           0x80, 0xe2 }, /* 0x5a/0x5b MINVOL[2:0]=100|MINDIF */
+    { 0x2e,           0x00, 0x87 }, /* 0x5c/0x5d SEMODE[7]|SEMODE[2:0] */
+    { 0x30,           0xc0, 0xfe }, /* 0x60/0x61 SAI TX: PCMFO24|FMTO=1 */
+    { 0x31,           0xc0, 0xfe }, /* 0x62/0x63 SAI RX: PCMFI24|FMTI=1 */
+    { 0x32,           0x00, 0x11 }, /* 0x64/0x65 BSWP|MST */
+    { 0x33,           0x01, 0xff }, /* 0x66/0x67 DSP filter enables, HPF1EN=1 */
+    { 0x34,           0x00, 0x1b }, /* 0x68/0x69 DVMUTE|DVFADE|RALCEN|PALCEN */
+    { 0x35,           0x00, 0xff }, /* 0x6a/0x6b DVFCON[3:0]|RMCON|LMCON */
+    { 0x36,           0xff, 0xff }, /* 0x6c/0x6d RDVOL (0 dB) */
+    { 0x38,           0xff, 0xff }, /* 0x70/0x71 Effect VOL (0 dB) */
+    { 0x39,           0x40, 0x7f }, /* 0x72/0x73 RALCVOL (~) */
+    { 0x3a,           0xe7, 0xff }, /* 0x74/0x75 EQGAIN0 */
+    { 0x3b,           0xe7, 0xff }, /* 0x76/0x77 EQGAIN1 */
+    { 0x3c,           0xe7, 0xff }, /* 0x78/0x79 EQGAIN2 */
+    { 0x3d,           0xe7, 0xff }, /* 0x7a/0x7b EQGAIN3 */
+    { 0x3e,           0xe7, 0xff }, /* 0x7c/0x7d EQGAIN4 */
+    { 0x3f,           0x00, 0x07 }, /* 0x7e/0x7f HPF2CUT[2:0] */
+    /* 0x80..0xa7 programmable EQ coefficients (words 0x40..0x53) */
+    { 0x40, 0x00, 0xff }, { 0x41, 0x00, 0xff },
+    { 0x42, 0x00, 0xff }, { 0x43, 0x00, 0xff },
+    { 0x44, 0x00, 0xff }, { 0x45, 0x00, 0xff },
+    { 0x46, 0x00, 0xff }, { 0x47, 0x00, 0xff },
+    { 0x48, 0x00, 0xff }, { 0x49, 0x00, 0xff },
+    { 0x4a, 0x00, 0xff }, { 0x4b, 0x00, 0xff },
+    { 0x4c, 0x00, 0xff }, { 0x4d, 0x00, 0xff },
+    { 0x4e, 0x00, 0xff }, { 0x4f, 0x00, 0xff },
+    { 0x50, 0x00, 0xff }, { 0x51, 0x00, 0xff },
+    { 0x52, 0x00, 0xff }, { 0x53, 0x00, 0xff },
+    /* ALC block (note1 registers) */
+    { 0x59,           0x02, 0x0f }, /* 0xb2/0xb3 RALCATK init 0010b */
+    { 0x5a,           0x03, 0x0f }, /* 0xb4/0xb5 RALCDCY init 0011b */
+    { 0x5c,           0x17, 0x1f }, /* 0xb8/0xb9 RALCLVL init 10111b */
+    { 0x5d,           0x00, 0x1f }, /* 0xba/0xbb RALCMINGAIN */
+    { 0x5e,           0x22, 0xff }, /* 0xbc/0xbd RSATEN|RSATMINGAIN init 0x22 (~) */
+    { 0x5f,           0x00, 0x03 }, /* 0xbe/0xbf RALCZCTM */
+    { 0x60,           0x04, 0x0f }, /* 0xc0/0xc1 PALCATK init 0100b */
+    { 0x61,           0x05, 0x0f }, /* 0xc2/0xc3 PALCDCY init 0101b */
+    { 0x62,           0x1b, 0x1f }, /* 0xc4/0xc5 PALCLVL init 11011b */
+    { 0x63,           0x00, 0x1f }, /* 0xc6/0xc7 PALCMINGAIN */
+    { 0x64,           0x40, 0x7f }, /* 0xc8/0xc9 PALCVOL init 1000000b (~) */
+    { 0x65,           0x00, 0x03 }, /* 0xca/0xcb PALCZCTM */
+    { 0x66,           0x00, 0x3a }, /* 0xcc/0xcd RALCFRTH|RALCFREN|RALCFRSP (~) */
+    { 0x67,           0x00, 0x3a }, /* 0xce/0xcf PALCFRTH|PALCFREN|PALCFRSP (~) */
+    { 0x6e,           0x00, 0x79 }, /* 0xdc/0xdd ZDTIME|ZDEN (~) */
+    { 0x74,           0x01, 0x03 }, /* 0xe8/0xe9 MIN2EN|MIN1EN=1 */
+};
+
+/*
+ * MAP1 (PLL + touch-panel ADC interface, datasheet pp.41-42).
+ * Touch-panel conversion result registers are read-mostly; their
+ * word values stay at reset 0x00 until a future touch model fills
+ * them (separate S97 item: touchraw / BU26154 touch I/F).
+ */
+static const BURegInit bu_map1_init[] = {
+    { 0x01, 0x00, 0x07 }, /* 0x02/0x03 FPLLM[2:0] */
+    { 0x02, 0x00, 0xff }, /* 0x04/0x05 FPLLNL */
+    { 0x03, 0x00, 0x01 }, /* 0x06/0x07 FPLLNH */
+    { 0x04, 0x00, 0x0f }, /* 0x08/0x09 FPLLD[3:0] */
+    { 0x05, 0x00, 0xff }, /* 0x0a/0x0b FPLLFL */
+    { 0x06, 0x00, 0xff }, /* 0x0c/0x0d FPLLFH */
+    { 0x07, 0x00, 0xff }, /* 0x0e/0x0f FPLLFDL */
+    { 0x08, 0x00, 0xff }, /* 0x10/0x11 FPLLFDH */
+    { 0x09, 0x00, 0x0f }, /* 0x12/0x13 FPLLV[3:0] */
+    { BU_REG_MAPCON, 0x00, 0x03 }, /* 0x1c/0x1d MAPCON (global) */
+    { 0x10, 0x00, 0x01 }, /* 0x20/0x21 SCEN */
+    { 0x11, 0x00, 0x7f }, /* 0x22/0x23 SCTHRH[6:0] */
+    { 0x12, 0x00, 0xff }, /* 0x24/0x25 SCTHRM */
+    { 0x13, 0x00, 0xff }, /* 0x26/0x27 SCTHRL */
+    { 0x14, 0x01, 0x07 }, /* 0x28/0x29 SCGAIN[2:0] init 001b */
+    { 0x30, 0x70, 0xde }, /* 0x60/0x61 Touch ADC Ctrl TCHA2..0=111 (~ rv) */
+    { 0x31, 0x00, 0xff }, /* 0x62/0x63 ADCR1 (result, read-mostly) */
+    { 0x32, 0x00, 0x0f }, /* 0x64/0x65 ADCR2[3:0] (result, read-mostly) */
+    { 0x41, 0x00, 0x31 }, /* 0x82/0x83 HP input select */
+    { 0x42, 0x00, 0x0f }, /* 0x84/0x85 SP amp input control */
+    { 0x50, 0x00, 0x03 }, /* 0xa0/0xa1 Play LPF setting */
+    { 0x51, 0x00, 0xff }, /* 0xa2/0xa3 PLPFC0L */
+    { 0x52, 0x00, 0x3f }, /* 0xa4/0xa5 PLPFC0H */
+    { 0x53, 0x00, 0x03 }, /* 0xa6/0xa7 Rec LPF setting */
+    { 0x54, 0x00, 0xff }, /* 0xa8/0xa9 RLPFC0L */
+    { 0x55, 0x00, 0x3f }, /* 0xaa/0xab RLPFC0H */
+    /* noise gate */
+    { 0x6d, 0x00, 0x01 }, /* 0xda/0xdb NGEN */
+    { 0x6f, 0xd3, 0xff }, /* 0xde/0xdf NGMINGAIN init 11010011b (~) */
+    { 0x70, 0x12, 0x3f }, /* 0xe0/0xe1 NGTH init 010010b (~) */
+    { 0x71, 0x02, 0x03 }, /* 0xe2/0xe3 NGTHHYS init 10b */
+    { 0x72, 0x14, 0x7f }, /* 0xe4/0xe5 NGSLOPE init 0010100b (~) */
+    { 0x73, 0x02, 0x03 }, /* 0xe6/0xe7 NGGAINSTEP init 10b */
+    { 0x74, 0x10, 0x77 }, /* 0xe8/0xe9 NGENVAVE|NGZTIM (~) */
+    { 0x75, 0x15, 0xff }, /* 0xea/0xeb NGFDOUT|NGFDIN init 00010101b (~) */
+    { 0x76, 0x00, 0xff }, /* 0xec/0xed NGENVMONL (read-mostly) */
+    { 0x77, 0x00, 0xff }, /* 0xee/0xef NGENVMONL H (read-mostly) */
+    { 0x78, 0x00, 0xff }, /* 0xf0/0xf1 NGENVMONR (read-mostly) */
+    { 0x79, 0x00, 0xff }, /* 0xf2/0xf3 NGENVMONR H (read-mostly) */
+    { 0x7a, 0x00, 0xff }, /* 0xf4/0xf5 NGGAINMON (read-mostly) */
+};
+
+/*
+ * MAP2 (PLL external components + "B" variant coefficients,
+ * datasheet pp.42-44).
+ */
+static const BURegInit bu_map2_init[] = {
+    { 0x00, 0x01, 0x01 }, /* 0x00/0x01 EXMODE=1 */
+    { 0x02, 0x26, 0x26 }, /* 0x04/0x05 HPLSEN... init 00100110b (~) */
+    { 0x09, 0x01, 0x01 }, /* 0x12/0x13 AREFI1EN=1 */
+    { BU_REG_MAPCON, 0x00, 0x03 }, /* 0x1c/0x1d MAPCON (global) */
+    { 0x12, 0x00, 0xff }, /* 0x24/0x25 P2B param0A */
+    { 0x13, 0x00, 0xff }, /* 0x26/0x27 P2B param1A */
+    { 0x14, 0x00, 0xff }, /* 0x28/0x29 P2B param2A */
+    { 0x15, 0x00, 0xff }, /* 0x2a/0x2b P2B param0B */
+    { 0x16, 0x00, 0xff }, /* 0x2c/0x2d P2B param1B */
+    { 0x17, 0x00, 0xff }, /* 0x2e/0x2f P2B param2B */
+    /* "B" variants (effect bank B) */
+    { 0x23, 0x00, 0x3e }, /* 0x46/0x47 Play HPF2B */
+    { 0x26, 0x00, 0xff }, /* 0x4c/0x4d PHPF2C0LB */
+    { 0x27, 0x00, 0x3f }, /* 0x4e/0x4f PHPF2C0HB */
+    { 0x2e, 0x00, 0x87 }, /* 0x5c/0x5d SEMODEB */
+    { 0x33, 0x01, 0xff }, /* 0x66/0x67 filter enables B (HPF1ENB=1) */
+    { 0x38, 0xff, 0xff }, /* 0x70/0x71 Effect VOL B */
+    { 0x39, 0xff, 0xff }, /* 0x72/0x73 PDATT B */
+    { 0x3a, 0xe7, 0xff }, { 0x3b, 0xe7, 0xff }, { 0x3c, 0xe7, 0xff },
+    { 0x3d, 0xe7, 0xff }, { 0x3e, 0xe7, 0xff }, /* EQGAIN0..4 B */
+    { 0x3f, 0x00, 0xff }, { 0x40, 0x00, 0xff }, /* EQ coef B */
+    { 0x41, 0x00, 0xff }, { 0x42, 0x00, 0xff },
+    { 0x43, 0x00, 0xff }, { 0x44, 0x00, 0xff },
+    { 0x45, 0x00, 0xff }, { 0x46, 0x00, 0xff },
+    { 0x47, 0x00, 0xff }, { 0x48, 0x00, 0xff },
+    { 0x49, 0x00, 0xff }, { 0x4a, 0x00, 0xff },
+    { 0x4b, 0x00, 0xff }, { 0x4c, 0x00, 0xff },
+    { 0x4d, 0x00, 0xff }, { 0x4e, 0x00, 0xff },
+    { 0x4f, 0x00, 0xff }, { 0x50, 0x00, 0xff },
+    { 0x51, 0x00, 0xff }, { 0x52, 0x00, 0xff }, { 0x53, 0x00, 0xff },
+};
+
+#define BU_RING 65536
+
+/* flat register-file index for (map, word) */
+#define BU_REG_IDX(map, w) ((unsigned)(map) * BU26154_WORDS + (unsigned)(w))
+
+struct BU26154State {
+    I2CSlave parent_obj;
+
+    /*
+     * Accepted for machine wiring compatibility with the I2C container
+     * (mxs_i2c forwards machine->audiodev as the codec "audiodev"
+     * property).  The register-level model does not open a host audio
+     * backend yet (P1); the string is stored so a future audiodev
+     * round can use it.
+     */
+    char *audiodev;
+
+    /* register files: regs[map][word] (masked values only) */
+    uint8_t regs[3 * BU26154_WORDS];
+    uint8_t map;                 /* current MAPCON value 0..2 */
+
+    /* I2C session */
+    uint8_t cur_idx;             /* register index byte of this txn */
+    bool    want_idx;            /* next send byte is an index byte */
+
+    /* playback staging (silent sink when no backend) */
+    uint8_t outbuf[BU_RING];
+    unsigned out_start, out_len;
+    bool    dac_on;
+
+    /* capture staging <- injected ring */
+    uint8_t inbuf[BU_RING];
+    unsigned in_start, in_len;
+    bool    adc_on;
+
+    BU26154Stats stats;
+
+    /* debug aid (BRAIN_BU26154_DEBUG=1): periodic stderr stats */
+    bool dbg;
+    int64_t last_dbg_ns;
+};
+
+#define BU26154_DBG(s, ...)                                           \
+    do {                                                              \
+        if ((s)->dbg) {                                               \
+            fprintf(stderr, "[bu26154] " __VA_ARGS__);                \
+        }                                                             \
+    } while (0)
+
+static bool bu26154_debug(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("BRAIN_BU26154_DEBUG");
+        on = e && *e && *e != '0';
+    }
+    return on;
+}
+
+static uint8_t bu_get(BU26154State *s, unsigned map, unsigned w)
+{
+    return (map < 3 && w < BU26154_WORDS) ? s->regs[BU_REG_IDX(map, w)] : 0;
+}
+
+/* (re)load all three register files with their datasheet initial
+ * values and clear the map select. */
+static void bu26154_reset_file(BU26154State *s);
+
+/* ---- register effects / power gating (datasheet-derived) ---- */
+
+static bool bu_vmid_on(BU26154State *s)
+{
+    /* VMIDCON[1:0] != 0 => analog reference power on. */
+    return (bu_get(s, BU26154_MAP0, BU_REG_AREFPW) & 0x03) != 0;
+}
+
+static bool bu_dac_on(BU26154State *s)
+{
+    uint8_t pwr = bu_get(s, BU26154_MAP0, BU_REG_DACPW);   /* DACREN|DACLEN */
+    uint8_t mute = bu_get(s, BU26154_MAP0, BU_REG_AVMUTE); /* AVMUTE b01 */
+
+    return bu_vmid_on(s) && (pwr & 0x06) && !(mute & 0x02);
+}
+
+static bool bu_adc_on(BU26154State *s)
+{
+    uint8_t pw = bu_get(s, BU26154_MAP0, BU_REG_AINPW);    /* ADCREN|ADCEN */
+
+    return bu_vmid_on(s) && (pw & 0x06);
+}
+
+static void bu26154_update_paths(BU26154State *s)
+{
+    s->dac_on = bu_dac_on(s);
+    s->adc_on = bu_adc_on(s);
+    if (!s->dac_on) {
+        /* DAC powered down / muted: drain nothing, discard staging */
+        s->out_start = s->out_len = 0;
+    }
+    if (!s->adc_on) {
+        s->in_start = s->in_len = 0;
+    }
+}
+
+/* ---- register file ---- */
+
+static void bu26154_reg_write(BU26154State *s, uint8_t idx, uint8_t v)
+{
+    unsigned w = idx >> 1;
+
+    if (!(idx & 1)) {
+        return;   /* even index = read address; writes are ignored */
+    }
+    if (idx == 0x1d) {           /* MAPCON (odd write index 0x1d) */
+        s->map = v & 0x03;
+        BU26154_DBG(s, "MAPCON <- %u\n", s->map);
+        return;
+    }
+    if (idx == 0x11) {           /* SOFTRST: write 1 resets, write 0 releases */
+        if (v & 0x01) {
+            BU26154_DBG(s, "software reset\n");
+            bu26154_reset_file(s);
+            return;
+        }
+        return;
+    }
+    if (w >= BU26154_WORDS) {
+        return;
+    }
+    s->regs[BU_REG_IDX(s->map, w)] = v;  /* pre-masked by caller */
+    if (s->map == BU26154_MAP0) {
+        switch (w) {
+        case BU_REG_AREFPW:
+        case BU_REG_AINPW:
+        case BU_REG_DACPW:
+        case BU_REG_SPPW:
+        case BU_REG_AVMUTE:
+            bu26154_update_paths(s);
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+/*
+ * Write data masked by the register definition.  Called from the I2C
+ * data path; idx is the current (odd) write index.
+ */
+static void bu26154_data_byte(BU26154State *s, uint8_t idx, uint8_t v)
+{
+    unsigned w = idx >> 1;
+    const BURegInit *ri = NULL;
+    const BURegInit *tab = bu_map0_init;
+    size_t n = ARRAY_SIZE(bu_map0_init);
+
+    if (s->map == BU26154_MAP1) {
+        tab = bu_map1_init;
+        n = ARRAY_SIZE(bu_map1_init);
+    } else if (s->map == BU26154_MAP2) {
+        tab = bu_map2_init;
+        n = ARRAY_SIZE(bu_map2_init);
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (tab[i].w == w) {
+            ri = &tab[i];
+            break;
+        }
+    }
+    if (!ri) {
+        return;   /* empty index: ignore */
+    }
+    bu26154_reg_write(s, idx, v & ri->mask);
+}
+
+static uint8_t bu26154_read_word(BU26154State *s, uint8_t idx)
+{
+    unsigned w = idx >> 1;
+
+    if (idx == 0x1c || idx == 0x1d) {
+        return s->map;   /* MAPCON read-back */
+    }
+    if (w >= BU26154_WORDS) {
+        return 0;
+    }
+    /* Only defined bits are stored (masked writes / masked resets),
+     * so the raw file value already reads reserved bits as 0. */
+    return s->regs[BU_REG_IDX(s->map, w)];
+}
+
+/* ---- device reset ---- */
+
+static void bu26154_apply_inits(BU26154State *s, const BURegInit *tab,
+                                size_t n, unsigned map)
+{
+    for (size_t i = 0; i < n; i++) {
+        s->regs[BU_REG_IDX(map, tab[i].w)] = tab[i].rv & tab[i].mask;
+    }
+}
+
+static void bu26154_reset_file(BU26154State *s)
+{
+    memset(s->regs, 0, sizeof(s->regs));
+    bu26154_apply_inits(s, bu_map0_init, ARRAY_SIZE(bu_map0_init),
+                        BU26154_MAP0);
+    bu26154_apply_inits(s, bu_map1_init, ARRAY_SIZE(bu_map1_init),
+                        BU26154_MAP1);
+    bu26154_apply_inits(s, bu_map2_init, ARRAY_SIZE(bu_map2_init),
+                        BU26154_MAP2);
+    s->map = 0;
+}
+
+static void bu26154_reset(DeviceState *dev)
+{
+    BU26154State *s = BU26154(dev);
+
+    bu26154_reset_file(s);
+    s->cur_idx = 0;
+    s->want_idx = true;
+    s->out_start = s->out_len = 0;
+    s->in_start = s->in_len = 0;
+    s->dac_on = s->adc_on = false;
+    bu26154_update_paths(s);
+}
+
+/* ---- I2C slave interface ---- */
+
+static int bu26154_i2c_send(I2CSlave *i2c, uint8_t d)
+{
+    BU26154State *s = BU26154(i2c);
+
+    if (s->want_idx) {
+        s->cur_idx = d;
+        s->want_idx = false;
+        BU26154_DBG(s, "I2C idx 0x%02x (%s)\n", d,
+                    (d & 1) ? "write" : "read");
+        return 0;
+    }
+    /* data byte for the current (odd) write index */
+    BU26154_DBG(s, "I2C W idx 0x%02x = 0x%02x (map %u)\n",
+                s->cur_idx, d, s->map);
+    bu26154_data_byte(s, s->cur_idx, d);
+    s->cur_idx = (s->cur_idx + 2) & 0xff;   /* continuous write: next word */
+    return 0;
+}
+
+static uint8_t bu26154_i2c_recv(I2CSlave *i2c)
+{
+    BU26154State *s = BU26154(i2c);
+    uint8_t v;
+
+    if (s->want_idx) {
+        v = 0;   /* read without a preceding index selection */
+    } else {
+        v = bu26154_read_word(s, s->cur_idx);
+    }
+    BU26154_DBG(s, "I2C R idx 0x%02x = 0x%02x (map %u)\n",
+                s->cur_idx, v, s->map);
+    s->cur_idx = (s->cur_idx + 2) & 0xff;   /* continuous read: next word */
+    return v;
+}
+
+static int bu26154_i2c_event(I2CSlave *i2c, enum i2c_event ev)
+{
+    BU26154State *s = BU26154(i2c);
+
+    switch (ev) {
+    case I2C_START_SEND:
+        s->want_idx = true;      /* next byte of this txn is the index */
+        break;
+    case I2C_START_RECV:
+        /*
+         * Read phase: the master selected the register index in the
+         * preceding write phase (which ended with I2C_FINISH).  Serve
+         * reads from cur_idx; do not expect a fresh index byte here.
+         */
+        s->want_idx = false;
+        break;
+    case I2C_FINISH:
+        s->want_idx = true;
+        break;
+    case I2C_NACK:
+    default:
+        break;
+    }
+    return 0;
+}
+
+/* ---- SAIF <-> codec frame plumbing ---- */
+
+void bu26154_dac_input(BU26154State *s, uint32_t frame)
+{
+    s->stats.dac_in_frames++;
+
+    if (!s->dac_on) {
+        s->stats.dac_dropped++;
+        return;
+    }
+    if (s->out_len + 4 > BU_RING) {
+        s->stats.dac_dropped++;   /* staging overrun: drop frame */
+        return;
+    }
+    /* Mono codec; keep the stereo container the SAIF engine uses
+     * (L << 16 | R, stored S16LE like sgtl5000). */
+    int16_t l = (int16_t)(frame >> 16);
+    int16_t r = (int16_t)(frame & 0xffff);
+    unsigned wp = (s->out_start + s->out_len) % BU_RING;
+    s->outbuf[wp] = l & 0xff;
+    s->outbuf[(wp + 1) % BU_RING] = (l >> 8) & 0xff;
+    s->outbuf[(wp + 2) % BU_RING] = r & 0xff;
+    s->outbuf[(wp + 3) % BU_RING] = (r >> 8) & 0xff;
+    s->out_len += 4;
+
+    /* No QEMU audio backend in this model yet: the staging ring is a
+     * silent sink (dac_out_frames stays 0), mirroring SGTL5000's
+     * no-audiodev fallback.  Host audio is a P1 item. */
+    if (s->dbg) {
+        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        if (now - s->last_dbg_ns > 1000000000ll) {
+            s->last_dbg_ns = now;
+            BU26154_DBG(s,
+                "dac_in=%" PRIu64 " dac_out=%" PRIu64 " drop=%" PRIu64
+                " adc_out=%" PRIu64 " inB=%" PRIu64 " und=%" PRIu64
+                " map=%u vmid=0x%02x dacpwr=0x%02x pdatt=0x%02x\n",
+                s->stats.dac_in_frames, s->stats.dac_out_frames,
+                s->stats.dac_dropped, s->stats.adc_out_frames,
+                s->stats.adc_in_bytes, s->stats.adc_underrun,
+                s->map,
+                bu_get(s, BU26154_MAP0, BU_REG_AREFPW),
+                bu_get(s, BU26154_MAP0, BU_REG_DACPW),
+                bu_get(s, BU26154_MAP0, BU_REG_PDATT));
+        }
+    }
+}
+
+uint32_t bu26154_adc_output(BU26154State *s)
+{
+    int16_t l = 0, r = 0;
+
+    s->stats.adc_out_frames++;
+    if (!s->adc_on) {
+        /* ADC/I2S-in powered down: capture clocks in silence. */
+        s->stats.adc_gated++;
+        return 0;
+    }
+    if (s->in_len >= 4) {
+        uint8_t b0 = s->inbuf[s->in_start];
+        uint8_t b1 = s->inbuf[(s->in_start + 1) % BU_RING];
+        uint8_t b2 = s->inbuf[(s->in_start + 2) % BU_RING];
+        uint8_t b3 = s->inbuf[(s->in_start + 3) % BU_RING];
+        l = (int16_t)(b0 | (b1 << 8));
+        r = (int16_t)(b2 | (b3 << 8));
+        s->in_start = (s->in_start + 4) % BU_RING;
+        s->in_len -= 4;
+    } else {
+        s->stats.adc_underrun++;
+    }
+    return ((uint32_t)(uint16_t)l << 16) | (uint16_t)r;
+}
+
+void bu26154_get_stats(BU26154State *s, BU26154Stats *st)
+{
+    *st = s->stats;
+    st->adc_pending = s->in_len;
+    st->mapcon = s->map;
+    st->sr = bu_get(s, BU26154_MAP0, BU_REG_SR);
+    st->vmicon = bu_get(s, BU26154_MAP0, BU_REG_AREFPW) & 0x03;
+    st->dac_pwr = bu_get(s, BU26154_MAP0, BU_REG_DACPW);
+    st->sp_pwr = bu_get(s, BU26154_MAP0, BU_REG_SPPW);
+    st->pdatt = bu_get(s, BU26154_MAP0, BU_REG_PDATT);
+}
+
+unsigned bu26154_debug_fill(BU26154State *s, uint32_t seed,
+                            uint32_t nframes)
+{
+    unsigned cap = BU_RING / 4;
+    unsigned n = MIN(nframes, cap);
+
+    for (unsigned i = 0; i < n; i++) {
+        uint32_t l = 0x2000 + ((seed + i) & 0x1fff);
+        uint32_t r = 0x2000 + ((seed + (i * 3u)) & 0x1fff);
+        unsigned wp = (i * 4) % BU_RING;
+
+        s->inbuf[wp] = l & 0xff;
+        s->inbuf[(wp + 1) % BU_RING] = (l >> 8) & 0xff;
+        s->inbuf[(wp + 2) % BU_RING] = r & 0xff;
+        s->inbuf[(wp + 3) % BU_RING] = (r >> 8) & 0xff;
+    }
+    s->in_start = 0;
+    s->in_len = n * 4;
+    s->stats.adc_in_bytes += n * 4;
+    return n;
+}
+
+uint8_t bu26154_get_reg(BU26154State *s, uint8_t idx)
+{
+    unsigned w = idx >> 1;
+
+    if (idx == 0x1c || idx == 0x1d) {
+        return s->map;
+    }
+    if (w >= BU26154_WORDS) {
+        return 0;
+    }
+    /* report MAP0 (the map the audio driver uses) */
+    return s->regs[BU_REG_IDX(BU26154_MAP0, w)];
+}
+
+/* ---- device lifecycle ---- */
+
+static void bu26154_realize(DeviceState *dev, Error **errp)
+{
+    BU26154State *s = BU26154(dev);
+
+    s->dbg = bu26154_debug();
+    s->last_dbg_ns = 0;
+    bu26154_update_paths(s);
+}
+
+static const Property bu26154_props[] = {
+    DEFINE_PROP_STRING("audiodev", BU26154State, audiodev),
+};
+
+static const VMStateDescription vmstate_bu26154 = {
+    .name = "bu26154",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8_ARRAY(regs, BU26154State, 3 * BU26154_WORDS),
+        VMSTATE_UINT8(map, BU26154State),
+        VMSTATE_UINT8(cur_idx, BU26154State),
+        VMSTATE_BOOL(want_idx, BU26154State),
+        VMSTATE_UINT32(out_start, BU26154State),
+        VMSTATE_UINT32(out_len, BU26154State),
+        VMSTATE_UINT32(in_start, BU26154State),
+        VMSTATE_UINT32(in_len, BU26154State),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
+static void bu26154_class_init(ObjectClass *oc, const void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(oc);
+    I2CSlaveClass *sc = I2C_SLAVE_CLASS(oc);
+
+    dc->realize = bu26154_realize;
+    device_class_set_legacy_reset(dc, bu26154_reset);
+    dc->vmsd = &vmstate_bu26154;
+    device_class_set_props(dc, bu26154_props);
+
+    sc->send = bu26154_i2c_send;
+    sc->recv = bu26154_i2c_recv;
+    sc->event = bu26154_i2c_event;
+}
+
+static const TypeInfo bu26154_types[] = {
+    {
+        .name = TYPE_BU26154,
+        .parent = TYPE_I2C_SLAVE,
+        .instance_size = sizeof(BU26154State),
+        .class_init = bu26154_class_init,
+        .abstract = false,
+    },
+};
+
+DEFINE_TYPES(bu26154_types)

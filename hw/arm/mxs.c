@@ -20,6 +20,7 @@
 #include "hw/arm/mxs_pwm.h"
 #include "hw/arm/mxs_saif.h"
 #include "hw/audio/sgtl5000.h"
+#include "hw/audio/bu26154.h"
 #include "hw/misc/mxs_bank.h"
 #include "hw/arm/boot.h"
 #include "hw/arm/machines-qom.h"
@@ -189,8 +190,10 @@ typedef struct BrainMachineState {
      */
     bool gpmi_nand;
     char *gpmi_nand_file;
-    /* Board codec: SGTL5000 created on I2C0 (address 0x0a), wired to
-     * SAIF0 (playback DAC) and SAIF1 (capture ADC). */
+    /* Board codec on I2C0: LAPIS/ROHM BU26154MUV (real CE wave device,
+     * wavedev2_BU26154.dll) at address 0x1a, wired to SAIF0 (playback
+     * DAC) and SAIF1 (capture ADC).  The pre-S97 SGTL5000 wiring came
+     * from the Linux DTS, which is not what the WinCE image drives. */
     DeviceState *sgtl5000;
     DeviceState *saif0_dev;
     DeviceState *saif1_dev;
@@ -669,19 +672,24 @@ void hmp_brain_lilo(Monitor *mon, const QDict *qdict)
 }
 
 /*
- * Analysis aids for the SGTL5000 codec (brain-i2c / brain-sgtl).
+ * Analysis aids for the board codec (brain-i2c / brain-sgtl).
  *
  * brain_i2c drives the board codec over its I2C bus directly from the
  * monitor.  It is an explicit test aid (like brain_pwrite / brain_touch):
  * it performs real I2C transactions against the emulated codec, exactly
  * as the WinCE audio driver would, so audio plumbing can be exercised
  * and measured without needing the guest to reach the pronunciation UI.
+ * The transaction format follows the codec actually wired (BU26154:
+ * 8-bit register index, even = read / odd = write address; legacy
+ * SGTL5000: 16-bit register address + 16-bit data).
  */
 void hmp_brain_i2c(Monitor *mon, const QDict *qdict)
 {
     BrainMachineState *bms;
+    DeviceState *cd;
     I2CBus *bus;
     uint16_t reg, val;
+    uint8_t addr;
     bool wr = qdict_haskey(qdict, "val");
 
     if (!mon || !current_machine) {
@@ -689,42 +697,91 @@ void hmp_brain_i2c(Monitor *mon, const QDict *qdict)
     }
     bms = BRAIN_MACHINE(current_machine);
     if (!bms->sgtl5000) {
-        monitor_printf(mon, "brain_i2c: no SGTL5000 codec attached\n");
+        monitor_printf(mon, "brain_i2c: no board codec attached\n");
         return;
     }
-    bus = I2C_BUS(qdev_get_parent_bus(bms->sgtl5000));
+    cd = bms->sgtl5000;
+    bus = I2C_BUS(qdev_get_parent_bus(cd));
+    addr = I2C_SLAVE(cd)->address;
     reg = (uint16_t)qdict_get_int(qdict, "reg") & 0xffff;
     if (wr) {
         val = (uint16_t)qdict_get_int(qdict, "val") & 0xffff;
     }
-    if (i2c_start_send(bus, 0x0a) < 0) {
-        monitor_printf(mon, "brain_i2c: codec did not ACK (addr 0x0a)\n");
-        return;
-    }
-    i2c_send(bus, reg >> 8);
-    i2c_send(bus, reg & 0xff);
-    if (wr) {
-        i2c_send(bus, val >> 8);
-        i2c_send(bus, val & 0xff);
-        i2c_end_transfer(bus);
-        monitor_printf(mon, "brain_i2c: reg 0x%04x <- 0x%04x\n", reg, val);
-    } else {
-        uint16_t r;
 
-        i2c_end_transfer(bus);
-        if (i2c_start_recv(bus, 0x0a) < 0) {
-            monitor_printf(mon, "brain_i2c: codec did not ACK on read\n");
+    if (object_dynamic_cast(OBJECT(cd), TYPE_SGTL5000)) {
+        /* SGTL5000: 16-bit register address + 16-bit data (legacy aid) */
+        if (i2c_start_send(bus, addr) < 0) {
+            monitor_printf(mon, "brain_i2c: codec did not ACK (addr 0x%02x)\n",
+                           addr);
             return;
         }
-        r = ((uint16_t)i2c_recv(bus) << 8) | i2c_recv(bus);
-        i2c_end_transfer(bus);
-        monitor_printf(mon, "brain_i2c: reg 0x%04x -> 0x%04x\n", reg, r);
+        i2c_send(bus, reg >> 8);
+        i2c_send(bus, reg & 0xff);
+        if (wr) {
+            i2c_send(bus, val >> 8);
+            i2c_send(bus, val & 0xff);
+            i2c_end_transfer(bus);
+            monitor_printf(mon, "brain_i2c: reg 0x%04x <- 0x%04x\n", reg, val);
+        } else {
+            uint16_t r;
+
+            i2c_end_transfer(bus);
+            if (i2c_start_recv(bus, addr) < 0) {
+                monitor_printf(mon,
+                               "brain_i2c: codec did not ACK on read\n");
+                return;
+            }
+            r = ((uint16_t)i2c_recv(bus) << 8) | i2c_recv(bus);
+            i2c_end_transfer(bus);
+            monitor_printf(mon, "brain_i2c: reg 0x%04x -> 0x%04x\n", reg, r);
+        }
+    } else if (object_dynamic_cast(OBJECT(cd), TYPE_BU26154)) {
+        /* BU26154: 8-bit register index; even = read, odd = write
+         * address; one 8-bit data byte per register word. */
+        uint8_t idx = reg & 0xff;
+
+        if (wr) {
+            uint8_t v = val & 0xff;
+
+            if (i2c_start_send(bus, addr) < 0) {
+                monitor_printf(mon,
+                               "brain_i2c: codec did not ACK (addr 0x%02x)\n",
+                               addr);
+                return;
+            }
+            i2c_send(bus, idx);
+            i2c_send(bus, v);
+            i2c_end_transfer(bus);
+            monitor_printf(mon, "brain_i2c: idx 0x%02x <- 0x%02x\n", idx, v);
+        } else {
+            uint8_t r;
+
+            if (i2c_start_send(bus, addr) < 0) {
+                monitor_printf(mon,
+                               "brain_i2c: codec did not ACK (addr 0x%02x)\n",
+                               addr);
+                return;
+            }
+            i2c_send(bus, idx);
+            i2c_end_transfer(bus);
+            if (i2c_start_recv(bus, addr) < 0) {
+                monitor_printf(mon,
+                               "brain_i2c: codec did not ACK on read\n");
+                return;
+            }
+            r = i2c_recv(bus);
+            i2c_end_transfer(bus);
+            monitor_printf(mon, "brain_i2c: idx 0x%02x -> 0x%02x\n", idx, r);
+        }
+    } else {
+        monitor_printf(mon, "brain_i2c: unsupported codec type\n");
     }
 }
 
 void hmp_brain_micfill(Monitor *mon, const QDict *qdict)
 {
     BrainMachineState *bms;
+    DeviceState *cd;
     uint32_t seed, n;
     unsigned done;
 
@@ -732,14 +789,22 @@ void hmp_brain_micfill(Monitor *mon, const QDict *qdict)
         return;
     }
     bms = BRAIN_MACHINE(current_machine);
-    if (!bms->sgtl5000) {
-        monitor_printf(mon, "brain_micfill: no SGTL5000 codec attached\n");
+    cd = bms->sgtl5000;
+    if (!cd) {
+        monitor_printf(mon, "brain_micfill: no board codec attached\n");
         return;
     }
     seed = (uint32_t)qdict_get_int(qdict, "seed") & 0xffff;
     n = qdict_haskey(qdict, "nframes") ?
         (uint32_t)qdict_get_int(qdict, "nframes") : 0x4000;
-    done = sgtl5000_debug_fill(SGTL5000(bms->sgtl5000), seed, n);
+    if (object_dynamic_cast(OBJECT(cd), TYPE_SGTL5000)) {
+        done = sgtl5000_debug_fill(SGTL5000(cd), seed, n);
+    } else if (object_dynamic_cast(OBJECT(cd), TYPE_BU26154)) {
+        done = bu26154_debug_fill(BU26154(cd), seed, n);
+    } else {
+        monitor_printf(mon, "brain_micfill: unsupported codec type\n");
+        return;
+    }
     monitor_printf(mon,
                    "brain_micfill: injected %u frames (seed 0x%04x) into the "
                    "ADC capture ring\n", done, seed);
@@ -782,33 +847,57 @@ void hmp_brain_saifpump(Monitor *mon, const QDict *qdict)
 void hmp_brain_sgtl(Monitor *mon, const QDict *qdict)
 {
     BrainMachineState *bms;
-    SGTL5000Stats st;
+    DeviceState *cd;
 
     if (!mon || !current_machine) {
         return;
     }
     bms = BRAIN_MACHINE(current_machine);
-    if (!bms->sgtl5000) {
-        monitor_printf(mon, "brain_sgtl: no SGTL5000 codec attached\n");
+    cd = bms->sgtl5000;
+    if (!cd) {
+        monitor_printf(mon, "brain_sgtl: no board codec attached\n");
         return;
     }
-    sgtl5000_get_stats(SGTL5000(bms->sgtl5000), &st);
-    monitor_printf(mon,
-                   "SGTL5000: dac_in=%" PRIu64 " dac_out=%" PRIu64
-                   " dac_drop=%" PRIu64 "\n"
-                   "          adc_out=%" PRIu64 " adc_inB=%" PRIu64
-                   " adc_undr=%" PRIu64 " adc_gated=%" PRIu64
-                   " adc_pend=%u\n"
-                   "          DIG_POWER=0x%04x ANA_POWER=0x%04x "
-                   "ADCDAC_CTRL=0x%04x DAC_VOL=0x%04x MIC_CTRL=0x%04x\n",
-                   st.dac_in_frames, st.dac_out_frames, st.dac_dropped,
-                   st.adc_out_frames, st.adc_in_bytes, st.adc_underrun,
-                   st.adc_gated, st.adc_pending,
-                   sgtl5000_get_reg(SGTL5000(bms->sgtl5000), 0x0002),
-                   sgtl5000_get_reg(SGTL5000(bms->sgtl5000), 0x0030),
-                   sgtl5000_get_reg(SGTL5000(bms->sgtl5000), 0x000e),
-                   sgtl5000_get_reg(SGTL5000(bms->sgtl5000), 0x0010),
-                   sgtl5000_get_reg(SGTL5000(bms->sgtl5000), 0x002a));
+    if (object_dynamic_cast(OBJECT(cd), TYPE_SGTL5000)) {
+        SGTL5000Stats st;
+
+        sgtl5000_get_stats(SGTL5000(cd), &st);
+        monitor_printf(mon,
+                       "SGTL5000: dac_in=%" PRIu64 " dac_out=%" PRIu64
+                       " dac_drop=%" PRIu64 "\n"
+                       "          adc_out=%" PRIu64 " adc_inB=%" PRIu64
+                       " adc_undr=%" PRIu64 " adc_gated=%" PRIu64
+                       " adc_pend=%u\n"
+                       "          DIG_POWER=0x%04x ANA_POWER=0x%04x "
+                       "ADCDAC_CTRL=0x%04x DAC_VOL=0x%04x MIC_CTRL=0x%04x\n",
+                       st.dac_in_frames, st.dac_out_frames, st.dac_dropped,
+                       st.adc_out_frames, st.adc_in_bytes, st.adc_underrun,
+                       st.adc_gated, st.adc_pending,
+                       sgtl5000_get_reg(SGTL5000(cd), 0x0002),
+                       sgtl5000_get_reg(SGTL5000(cd), 0x0030),
+                       sgtl5000_get_reg(SGTL5000(cd), 0x000e),
+                       sgtl5000_get_reg(SGTL5000(cd), 0x0010),
+                       sgtl5000_get_reg(SGTL5000(cd), 0x002a));
+    } else if (object_dynamic_cast(OBJECT(cd), TYPE_BU26154)) {
+        BU26154Stats st;
+
+        bu26154_get_stats(BU26154(cd), &st);
+        monitor_printf(mon,
+                       "BU26154: dac_in=%" PRIu64 " dac_out=%" PRIu64
+                       " dac_drop=%" PRIu64 "\n"
+                       "         adc_out=%" PRIu64 " adc_inB=%" PRIu64
+                       " adc_undr=%" PRIu64 " adc_gated=%" PRIu64
+                       " adc_pend=%u\n"
+                       "         MAPCON=%u SR=0x%02x VMIDCON=0x%02x "
+                       "DACPWR=0x%02x SPPWR=0x%02x PDATT=0x%02x\n",
+                       st.dac_in_frames, st.dac_out_frames, st.dac_dropped,
+                       st.adc_out_frames, st.adc_in_bytes, st.adc_underrun,
+                       st.adc_gated, st.adc_pending,
+                       st.mapcon, st.sr, st.vmicon, st.dac_pwr, st.sp_pwr,
+                       st.pdatt);
+    } else {
+        monitor_printf(mon, "brain_sgtl: unsupported codec type\n");
+    }
 }
 
 /*
@@ -1959,20 +2048,23 @@ static void brain_init(MachineState *machine)
     mxs_create_dummy("audioin", MXS_AUDIOIN_BASE, 0x4000);
     mxs_create_dummy("spdif", MXS_SPDIF_BASE, 0x2000);
     /*
-     * I2C0 carries the board codec: SGTL5000 at address 0x0a, wired as
-     * SAIF0 -> codec DAC (playback) and codec ADC -> SAIF1 (capture),
-     * per the PW-SH6 reference wiring (saif0 = I2S master for the DAC
-     * stream, saif1 = capture).  When the machine is run with an
-     * audiodev the codec is the real audio endpoint (host output for
-     * pronunciation, host mic for wave-in); without one the codec stays
-     * a register-level model (same silent result as a powered-down
-     * codec).
+     * I2C0 carries the board codec: LAPIS/ROHM BU26154MUV at address
+     * 0x1a (datasheet SAD="L" default; the WinCE wave driver is
+     * wavedev2_BU26154.dll), wired as SAIF0 -> codec DAC (playback)
+     * and codec ADC -> SAIF1 (capture).  The pre-S97 SGTL5000 wiring
+     * (0x0a) came from the Linux DTS codec node, which is disabled /
+     * not what CE drives (S97 evidence).  The SGTL5000 model remains
+     * in the tree; the audiodev forward (host audio endpoint) applies
+     * to it, while the BU26154 model is a register-level codec with a
+     * silent sink until the P1 audio E2E round adds host plumbing.
      */
     dev = qdev_new(TYPE_MXS_I2C_REAL);
     qdev_prop_set_string(dev, "name", "i2c0");
     qdev_prop_set_uint64(dev, "size", 0x2000);
-    qdev_prop_set_string(dev, "codec-type", TYPE_SGTL5000);
-    qdev_prop_set_uint8(dev, "codec-addr", 0x0a);
+    qdev_prop_set_string(dev, "codec-type", TYPE_BU26154);
+    qdev_prop_set_uint8(dev, "codec-addr", BU26154_I2C_ADDR);
+    /* Only the SGTL5000 model carries a QEMU audio backend ("audiodev"
+     * property); the BU26154 register model must not receive it. */
     if (machine->audiodev) {
         qdev_prop_set_string(dev, "codec-audiodev", machine->audiodev);
     }

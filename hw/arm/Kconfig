@@ -703,3 +703,4 @@ config MXS
     select UNIMP
     select I2C
     select SGTL5000
+    select BU26154

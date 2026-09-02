@@ -46,6 +46,7 @@
 #include "hw/arm/mxs.h"
 #include "hw/arm/mxs_saif.h"
 #include "hw/audio/sgtl5000.h"
+#include "hw/audio/bu26154.h"
 #include "hw/misc/mxs_bank.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/irq.h"
@@ -185,6 +186,42 @@ static void saif_recompute_stat(MXSSAIFState *s)
     saif_update_irq(s);
 }
 
+/*
+ * Board codec frame plumbing.  The machine can wire either codec on
+ * I2C0 (Freescale SGTL5000 from the pre-S97 Linux-DTS wiring, or the
+ * real LAPIS/ROHM BU26154 used by wavedev2_BU26154.dll); dispatch the
+ * frame exchange on the device type.
+ */
+static uint32_t saif_codec_adc_output(MXSSAIFState *s)
+{
+    DeviceState *cd = s->adc_codec;
+
+    if (!cd) {
+        return 0;
+    }
+    if (object_dynamic_cast(OBJECT(cd), TYPE_SGTL5000)) {
+        return sgtl5000_adc_output(SGTL5000(cd));
+    }
+    if (object_dynamic_cast(OBJECT(cd), TYPE_BU26154)) {
+        return bu26154_adc_output(BU26154(cd));
+    }
+    return 0;
+}
+
+static void saif_codec_dac_input(MXSSAIFState *s, uint32_t frame)
+{
+    DeviceState *cd = s->dac_codec;
+
+    if (!cd) {
+        return;
+    }
+    if (object_dynamic_cast(OBJECT(cd), TYPE_SGTL5000)) {
+        sgtl5000_dac_input(SGTL5000(cd), frame);
+    } else if (object_dynamic_cast(OBJECT(cd), TYPE_BU26154)) {
+        bu26154_dac_input(BU26154(cd), frame);
+    }
+}
+
 static void saif_rx_frame(MXSSAIFState *s)
 {
     /*
@@ -199,7 +236,7 @@ static void saif_rx_frame(MXSSAIFState *s)
         uint32_t frame = 0;
 
         if (s->adc_codec) {
-            frame = sgtl5000_adc_output(SGTL5000(s->adc_codec));
+            frame = saif_codec_adc_output(s);
         }
         s->fifo[(0 + s->fifo_len) % SAIF_FIFO_LEN] = frame;
         s->fifo_len++;
@@ -236,7 +273,7 @@ static void saif_timer(void *opaque)
             st |= STAT_FIFO_UNDERFLOW_IRQ;
         }
         if (s->dac_codec) {
-            sgtl5000_dac_input(SGTL5000(s->dac_codec), frame);
+            saif_codec_dac_input(s, frame);
         }
     }
     s->regs[SAIF_STAT >> 4] = st;
