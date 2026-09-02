@@ -54,6 +54,31 @@ static const int brain_kbd_col_pins[BRAIN_KBD_COLS] = { 0, 1, 2, 3, 4, 6, 7 };
 #define BRAIN_KBD_ROW6_GPIO4_PIN   8
 
 /*
+ * MRSensor (edna2_MRSensor.dll) lines on GPIO0 pins 6 and 7.
+ *
+ * Reverse-engineering evidence (S97-B, nk_full.bin + boot trace):
+ *   - edna2_MRSensor.dll imports only DDKGpioClearIntrPin/Config/
+ *     ReadDataPin from cspddk.dll (no I2C / LRADC / EDNA2 mailbox).
+ *   - HKLM\Drivers\BuiltIn\MRSensor has only Order/Index/Prefix/Dll
+ *     (no GPIO/IRQ values) -- the pins are hard-coded in the driver.
+ *   - Boot trace (MXS_TRACE=pinctrl + BRAIN_BWATCH on the cspddk GPIO
+ *     workers): between the "BSPBacklightInitialize()" and the
+ *     "MRS_Init() status1 = 1, status2 = 1" prints the MRSensor driver
+ *     (caller context pointers r4/r5/r1 all inside 0xc0893xxx = the
+ *     DLL's own data) clears DOE0 for bits 0x40/0x80, arms
+ *     IRQEN0/IRQLEVEL0/IRQPOL0 for bits 6 and 7, reads DIN0 (0x900)
+ *     twice and the kernel then sets PIN2IRQ0 bits 6 and 7.  The two
+ *     configured lines match the two "status" results MRS_Init prints.
+ *
+ * So the device is a two-line sensor read through GPIO0 pins 6/7 with a
+ * level IRQ.  On the real board the sensor part is not identifiable
+ * from public material (no DT node, no teardown data); this model
+ * drives the two GPIO lines and lets the guest's level-IRQ path fire.
+ * Lines are high at rest (matches the boot DIN0 read 0xed00ffe0).
+ */
+#define BRAIN_MRS_GPIO0_PINS   ((1u << 6) | (1u << 7))
+
+/*
  * Guest walks GPIO4 columns from a poll thread.  A one-timeslice host
  * tap is gone before the walk.  2.5 s virtual hold is the S22-verified
  * value: with it `sendkey y` reaches the WCEPRJ [Y] dialog answer on
@@ -119,6 +144,8 @@ typedef struct BrainKbdState {
     bool mod_alt;  /* host Alt held (chord prefix, never forwarded) */
     uint32_t *touchkey_state;   /* points at bms->edna2_touchkey */
     uint32_t *touchkey_mb;      /* points at mailbox +0x404 word */
+    uint32_t mrs_low;           /* MRSensor lines pulled low on GPIO0
+                                 * (only BRAIN_MRS_GPIO0_PINS bits used) */
 } BrainKbdState;
 
 OBJECT_DECLARE_SIMPLE_TYPE(BrainKbdState, BRAIN_KBD)
@@ -486,8 +513,9 @@ static void brain_kbd_refresh(void *opaque)
     mxs_pinctrl_set_din(s->pinctrl, 2, din2);
     mxs_pinctrl_set_din(s->pinctrl, 4, din4);
     mxs_pinctrl_set_din(s->pinctrl, 0,
-                        s->power ? 0xffffffffu
-                                 : (0xffffffffu & ~(1u << BRAIN_KBD_POWER_PIN)));
+                        ((s->power ? 0xffffffffu
+                                   : (0xffffffffu & ~(1u << BRAIN_KBD_POWER_PIN)))
+                         & ~(s->mrs_low & BRAIN_MRS_GPIO0_PINS)));
 
     if (brain_kbd_debug()) {
         fprintf(stderr, "[brain-kbd] refresh driven_cols=%02x doe4=%08x "
@@ -586,6 +614,30 @@ void brain_kbd_set_touchkey_state(DeviceState *kbd, uint32_t *state_ptr,
     s->touchkey_mb = mb_word;
 }
 
+/*
+ * MRSensor GPIO lines.  `levels` is a 2-bit mask: bit 0 = GPIO0 pin 6,
+ * bit 1 = GPIO0 pin 7, 1 = line high, 0 = line low.  A change is pushed
+ * to the pinctrl DIN inputs, where the guest's level/edge IRQ detectors
+ * (armed by edna2_MRSensor's ISR setup) latch IRQSTAT and raise the
+ * GPIO0 bank interrupt.
+ */
+void brain_kbd_set_mrs(DeviceState *kbd, uint32_t levels)
+{
+    BrainKbdState *s = BRAIN_KBD(kbd);
+
+    s->mrs_low = (~levels & 0x3) << 6;
+    if (s->pinctrl) {
+        brain_kbd_refresh(s);
+    }
+}
+
+uint32_t brain_kbd_get_mrs(DeviceState *kbd)
+{
+    BrainKbdState *s = BRAIN_KBD(kbd);
+
+    return (~(s->mrs_low >> 6)) & 0x3;
+}
+
 static void brain_kbd_touchkey_update(BrainKbdState *s, QKeyCode qcode,
                                       bool down)
 {
@@ -660,6 +712,10 @@ static void brain_kbd_reset(DeviceState *dev)
         timer_del(s->attn_timer);
     }
     s->attn = false;
+    s->mrs_low = 0;             /* MRSensor lines high at rest */
+    if (s->pinctrl) {
+        brain_kbd_refresh(s);
+    }
 }
 
 static void brain_kbd_init(Object *obj)
@@ -676,11 +732,12 @@ static void brain_kbd_init(Object *obj)
 
 static const VMStateDescription vmstate_brain_kbd = {
     .name = "brain-keyboard",
-    .version_id = 3,
-    .minimum_version_id = 3,
+    .version_id = 4,
+    .minimum_version_id = 4,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT8_ARRAY(want, BrainKbdState, BRAIN_KBD_COLS),
         VMSTATE_UINT8_ARRAY(state, BrainKbdState, BRAIN_KBD_COLS),
+        VMSTATE_UINT32(mrs_low, BrainKbdState),
         VMSTATE_END_OF_LIST()
     }
 };

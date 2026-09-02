@@ -1172,6 +1172,38 @@ void hmp_brain_mbtrace(Monitor *mon, const QDict *qdict)
 }
 
 /*
+ * brain_mrs <levels> -- set the MRSensor GPIO lines (edna2_MRSensor.dll).
+ *
+ * levels is a 2-bit value: bit0 = GPIO0 pin 6, bit1 = GPIO0 pin 7,
+ * 1 = high, 0 = low.  Both lines default high (matches the boot DIN0
+ * read 0xed00ffe0); pulling a line low and back high is what drives the
+ * level-IRQ detectors the MRSensor driver arms in MRS_Init.  With no
+ * argument the current state is printed.
+ */
+void hmp_brain_mrs(Monitor *mon, const QDict *qdict)
+{
+    BrainMachineState *bms;
+
+    if (!mon || !current_machine) {
+        return;
+    }
+    bms = BRAIN_MACHINE(current_machine);
+    if (!bms->kbd) {
+        monitor_printf(mon, "brain_mrs: no keyboard/MRS GPIO device\n");
+        return;
+    }
+    if (qdict_haskey(qdict, "levels")) {
+        uint32_t levels = (uint32_t)qdict_get_int(qdict, "levels") & 0x3;
+
+        brain_kbd_set_mrs(bms->kbd, levels);
+    }
+    monitor_printf(mon, "mrs levels=%u (GPIO0 pin6=%u pin7=%u)\n",
+                   brain_kbd_get_mrs(bms->kbd),
+                   (brain_kbd_get_mrs(bms->kbd) >> 0) & 1,
+                   (brain_kbd_get_mrs(bms->kbd) >> 1) & 1);
+}
+
+/*
  * Dump the Brain bring-up runtime statistics (see include/brain_stats.h):
  * TB translation health, deferred-SCTLR quirk application sites,
  * exception mix, ICOLL acknowledgement matching and timer expiry.

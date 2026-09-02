@@ -429,6 +429,17 @@ ERST
         .cmd        = hmp_brain_mbtrace,
     },
 
+    {
+        .name       = "brain_mrs",
+        .args_type  = "levels:l?",
+        .params     = "[levels]",
+        .help       = "set MRSensor GPIO0 lines (edna2_MRSensor.dll): "
+                      "levels bit0 = GPIO0 pin 6, bit1 = GPIO0 pin 7, "
+                      "1 = high, 0 = low (default both high); no "
+                      "argument prints the current state",
+        .cmd        = hmp_brain_mrs,
+    },
+
 SRST
 ``brain_trace`` [``on``|``off``]
   Toggle live tracing of every MXS MMIO register access to stderr,

@@ -203,3 +203,10 @@ DeviceState *mxs_i2c_codec_device(DeviceState *dev);
 void brain_kbd_set_touchkey_state(DeviceState *kbd, uint32_t *state_ptr,
                                  uint32_t *mb_word);
 void brain_kbd_edna2_pulse_ext(DeviceState *kbd);
+
+/*
+ * MRSensor GPIO lines (edna2_MRSensor.dll): GPIO0 pins 6/7, 2-bit
+ * `levels` (bit0=pin6, bit1=pin7, 1=high).  Default 3 (both high).
+ */
+void brain_kbd_set_mrs(DeviceState *kbd, uint32_t levels);
+uint32_t brain_kbd_get_mrs(DeviceState *kbd);
