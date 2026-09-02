@@ -2072,7 +2072,13 @@ static void brain_init(MachineState *machine)
 
     /* Blocks we only need to swallow register accesses for. */
     mxs_create_dummy("hsadc", MXS_HSADC_BASE, 0x2000);
-    mxs_create_dummy("perfmon", MXS_PERFMON_BASE, 0x2000);
+    /*
+     * PERFMON: the AXI performance monitor (RM chapter 21).  Real i.MX28
+     * block; hw/misc/mxs_perfmon.c models the register bank, the RUN
+     * gating, the self-clearing SNAP/CLR controls and a live cycle count.
+     */
+    mxs_create_simple(TYPE_MXS_PERFMON, MXS_PERFMON_BASE, icoll,
+                      MXS_IRQ_PERFMON);
     /*
      * BCH ECC engine (0x8000A000) and GPMI NAND controller
      * (0x8000C000).  Both hang off ICOLL input 41 (the i.MX28 DTS

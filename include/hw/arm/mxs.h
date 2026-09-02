@@ -84,6 +84,7 @@
 #define MXS_IRQ_TIMER3      51
 #define MXS_IRQ_RTC_1MSEC   28
 #define MXS_IRQ_RTC_ALARM   29
+#define MXS_IRQ_PERFMON     27
 #define MXS_IRQ_DCP_VMI     52   /* DCP channel 0 (virtual memory page copy) */
 #define MXS_IRQ_DCP         53   /* DCP channels 1..3 and CSC */
 #define MXS_IRQ_DCP_SECURE  54
@@ -127,6 +128,7 @@
 #define TYPE_MXS_USBCTRL    "mxs-usbctrl"
 #define TYPE_MXS_DUMMY      "mxs-dummy"
 #define TYPE_MXS_DCP        "mxs-dcp"
+#define TYPE_MXS_PERFMON    "mxs-perfmon"
 #define TYPE_MXS_PINCTRL    "mxs-pinctrl"
 #define TYPE_MXS_APBH       "mxs-apbh"
 #define TYPE_MXS_APBX       "mxs-apbx"
