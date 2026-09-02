@@ -170,3 +170,4 @@ system_ss.add(when: 'CONFIG_MXS', if_true: files('mxs_syscon.c', 'mxs_pwm.c', 'm
 system_ss.add(when: 'CONFIG_MXS', if_true: files('mxs_bchlib.c', 'mxs_bch.c', 'mxs_gpmi.c'))
 system_ss.add(when: 'CONFIG_MXS', if_true: files('mxs_dcp.c'))
 system_ss.add(when: 'CONFIG_MXS', if_true: files('mxs_perfmon.c'))
+system_ss.add(when: 'CONFIG_MXS', if_true: files('mxs_rob.c', 'mxs_dflpt.c'))

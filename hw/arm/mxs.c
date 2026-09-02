@@ -22,6 +22,8 @@
 #include "hw/audio/sgtl5000.h"
 #include "hw/audio/bu26154.h"
 #include "hw/misc/mxs_bank.h"
+#include "hw/misc/mxs_rob.h"
+#include "hw/misc/mxs_dflpt.h"
 #include "hw/arm/boot.h"
 #include "hw/arm/machines-qom.h"
 #include "qemu/option.h"
@@ -197,6 +199,7 @@ typedef struct BrainMachineState {
     DeviceState *sgtl5000;
     DeviceState *saif0_dev;
     DeviceState *saif1_dev;
+    DeviceState *digctl_dev;
     struct arm_boot_info boot_info;
 } BrainMachineState;
 
@@ -1890,8 +1893,9 @@ static void brain_init(MachineState *machine)
     /* system control blocks */
     mxs_create_simple(TYPE_MXS_CLKCTRL, MXS_CLKCTRL_BASE, NULL, -1);
     mxs_create_named(TYPE_MXS_POWER, "power", MXS_POWER_BASE, 0x10000);
-    mxs_create_simple(TYPE_MXS_DIGCTL, MXS_DIGCTL_BASE, icoll,
-                      MXS_IRQ_DIGCTL);
+    dev = mxs_create_simple(TYPE_MXS_DIGCTL, MXS_DIGCTL_BASE, icoll,
+                            MXS_IRQ_DIGCTL);
+    bms->digctl_dev = dev;
     mxs_create_simple(TYPE_MXS_OCOTP, MXS_OCOTP_BASE, NULL, -1);
     mxs_create_simple(TYPE_MXS_RTC, MXS_RTC_BASE, icoll, MXS_IRQ_RTC_1MSEC);
 
@@ -2070,8 +2074,13 @@ static void brain_init(MachineState *machine)
     qdev_connect_gpio_out_named(bms->lradc, "panel-wake", 0,
                                 qdev_get_gpio_in_named(dev, "panel-wake", 0));
 
-    /* Blocks we only need to swallow register accesses for. */
-    mxs_create_dummy("hsadc", MXS_HSADC_BASE, 0x2000);
+    /*
+     * HSADC: High-Speed ADC (RM ch.37).  Real register file model in
+     * hw/misc/mxs_rob.c; no conversion datapath, so the interrupt line
+     * is wired (ICOLL 13) but never asserted.
+     */
+    mxs_create_named_irq(TYPE_MXS_HSADC, "hsadc", MXS_HSADC_BASE, 0x2000,
+                         icoll, MXS_IRQ_HSADC);
     /*
      * PERFMON: the AXI performance monitor (RM chapter 21).  Real i.MX28
      * block; hw/misc/mxs_perfmon.c models the register bank, the RUN
@@ -2141,8 +2150,15 @@ static void brain_init(MachineState *machine)
                        qdev_get_gpio_in(icoll, MXS_IRQ_DCP_VMI));
     mxs_create_simple(TYPE_MXS_PXP, MXS_PXP_BASE, icoll, MXS_IRQ_PXP);
     mxs_create_dummy("axi-ahb0", MXS_AXI_AHB0_BASE, 0x2000);
-    mxs_create_dummy("can0", MXS_CAN0_BASE, 0x2000);
-    mxs_create_dummy("can1", MXS_CAN1_BASE, 0x2000);
+    /*
+     * FlexCAN controllers (RM ch.25).  Real register file model
+     * (hw/misc/mxs_rob.c) with the full MBn / RXIMRn RAM arrays; no
+     * frame datapath, so ICOLL 8/9 are wired but never asserted.
+     */
+    mxs_create_named_irq(TYPE_MXS_FLEXCAN, "can0", MXS_CAN0_BASE, 0x2000,
+                         icoll, MXS_IRQ_CAN0);
+    mxs_create_named_irq(TYPE_MXS_FLEXCAN, "can1", MXS_CAN1_BASE, 0x2000,
+                         icoll, MXS_IRQ_CAN1);
     mxs_create_dummy("simdbg", MXS_SIMDBG_BASE, 0x4000);
     /* SAIF FIFO/IRQ lines per the i.MX28 interrupt table */
     DeviceState *saif0, *saif1;
@@ -2157,7 +2173,12 @@ static void brain_init(MachineState *machine)
     bms->saif1_dev = saif1;
     mxs_create_dummy("audioout", MXS_AUDIOOUT_BASE, 0x4000);
     mxs_create_dummy("audioin", MXS_AUDIOIN_BASE, 0x4000);
-    mxs_create_dummy("spdif", MXS_SPDIF_BASE, 0x2000);
+    /*
+     * SPDIF transmitter (RM ch.36).  Real register file model; no frame
+     * generation, so ICOLL 45 (SPDIF error) is wired but never asserted.
+     */
+    mxs_create_named_irq(TYPE_MXS_SPDIF, "spdif", MXS_SPDIF_BASE, 0x2000,
+                         icoll, MXS_IRQ_SPDIF);
     /*
      * I2C0 carries the board codec: LAPIS/ROHM BU26154MUV at address
      * 0x1a (datasheet SAD="L" default; the WinCE wave driver is
@@ -2198,9 +2219,47 @@ static void brain_init(MachineState *machine)
     mxs_create_named(TYPE_MXS_USBPHY, "usbphy1", MXS_USBPHY1_BASE, 0x2000);
     mxs_create_usb("usbctrl0", MXS_USBCTRL0_BASE, icoll, MXS_IRQ_USB0);
     mxs_create_usb("usbctrl1", MXS_USBCTRL1_BASE, icoll, MXS_IRQ_USB1);
-    mxs_create_dummy("dflpt", MXS_DFLPT_BASE, 0x20000);
-    mxs_create_dummy("emi", MXS_EMI_BASE, 0x10000);
-    mxs_create_dummy("enet", MXS_ENET_BASE, 0x10000);
+    /*
+     * DFLPT: Default First-Level Page Table (RM ch.3).  Real model in
+     * hw/misc/mxs_dflpt.c; the 16 movable PTEs read their LOC/SPAN/DIS
+     * binding from the DIGCTL HW_DIGCTL_MPTEn_LOC registers.
+     */
+    {
+        DeviceState *dflpt = qdev_new(TYPE_MXS_DFLPT);
+
+        qdev_prop_set_string(dflpt, "name", "dflpt");
+        mxs_dflpt_set_digctl(dflpt, bms->digctl_dev);
+        sysbus_realize_and_unref(SYS_BUS_DEVICE(dflpt), &error_fatal);
+        sysbus_mmio_map(SYS_BUS_DEVICE(dflpt), 0, MXS_DFLPT_BASE);
+    }
+    /*
+     * DRAM controller (EMI, RM ch.14, 0x800E0000).  Real register file
+     * model; no DDR command sequencing, so ICOLL 32 (EMI error) is wired
+     * but never asserted.
+     */
+    mxs_create_named_irq(TYPE_MXS_DRAM, "dram", MXS_EMI_BASE, 0x10000,
+                         icoll, MXS_IRQ_EMI);
+    /*
+     * Ethernet: MAC0/MAC1 (FEC, RM ch.26) and the 3-port switch (RM
+     * ch.29).  Real register file models; no packet datapath, so the
+     * ICOLL lines (switch 100, MAC0 101, MAC1 102, 1588 103/104) are
+     * wired but never asserted.
+     */
+    {
+        DeviceState *mac;
+
+        mac = mxs_create_named_irq(TYPE_MXS_ENET, "enet0", MXS_ENET_BASE,
+                                   0x4000, icoll, MXS_IRQ_ENET_MAC0);
+        sysbus_connect_irq(SYS_BUS_DEVICE(mac), 1,
+                           qdev_get_gpio_in(icoll, MXS_IRQ_ENET_MAC0_1588));
+        mac = mxs_create_named_irq(TYPE_MXS_ENET, "enet1",
+                                   MXS_ENET_MAC1_BASE, 0x4000, icoll,
+                                   MXS_IRQ_ENET_MAC1);
+        sysbus_connect_irq(SYS_BUS_DEVICE(mac), 1,
+                           qdev_get_gpio_in(icoll, MXS_IRQ_ENET_MAC1_1588));
+    }
+    mxs_create_named_irq(TYPE_MXS_ENET_SWI, "enet-swi", MXS_ENET_SWI_BASE,
+                         0x8000, icoll, MXS_IRQ_ENET_SWI);
 
     /*
      * If the user passed -kernel / -dtb / -initrd / -append we let

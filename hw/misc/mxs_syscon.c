@@ -12,6 +12,7 @@
 #include "qemu/timer.h"
 #include "hw/arm/mxs.h"
 #include "hw/misc/mxs_bank.h"
+#include "hw/misc/mxs_syscon.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/irq.h"
 #include "hw/core/qdev-properties.h"
@@ -152,6 +153,13 @@ OBJECT_DECLARE_SIMPLE_TYPE(MXSSysconState, MXS_SYSCON)
 #define DIG_HCLKCOUNT       0x2
 #define DIG_MICROSECONDS    0xc
 #define DIG_CHIPID          0x31
+/*
+ * Default First-Level Page Table Movable PTE Locator registers
+ * (HW_DIGCTL_MPTE0_LOC .. HW_DIGCTL_MPTE15_LOC, DIGCTL base + 0x500 +
+ * 4*n, RM 19.4.50-65).  Each holds DIS(31) | RSVD1(30:27) |
+ * SPAN(26:24) | RSVD0(23:12) | LOC(11:0).  Reset value is n.
+ */
+#define DIG_MPTE0           0x50
 
 /* OCOTP */
 #define OCOTP_CTRL          0x0
@@ -419,6 +427,7 @@ static const MemoryRegionOps mxs_syscon_ops = {
 static void mxs_syscon_reset(DeviceState *dev)
 {
     MXSSysconState *s = MXS_SYSCON(dev);
+    int i;
 
     memset(s->regs, 0, sizeof(s->regs));
     s->time_base = qemu_clock_get_us(QEMU_CLOCK_VIRTUAL);
@@ -469,6 +478,10 @@ static void mxs_syscon_reset(DeviceState *dev)
         break;
     case MXS_KIND_DIGCTL:
         s->regs[DIG_CTRL]      = 0x00000000;
+        /* HW_DIGCTL_MPTE<n>_LOC reset value is n (RM 3.2) */
+        for (i = 0; i < 16; i++) {
+            s->regs[DIG_MPTE0 + i] = i;
+        }
         break;
     case MXS_KIND_RTC:
         s->regs[RTC_STAT]      = RTC_STAT_PRESENT;
@@ -607,3 +620,17 @@ static const TypeInfo mxs_syscon_types[] = {
 };
 
 DEFINE_TYPES(mxs_syscon_types)
+
+uint32_t mxs_digctl_mpte_loc(DeviceState *digctl, unsigned n)
+{
+    MXSSysconState *s;
+
+    if (!digctl || n >= 16) {
+        return 0;
+    }
+    s = MXS_SYSCON(digctl);
+    if (s->kind != MXS_KIND_DIGCTL) {
+        return 0;
+    }
+    return s->regs[DIG_MPTE0 + n];
+}

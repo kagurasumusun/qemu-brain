@@ -69,6 +69,8 @@
 #define MXS_DFLPT_BASE      0x800C0000
 #define MXS_EMI_BASE        0x800E0000
 #define MXS_ENET_BASE       0x800F0000
+#define MXS_ENET_MAC1_BASE  0x800F4000
+#define MXS_ENET_SWI_BASE   0x800F8000
 
 /* --------------------------------------------------------------------- */
 /* Interrupt numbers (ICOLL inputs)                                      */
@@ -78,6 +80,16 @@
 #define MXS_IRQ_PXP         39
 #define MXS_IRQ_LCDIF       38
 #define MXS_IRQ_DUART       47
+#define MXS_IRQ_CAN0        8
+#define MXS_IRQ_CAN1        9
+#define MXS_IRQ_HSADC       13
+#define MXS_IRQ_EMI         32   /* DRAM controller error interrupt */
+#define MXS_IRQ_SPDIF       45
+#define MXS_IRQ_ENET_SWI    100  /* Ethernet switch */
+#define MXS_IRQ_ENET_MAC0   101
+#define MXS_IRQ_ENET_MAC1   102
+#define MXS_IRQ_ENET_MAC0_1588 103
+#define MXS_IRQ_ENET_MAC1_1588 104
 #define MXS_IRQ_TIMER0      48
 #define MXS_IRQ_TIMER1      49
 #define MXS_IRQ_TIMER2      50
@@ -136,6 +148,13 @@
 #define TYPE_MXS_GPMI       "mxs-gpmi"
 #define TYPE_MXS_SSP        "mxs-ssp"
 #define TYPE_MXS_LCDIF      "mxs-lcdif"
+#define TYPE_MXS_HSADC      "mxs-hsadc"
+#define TYPE_MXS_SPDIF      "mxs-spdif"
+#define TYPE_MXS_DRAM       "mxs-dram"
+#define TYPE_MXS_FLEXCAN    "mxs-flexcan"
+#define TYPE_MXS_ENET       "mxs-enet"
+#define TYPE_MXS_ENET_SWI   "mxs-enet-swi"
+#define TYPE_MXS_DFLPT      "mxs-dflpt"
 /*
  * The panel's GRAM is what a finger is on top of: convert a normalised
  * absolute input axis into a GRAM coordinate.  Returns false if there is no

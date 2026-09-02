@@ -128,6 +128,19 @@ static inline void mxs_trace_access(const char *name, bool write,
             (unsigned)mxs_trace_guest_pc());
 }
 
+/*
+ * Word-addressed blocks (DRAM/EMI, FlexCAN, FEC, switch, DFLPT) have no
+ * SET/CLR/TOG aliases, so MXS_BANK_OP(offset) would mislabel their plain
+ * 32-bit writes.  Use this variant for those blocks.
+ */
+static inline void mxs_trace_access_word(const char *name, bool write,
+                                         hwaddr offset, uint32_t value)
+{
+    fprintf(stderr, "[mxs] %-8s %s +0x%03x %s 0x%08x pc=0x%08x\n", name,
+            write ? "W" : "R", (unsigned)offset, write ? "=" : "->", value,
+            (unsigned)mxs_trace_guest_pc());
+}
+
 static inline uint32_t mxs_bank_sftrst(uint32_t old, uint32_t new_val)
 {
     if ((new_val & MXS_SFTRST_BIT) && !(old & MXS_SFTRST_BIT)) {
