@@ -68,6 +68,15 @@
 #define LRADC_MAX_VALUE     4095
 
 /*
+ * A pen release is reported as "still down at the release position" for
+ * this many conversion bursts before the plate goes open.  The touchraw
+ * worker (0xc06c1ef4) takes three DELAY-triggered phases per sample, so
+ * three bursts cover one full read cycle; four leave headroom for a
+ * release that lands in the middle of the burst the driver armed.
+ */
+#define LRADC_LIFT_BURSTS   4
+
+/*
  * Plate counts the PW-SH6 resistive digitiser presents to the LRADC.
  *
  * These are hardware constants of the panel, measured off the unit's own
@@ -175,8 +184,17 @@ typedef struct MXSLradcState {
     enum {
         MXS_LRADC_PEN_UP = 0,       /* plate open */
         MXS_LRADC_PEN_DOWN,         /* finger on the glass, re-latch position */
-        MXS_LRADC_PEN_LIFTING       /* report the release position once */
+        MXS_LRADC_PEN_LIFTING       /* report the release position, then open */
     } pen_state;
+
+    /*
+     * Conversion bursts still to report the release position as "down"
+     * while in PEN_LIFTING.  See mxs_lradc_run_start(): a press whose
+     * down edge lands between two of the driver's sample bursts must
+     * still be observable -- real silicon latches the press in the
+     * channel data registers -- or a quick tap is swallowed.
+     */
+    int lift_bursts;
 
     uint32_t loop_count[4];         /* conversions left per DELAY channel */
     int64_t due_ns[4];              /* conversion due time, 0 = none */
@@ -304,14 +322,16 @@ static uint32_t mxs_lradc_sample(MXSLradcState *s, int ch, uint32_t trigger)
     down = s->run_valid ? s->run_down : s->touch_down;
 
     /*
-     * The latch is per *burst*: it exists so that the three samples one read
-     * takes are consistent (the worker's jitter filter rejects a read whose
-     * samples disagree), but the next burst must see the finger where it is
-     * now.  Keeping it alive across bursts froze a held finger at its press
-     * position -- measured as exactly the "slide does nothing" symptom
-     * (runs/acc11, acc12 drag: 9 motion positions produced one delivered x).
+     * The latch is per *burst*: every channel converted in one burst sees the
+     * same finger position, so the three samples one read takes are consistent
+     * (the worker's jitter filter rejects a read whose samples disagree).  It
+     * is re-armed at the next burst, so a held finger is re-sampled where it is
+     * now rather than frozen at its press position.  The latch is released by
+     * mxs_lradc_convert() once the burst has converted all its channels --
+     * clearing it here, before the remaining channels were read, made the
+     * first channel of a burst report the press while the rest reported the
+     * open plate, which the jitter filter then rejected outright.
      */
-    s->run_valid = false;
 
     /*
      * The UI delivers the finger as a normalised position over the whole
@@ -401,12 +421,19 @@ static void mxs_lradc_run_start(MXSLradcState *s, bool force)
         /*
          * The pen lifted before (or while) the driver was sampling.  Hand out
          * the release position as the transitional sample the worker's jitter
-         * filter expects, exactly once, then return to the open-plate state.
+         * filter expects, and keep handing it out -- still flagged down -- for
+         * LRADC_LIFT_BURSTS bursts, then return to the open-plate state.  A
+         * quick tap's down edge otherwise falls between two of the driver's
+         * bursts and the read that runs after the release sees an open plate,
+         * i.e. the press is swallowed entirely (measured: instant tap -> 0
+         * conversions, held tap -> hundreds).
          */
         s->run_x = s->last_x;
         s->run_y = s->last_y;
         s->run_down = true;
-        s->pen_state = MXS_LRADC_PEN_UP;
+        if (s->lift_bursts > 0 && --s->lift_bursts == 0) {
+            s->pen_state = MXS_LRADC_PEN_UP;
+        }
         break;
     default:
         s->run_x = s->touch_x;
@@ -443,6 +470,9 @@ static void mxs_lradc_convert(MXSLradcState *s, uint32_t channels)
                                 s->touch_x, s->touch_y,
                                 qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
     }
+    /* the burst has converted every channel it was going to: release the
+     * latch so the next burst samples the finger where it is now */
+    s->run_valid = false;
     mxs_lradc_update_irq(s);
 }
 
@@ -696,8 +726,11 @@ static void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
         s->last_x = s->touch_x;
         s->last_y = s->touch_y;
         /* deliver the transitional sample from the *next* burst, whenever
-         * that is -- including one armed long after the release */
+         * that is -- including one armed long after the release -- and keep
+         * it flagged down for LRADC_LIFT_BURSTS bursts so a quick tap is
+         * not lost between the driver's sampling windows */
         s->pen_state = MXS_LRADC_PEN_LIFTING;
+        s->lift_bursts = LRADC_LIFT_BURSTS;
     } else if (down) {
         s->pen_state = MXS_LRADC_PEN_DOWN;
     }
@@ -811,6 +844,7 @@ static void mxs_lradc_reset(DeviceState *dev)
     }
     s->touch_down = false;
     s->pen_state = MXS_LRADC_PEN_UP;
+    s->lift_bursts = 0;
     s->run_valid = false;
 }
 
