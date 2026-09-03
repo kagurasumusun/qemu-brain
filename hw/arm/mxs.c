@@ -1621,8 +1621,9 @@ static void brain_edna2_mb_write(void *opaque, hwaddr offset, uint64_t value,
     memcpy(bms->edna2_mb + offset, &value, size);
     if (brain_mb_trace_live) {
         fprintf(stderr, "[edna2-mb] %lld W +0x%" HWADDR_PRIx
-                " <- 0x%08" PRIx64 "\n",
-                (long long)g_get_real_time(), offset, value);
+                " <- 0x%08" PRIx64 " pc=0x%08x\n",
+                (long long)g_get_real_time(), offset, value,
+                (unsigned)mxs_trace_guest_pc());
     }
 
     /* Doorbell: the guest kicks the MCU by writing 1 to +0x3C. */
@@ -2336,6 +2337,12 @@ static void brain_init(MachineState *machine)
     {
         const char *bw = getenv("BRAIN_BWATCH");
         const char *ww = getenv("BRAIN_WATCH");
+        const char *mt = getenv("BRAIN_MBTRACE");
+
+        if (mt && *mt && *mt != '0') {
+            brain_mb_trace_live = true;
+            fprintf(stderr, "[brain-mbtrace] mailbox trace ON (env)\n");
+        }
 
         if (bw && *bw) {
             char *dup = g_strdup(bw);
