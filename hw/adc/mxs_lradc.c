@@ -141,6 +141,9 @@
 #define BRAIN_PLATE_Y_AT_PIC480 211     /* and one pixel past the bottom edge */
 #define BRAIN_PLATE_X_SPAN      800      /* picture columns the X law spans */
 #define BRAIN_PLATE_Y_SPAN      480      /* picture rows the Y law spans */
+#define BRAIN_TOUCHKEY_STRIP_X0 800      /* console column where the strip
+                                          * touchkey band starts */
+#define BRAIN_TOUCHKEY_STRIP_H  480      /* strip pad rows = panel height */
 
 typedef struct MXSLradcState {
     SysBusDevice parent_obj;
@@ -159,6 +162,9 @@ typedef struct MXSLradcState {
     int touch_y;
     bool touch_down;
     int last_x, last_y;             /* transitional pen-up sample */
+    /* right-edge touchkey strip state (see mxs_lradc_set_touch) */
+    bool strip_active;              /* current touch is on the strip */
+    int  strip_index;               /* touchkey pad pressed, -1 = none */
 
     /*
      * A DELAY kick arms LOOP_COUNT further conversions; on silicon the
@@ -205,6 +211,17 @@ typedef struct MXSLradcState {
      * panel attached the axis range is taken as the calibrated span.
      */
     DeviceState *panel;
+
+    /*
+     * The Brain keyboard (TYPE_BRAIN_KBD) owns the EDNA2 MCU touchkey
+     * scanner.  A touch landing on the right-edge strip (console x >=
+     * BRAIN_TOUCHKEY_STRIP_X0) is a touchkey press, not plate input: the
+     * resistive plate's factory calibration ends one column short of the
+     * strip, so the press is routed to the keyboard device, which posts
+     * the pad to mailbox +0x404 and raises the MCU attention line.
+     * Optional: without it the strip is inert.
+     */
+    DeviceState *kbd;
 
     uint32_t batt_value;
     uint32_t vddio_value;
@@ -707,9 +724,85 @@ static const MemoryRegionOps mxs_lradc_ops = {
  * QMP input-send-event -- arrives through the device's input handler, so the
  * model state is the same whichever front end was used.
  */
+/* Wire the keyboard MCU device into the strip router.  Called by the
+ * board after both devices exist (the keyboard is created after the
+ * LRADC in mxs.c). */
+void mxs_lradc_set_touchkey_kbd(DeviceState *dev, DeviceState *kbd)
+{
+    MXSLradcState *s = MXS_LRADC(dev);
+
+    s->kbd = kbd;
+}
+
 static void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
 {
     MXSLradcState *s = MXS_LRADC(dev);
+    int px = -1, py = -1;
+    bool in_strip;
+
+    /*
+     * Right-edge touchkey strip.  On the real Brain the capacitive
+     * touchkey pads sit along the panel's right edge, the 54-column band
+     * from console x = 800 to 853: the resistive plate's factory
+     * calibration ends at x' = 799 (raw span 888..2961), so a touch in
+     * this band is not plate input but a key for the EDNA2 MCU touchkey
+     * scanner, which posts the pressed pad to mailbox +0x404 and raises
+     * the attention line.  The console can deliver the button-down before
+     * the absolute coordinates, so the strip-vs-plate decision is re-made
+     * on every event while the button is held; a strip press therefore
+     * first cancels the transient plate latch that a coordinate-less
+     * button-down may have produced.
+     */
+    in_strip = s->kbd &&
+               mxs_lcdif_touch_position(s->panel, x, y, &px, &py) &&
+               px >= BRAIN_TOUCHKEY_STRIP_X0;
+
+    if (in_strip && down) {
+        int index = clamp32(py * 9 / BRAIN_TOUCHKEY_STRIP_H, 0, 8);
+
+        fprintf(stderr, "[lradc-strip] %lld down px=%d py=%d index=%d "
+                "strip_active=%d\n",
+                (long long)g_get_real_time(), px, py, index, s->strip_active);
+        if (!s->strip_active) {
+            /* The plate may have latched on a coordinate-less button-down
+             * that arrived before the absolute position: cancel it.  The
+             * finger IS down (on the strip), so keep touch_down set or the
+             * driver's next sample (which passes s->touch_down) would read
+             * this as a release and end the press after microseconds. */
+            s->pen_state = MXS_LRADC_PEN_UP;
+            s->regs[LRADC_CTRL1] &= ~CTRL1_TOUCH_DETECT_IRQ;
+            mxs_lradc_update_irq(s);
+            s->strip_active = true;
+            s->strip_index = index;
+            brain_kbd_touchkey_strip(s->kbd, index, true);
+        } else if (s->strip_index != index) {
+            fprintf(stderr, "[lradc-strip] %lld slide %d->%d\n",
+                    (long long)g_get_real_time(), s->strip_index, index);
+            brain_kbd_touchkey_strip(s->kbd, s->strip_index, false);
+            brain_kbd_touchkey_strip(s->kbd, index, true);
+            s->strip_index = index;
+        }
+        s->touch_down = true;
+        s->touch_x = clamp32(x, 0, 0x7fff);
+        s->touch_y = clamp32(y, 0, 0x7fff);
+        return;
+    }
+
+    if (s->strip_active) {
+        /* anything that is not a strip press ends the strip touch */
+        fprintf(stderr, "[lradc-strip] %lld end px=%d py=%d down=%d idx=%d\n",
+                (long long)g_get_real_time(), px, py, down, s->strip_index);
+        brain_kbd_touchkey_strip(s->kbd, s->strip_index, false);
+        s->strip_active = false;
+        s->strip_index = -1;
+        s->touch_down = down;
+        if (!down) {
+            s->touch_x = clamp32(x, 0, 0x7fff);
+            s->touch_y = clamp32(y, 0, 0x7fff);
+            return;
+        }
+        /* a drag left the strip and reached the plate: fall through */
+    }
 
     /*
      * A release transition must show up as ONE transitional sample.
@@ -846,6 +939,8 @@ static void mxs_lradc_reset(DeviceState *dev)
     s->pen_state = MXS_LRADC_PEN_UP;
     s->lift_bursts = 0;
     s->run_valid = false;
+    s->strip_active = false;
+    s->strip_index = -1;
 }
 
 

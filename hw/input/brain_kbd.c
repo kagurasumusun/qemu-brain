@@ -100,27 +100,34 @@ static const int brain_kbd_col_pins[BRAIN_KBD_COLS] = { 0, 1, 2, 3, 4, 6, 7 };
  * touchkey reader / sx8650_touchscreen.dll's touchkey handler):
  *
  *   bit 0x10     = touchkey data valid/ready (always set by the MCU)
+ *   bit 0x80     = scan-in-progress flag (clear while the pads are idle)
  *   bits 0x2, 0x4, 0x8, 0x20, 0x40, 0x100, 0x200, 0x400, 0x800
- *                = per-key PRESSED state (1 = pressed)
+ *                = per-key PRESSED state, ACTIVE-LOW (bit clear = pressed)
  *
  * On the real Brain the EDNA2 MCU scans the touchkeys and posts this
  * word into the mailbox continuously; the host wake path is the MCU
- * attention IRQ (ICOL 33, the same `edna2_int` line).  Map the nine
- * slots onto the QEMU key events that make sense for the menu
- * navigation keys.  The exact physical assignment is not documented,
- * so the mapping is provisional and calibrated empirically against
- * the APPMAIN menu behaviour.
+ * attention IRQ (ICOL 33, the same `edna2_int` line).  With no pad
+ * touched the word is 0xf7e: the 0x10 valid bit and all nine pad bits
+ * set, the 0x80 scan bit clear.  A pressed pad clears its bit.  The
+ * word encoding is shared with the mailbox seed in hw/arm/mxs.c, so
+ * the constants live in include/hw/arm/mxs.h.
  */
-#define BRAIN_TOUCHKEY_VALID    0x10u
 /*
- * User HID dump (VK + PS/2 Set 2): ホーム=F1, 国語漢字=F2, 英和和英=F3,
- * My辞書=F7, 履歴=F8, 一覧から選ぶ=Home, 音声=F11.
+ * The exact physical assignment of the nine pads is not documented, so
+ * the mapping is provisional and calibrated empirically against the
+ * APPMAIN menu behaviour (see the strip pad ordering in mxs_lradc.c).
+ * Bit layout re-checked against a real unit where possible.
  */
 static const uint32_t brain_touchkey_bits[] = {
     0x2, 0x4, 0x8, 0x20, 0x40,
     0x100, 0x200, 0x400, 0x800,
 };
 
+/*
+ * Host keys that double as touchkeys for scripted navigation (kept for
+ * the QMP/send-key harnesses).  Only the first three pads have a fixed
+ * host binding; the remaining six are reached through the strip.
+ */
 static const QKeyCode brain_touchkey_qcodes[] = {
     Q_KEY_CODE_PGUP,          /* 音量+ VK 0x21 */
     Q_KEY_CODE_PGDN,          /* 音量- VK 0x22 */
@@ -638,6 +645,45 @@ uint32_t brain_kbd_get_mrs(DeviceState *kbd)
     return (~(s->mrs_low >> 6)) & 0x3;
 }
 
+static void brain_kbd_touchkey_set(BrainKbdState *s, int index, bool down)
+{
+    if (!s->touchkey_state || index < 0 ||
+        index >= ARRAY_SIZE(brain_touchkey_bits)) {
+        return;
+    }
+    if (down) {
+        *s->touchkey_state |= brain_touchkey_bits[index];
+    } else {
+        *s->touchkey_state &= ~brain_touchkey_bits[index];
+    }
+    /*
+     * The real EDNA2 MCU keeps the mailbox word current while the host
+     * polls it through VMCopy.dll (0xc05f2d24 ff.).  The pad bits are
+     * active-low (see BRAIN_TOUCHKEY_IDLE above): mirror the pressed
+     * set as cleared bits of the idle word, with the 0x10 valid flag
+     * set and the 0x80 scan flag clear.
+     */
+    if (s->touchkey_mb) {
+        *s->touchkey_mb = BRAIN_TOUCHKEY_IDLE & ~(*s->touchkey_state);
+        fprintf(stderr, "[touchkey] %lld idx=%d %s -> +0x404=0x%08x\n",
+                (long long)g_get_real_time(), index, down ? "down" : "up",
+                *s->touchkey_mb);
+    }
+}
+
+/* Drive one touchkey pad to @down, updating the MCU mailbox word.  This is
+ * the exact behaviour the physical touchkeys had before the strip was added:
+ * the guest keyboard driver polls mailbox +0x404 through VMCopy.dll
+ * (VMC1: ioctl 0x8000208b) rather than being interrupt-driven, so no
+ * attention pulse is raised here. */
+static void brain_kbd_touchkey_press(BrainKbdState *s, int index, bool down)
+{
+    if (index < 0 || index >= ARRAY_SIZE(brain_touchkey_bits)) {
+        return;
+    }
+    brain_kbd_touchkey_set(s, index, down);
+}
+
 static void brain_kbd_touchkey_update(BrainKbdState *s, QKeyCode qcode,
                                       bool down)
 {
@@ -647,23 +693,40 @@ static void brain_kbd_touchkey_update(BrainKbdState *s, QKeyCode qcode,
         return;
     }
     for (i = 0; i < ARRAY_SIZE(brain_touchkey_qcodes); i++) {
-        if (brain_touchkey_qcodes[i] != qcode) {
-            continue;
+        if (brain_touchkey_qcodes[i] == qcode) {
+            brain_kbd_touchkey_press(s, i, down);
+            return;
         }
-        if (down) {
-            *s->touchkey_state |= brain_touchkey_bits[i];
-        } else {
-            *s->touchkey_state &= ~brain_touchkey_bits[i];
-        }
-        /*
-         * The real EDNA2 MCU keeps the mailbox word current while the
-         * host polls it through VMCopy.dll (0xc05f2d24 ff.).  Mirror
-         * the state into the mailbox with the 0x10 valid bit.
-         */
-        if (s->touchkey_mb) {
-            *s->touchkey_mb = BRAIN_TOUCHKEY_VALID | *s->touchkey_state;
-        }
+    }
+}
+
+void brain_kbd_touchkey_strip(DeviceState *kbd, int index, bool down)
+{
+    BrainKbdState *s = BRAIN_KBD(kbd);
+    bool down_edge;
+
+    if (!s->touchkey_state || index < 0 ||
+        index >= ARRAY_SIZE(brain_touchkey_bits)) {
         return;
+    }
+    down_edge = down && !(*s->touchkey_state & brain_touchkey_bits[index]);
+    brain_kbd_touchkey_set(s, index, down);
+    /*
+     * The strip is handled by the EDNA2 MCU, not the resistive plate, so
+     * the plate's panel-wake line never fires.  Mirror the matrix-key
+     * wake path instead: assert ICOLL 33 (the `edna2_int` line) for the
+     * whole press and request a system wake so the keybd_EDNA2 IST
+     * (ISRMainProc) wakes and samples the touchkey mailbox word through
+     * VMC1: ioctl 0x8000208b.  A 100 us auto-clear would expire before a
+     * deep-idle guest re-schedules and silently drop the key, which is
+     * exactly why the matrix path holds the line until release.
+     */
+    if (down_edge) {
+        timer_del(s->edna2_pulse_timer);
+        brain_kbd_edna2_pulse(s);
+        qemu_system_wakeup_request(QEMU_WAKEUP_REASON_OTHER, NULL);
+    } else if (!down) {
+        qemu_set_irq(s->edna2_int, 0);
     }
 }
 

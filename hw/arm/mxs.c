@@ -1550,11 +1550,13 @@ static void brain_edna2_mcu_execute(BrainMachineState *bms)
          *
          * The previous seed 0x08000080 (bits 7+27) was a guess: bit
          * 0x10 was clear, so the driver always took the fail path and
-         * touchkey_point_calibration() FAILED at every boot.  With no
-         * keys touched the correct value is 0x00000010.
+         * touchkey_point_calibration() FAILED at every boot.  The pad
+         * bits are active-low, so with no key touched the correct value
+         * is BRAIN_TOUCHKEY_IDLE (0xf7e): valid bit set, scan bit
+         * clear, every pad bit set.
          */
         stl_le_p(bms->edna2_mb + BRAIN_EDNA2_MCU_TOUCHKEY_OFF,
-                 0x00000010u | bms->edna2_touchkey);
+                 BRAIN_TOUCHKEY_IDLE & ~bms->edna2_touchkey);
         break;
     default:
         break;
@@ -1602,6 +1604,12 @@ static uint64_t brain_edna2_mb_read(void *opaque, hwaddr offset, unsigned size)
     uint64_t v = 0;
 
     memcpy(&v, bms->edna2_mb + offset, size);
+    if (brain_mb_trace_live) {
+        fprintf(stderr, "[edna2-mb] %lld R +0x%" HWADDR_PRIx
+                " = 0x%08" PRIx64 " pc=0x%08x\n",
+                (long long)g_get_real_time(), offset, v,
+                (unsigned)mxs_trace_guest_pc());
+    }
     return v;
 }
 
@@ -1611,6 +1619,11 @@ static void brain_edna2_mb_write(void *opaque, hwaddr offset, uint64_t value,
     BrainMachineState *bms = opaque;
 
     memcpy(bms->edna2_mb + offset, &value, size);
+    if (brain_mb_trace_live) {
+        fprintf(stderr, "[edna2-mb] %lld W +0x%" HWADDR_PRIx
+                " <- 0x%08" PRIx64 "\n",
+                (long long)g_get_real_time(), offset, value);
+    }
 
     /* Doorbell: the guest kicks the MCU by writing 1 to +0x3C. */
     if (offset == 0x3c && size == 4 && (value & 1)) {
@@ -1657,14 +1670,15 @@ static void brain_cpu_reset(void *opaque)
      *          reader (0xc05f2d24, verified against repaired4) bails
      *          out unless the word equals 0x3037
      *          (ldr r3,[r1]; cmp r3,#0x3037).
-     *   +0x404  bit 0x10 = touchkey data valid/ready; the low bits
+     *   +0x404  bit 0x10 = touchkey data valid/ready; bit 0x80 = scan
+     *          in progress (clear when idle); bits
      *          0x2,0x4,0x8,0x20,0x40,0x100,0x200,0x400,0x800 are the
-     *          per-key pressed state (set = pressed).  No keys are
-     *          pressed at boot, so the word is 0x10.
+     *          per-key pressed state, ACTIVE-LOW (bit clear = pressed).
+     *          No keys are pressed at boot, so the word is 0xf7e.
      */
     stl_le_p(bms->edna2_mb + 0x400, 0x00003037u);
     stl_le_p(bms->edna2_mb + BRAIN_EDNA2_MCU_TOUCHKEY_OFF,
-             0x00000010u | bms->edna2_touchkey);
+             BRAIN_TOUCHKEY_IDLE & ~bms->edna2_touchkey);
 
     /*
      * If we used -kernel, the ARM boot loader has already taken
@@ -2050,6 +2064,7 @@ static void brain_init(MachineState *machine)
     brain_kbd_set_touchkey_state(dev, &bms->edna2_touchkey,
                                  (uint32_t *)(bms->edna2_mb +
                                               BRAIN_EDNA2_MCU_TOUCHKEY_OFF));
+    mxs_lradc_set_touchkey_kbd(bms->lradc, bms->kbd);
     /*
      * EDNA2 MCU attention line (power key / wake / key press pulse).
      * The keybd_EDNA2 driver registers InterruptInitialize(33, ...):

@@ -225,10 +225,22 @@ DeviceState *mxs_i2c_codec_device(DeviceState *dev);
 
 #endif /* HW_ARM_MXS_H */
 
+/* EDNA2 MCU touchkey report word (mailbox +0x404): ACTIVE-LOW pad bits.
+ * bit 0x10 = data valid/ready, bit 0x80 = scan-in-progress (clear when
+ * idle); a pressed pad CLEARS its bit.  Idle (no pad touched) = 0xf7e. */
+#define BRAIN_TOUCHKEY_VALID    0x10u
+#define BRAIN_TOUCHKEY_SCAN     0x80u
+#define BRAIN_TOUCHKEY_IDLE     0xf7eu
+
 /* EDNA2 MCU touchkey report word (mailbox +0x404) */
 void brain_kbd_set_touchkey_state(DeviceState *kbd, uint32_t *state_ptr,
                                  uint32_t *mb_word);
 void brain_kbd_edna2_pulse_ext(DeviceState *kbd);
+/* Right-edge touchkey strip: a press on the panel's right band is a
+ * touchkey pad, routed from the LRADC to the keyboard MCU model. */
+void brain_kbd_touchkey_strip(DeviceState *kbd, int index, bool down);
+/* Wire the keyboard MCU device into the LRADC strip router. */
+void mxs_lradc_set_touchkey_kbd(DeviceState *lradc, DeviceState *kbd);
 
 /*
  * MRSensor GPIO lines (edna2_MRSensor.dll): GPIO0 pins 6/7, 2-bit
