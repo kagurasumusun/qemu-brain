@@ -203,6 +203,7 @@ typedef struct BrainMachineState {
      * DAC) and SAIF1 (capture ADC).  The pre-S97 SGTL5000 wiring came
      * from the Linux DTS, which is not what the WinCE image drives. */
     DeviceState *sgtl5000;
+    char *codec;                 /* 'bu26154' | 'sgtl5000' | 'none' */
     DeviceState *saif0_dev;
     DeviceState *saif1_dev;
     DeviceState *digctl_dev;
@@ -2226,6 +2227,59 @@ static void mxs_create_usb(const char *name, hwaddr base,
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, qdev_get_gpio_in(icoll, irq));
 }
 
+/*
+ * The board codec carried by I2C0.  'bu26154' is what the WinCE images
+ * drive -- LAPIS/ROHM BU26154MUV at 0x1a, per the CE registry's WaveDev
+ * value (wavedev2_BU26154.dll).  'sgtl5000' is what the community Linux
+ * port binds on every generation of the machine: the shared board file
+ * arch/arm/boot/dts/imx28-brain.dtsi declares sgtl5000: codec@a with
+ * fsl,sgtl5000, VDDA/VDDIO at 3.3 V, SAIF0 as the clock master and
+ * fsl,saif-master = <&saif0> on the capture SAIF, and arch/arm/configs/
+ * brain_defconfig enables no other codec (CONFIG_SND_SOC_MXS_SGTL5000=y).
+ * 'none' leaves I2C0 with only the ack-all analysis slaves, which is what
+ * makes it possible to watch a driver probe the bus.
+ */
+#define BRAIN_SGTL5000_I2C_ADDR 0x0a /* reg = <0x0a> in imx28-brain.dtsi */
+
+static bool brain_codec_select(const char *name, const char **type,
+                               uint8_t *addr)
+{
+    if (!name || !*name || !strcmp(name, "bu26154")) {
+        *type = TYPE_BU26154;
+        *addr = BU26154_I2C_ADDR;
+    } else if (!strcmp(name, "sgtl5000")) {
+        *type = TYPE_SGTL5000;
+        *addr = BRAIN_SGTL5000_I2C_ADDR;
+    } else if (!strcmp(name, "none")) {
+        *type = NULL;
+        *addr = 0;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+static char *brain_get_codec(Object *obj, Error **errp)
+{
+    BrainMachineState *bms = BRAIN_MACHINE(obj);
+
+    return g_strdup(bms->codec ? bms->codec : "bu26154");
+}
+
+static void brain_set_codec(Object *obj, const char *value, Error **errp)
+{
+    BrainMachineState *bms = BRAIN_MACHINE(obj);
+    const char *type;
+    uint8_t addr;
+
+    if (!brain_codec_select(value, &type, &addr)) {
+        error_setg(errp, "codec must be 'bu26154', 'sgtl5000' or 'none'");
+        return;
+    }
+    g_free(bms->codec);
+    bms->codec = g_strdup(value);
+}
+
 static void brain_init(MachineState *machine)
 {
     BrainMachineState *bms = BRAIN_MACHINE(machine);
@@ -2679,8 +2733,23 @@ static void brain_init(MachineState *machine)
     dev = qdev_new(TYPE_MXS_I2C_REAL);
     qdev_prop_set_string(dev, "name", "i2c0");
     qdev_prop_set_uint64(dev, "size", 0x2000);
-    qdev_prop_set_string(dev, "codec-type", TYPE_BU26154);
-    qdev_prop_set_uint8(dev, "codec-addr", BU26154_I2C_ADDR);
+    {
+        const char *ctype;
+        uint8_t caddr;
+
+        if (!brain_codec_select(bms->codec, &ctype, &caddr)) {
+            ctype = TYPE_BU26154;
+            caddr = BU26154_I2C_ADDR;
+        }
+        if (ctype) {
+            qdev_prop_set_string(dev, "codec-type", ctype);
+            qdev_prop_set_uint8(dev, "codec-addr", caddr);
+            if (bms->codec && strcmp(bms->codec, "bu26154")) {
+                warn_report("brain: board codec set to %s at i2c0 0x%02x",
+                            bms->codec, caddr);
+            }
+        }
+    }
     /* Both codec models expose an "audiodev" property (host endpoint). */
     if (machine->audiodev) {
         qdev_prop_set_string(dev, "codec-audiodev", machine->audiodev);
@@ -3017,6 +3086,14 @@ static void brain_instance_init(Object *obj)
     bms->exp_fault_mode = 0;         /* 0=off 1=error 2=delay 3=trace */
     bms->exp_fault_delay_us = 500000; /* 500 ms virtual-time delay */
 
+    bms->codec = g_strdup("bu26154");
+    object_property_add_str(obj, "codec", brain_get_codec, brain_set_codec);
+    object_property_set_description(obj, "codec",
+        "Board codec on I2C0: 'bu26154' (default, the chip the WinCE wave "
+        "driver binds at 0x1a), 'sgtl5000' (the codec the Linux/Brainux "
+        "board files bind at 0x0a on every generation) or 'none' (no codec, "
+        "so a driver's probe pattern is visible on the bus).  SAIF0 feeds the "
+        "codec DAC and SAIF1 drains its ADC either way.");
     object_property_add_str(obj, "boot-mode", brain_get_boot_mode,
                             brain_set_boot_mode);
     object_property_set_description(obj, "boot-mode",
