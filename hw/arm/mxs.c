@@ -139,7 +139,9 @@ typedef struct BrainMachineState {
     BlockBackend *sd_blk;
     char *boot_mode;
     char *reg_log;            /* 'reg-log=<file>', see the register log below */
-    uint32_t reg_log_tick;    /* 'reg-log-tick=<ms>' periodic sampling      */
+    uint32_t reg_log_tick;    /* 'reg-log-tick=<ms>' sampling period        */
+    uint32_t reg_log_ring;    /* 'reg-log-ring=<n>' samples before and after
+                               * a fault; 0 logs every sample instead       */
     uint32_t lcd_width;
     uint32_t lcd_height;
     uint32_t lcd_rotate;
@@ -984,20 +986,69 @@ void hmp_brain_sgtl(Monitor *mon, const QDict *qdict)
  * aids keep their original one-shot / counted behaviour.  Setting the path
  * to an empty string closes the log again and restores that behaviour.
  *
- * Two ways to keep the log flowing when no address of interest is being
- * watched: 'reg-log-tick=<ms>' (or BRAIN_REGLOG_TICK) samples the vCPU
- * periodically on virtual time, and the `brain_regdump` monitor command
- * writes one entry right now.  A tick entry is skipped when the state is
- * what the last one was -- a guest parked in an idle loop would otherwise
- * bury the interesting entry in identical ones; the number of dumps the
- * sampling folded away is reported on the next entry that is written.
+ * What goes in it, by mode:
+ *
+ *   default        -- 'reg-log-tick=<ms>' (1 ms) samples the vCPU on virtual
+ *                     time into a ring of 'reg-log-ring' (200) samples, and
+ *                     a fault -- undef, prefetch abort, data abort, the
+ *                     "other" class -- writes the ring (the 200 samples
+ *                     before), the full dump at the fault, and the 200 that
+ *                     follow.  Sampling costs a 17 word copy per tick and
+ *                     touches no file until something faults, and IRQ / FIQ /
+ *                     SVC are not triggers, so a busy guest costs nothing.
+ *   reg-log-ring=0 -- the unconditional form of the log: every sample that
+ *                      moved is written as it is taken.  Left available, no
+ *                      longer the default: 200 lines of lead-up around the
+ *                      one event that matters says more than a dump of every
+ *                      millisecond of the run.
+ *   brain_regdump  -- the monitor command writes one entry right now.
  * ------------------------------------------------------------------
  */
 static FILE *brain_reglog;
 static QEMUTimer *brain_reglog_timer;
-static uint32_t brain_reglog_saved[17];   /* R0..R15 + CPSR of the last dump */
-static bool brain_reglog_have_saved;
+
+/*
+ * A sample is the vCPU's whole general purpose file in one line.  The ring
+ * keeps the last 'reg-log-ring' samples that moved in RAM, which is what
+ * lets the lead-up to a fault be written *after* it happened: the useful
+ * half of an abort is what the guest did just before taking it.
+ */
+typedef struct BrainRegLogRec {
+    uint32_t regs[16];              /* R0..R15, R13/R15 are SP/PC         */
+    uint32_t cpsr;
+    int64_t vns;                    /* virtual time the sample was taken  */
+} BrainRegLogRec;
+
+#define BRAIN_REGLOG_RING_MAX 4096  /* ceiling on 'reg-log-ring'          */
+#define BRAIN_REGLOG_TICK_DEFAULT 1 /* ms of virtual time between samples  */
+#define BRAIN_REGLOG_RING_DEFAULT 200
+
+static BrainRegLogRec *brain_reglog_ring;
+static unsigned brain_reglog_ring_size;     /* slots in the array          */
+static unsigned brain_reglog_ring_n;        /* samples stored so far       */
+static unsigned brain_reglog_ring_head;     /* next slot to write          */
+static unsigned brain_reglog_post;          /* samples left in the window  */
+static BrainRegLogRec brain_reglog_last;    /* previous sample, for dedupe */
+static bool brain_reglog_have_last;
 static unsigned brain_reglog_repeats;
+static uint64_t brain_reglog_excp_seen[4];
+
+/*
+ * The fault class of an exception is counted by the core (see
+ * include/brain_stats.h) -- sampling those counters is how the log notices
+ * a data abort without being handed a hook in the abort path.  IRQ, FIQ and
+ * SVC are deliberately *not* triggers: a running WinCE takes thousands of
+ * them per virtual millisecond and none of them is an error.
+ */
+static const struct {
+    enum BrainStat stat;
+    const char *name;
+} brain_reglog_excp[] = {
+    { BST_EXCP_UNDEF,  "undef"  },
+    { BST_EXCP_PABORT, "pabort" },
+    { BST_EXCP_DABORT, "dabort" },
+    { BST_EXCP_OTHER,  "other"  },
+};
 
 static void brain_reglog_tick_cb(void *opaque);
 
@@ -1033,30 +1084,116 @@ static void brain_reglog_cpu_state(CPUState *cs, const char *why)
     fflush(brain_reglog);
 }
 
-/* Did anything move since the last dump?  Remember the state either way. */
-static bool brain_reglog_same_state(CPUState *cs)
+/* snapshot of what the vCPU holds right now, cheap enough to take per tick */
+static void brain_reglog_snapshot(CPUState *cs, BrainRegLogRec *r)
 {
     CPUARMState *env = &ARM_CPU(cs)->env;
-    uint32_t now[ARRAY_SIZE(brain_reglog_saved)];
-    bool same = brain_reglog_have_saved;
     int i;
 
     for (i = 0; i < 16; i++) {
-        now[i] = (uint32_t)env->regs[i];
+        r->regs[i] = (uint32_t)env->regs[i];
     }
-    now[16] = (uint32_t)cpsr_read(env);
-    if (same) {
-        same = memcmp(now, brain_reglog_saved, sizeof(now)) == 0;
+    r->cpsr = (uint32_t)cpsr_read(env);
+    r->vns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+}
+
+static void brain_reglog_rec_line(const char *tag, const BrainRegLogRec *r)
+{
+    int i;
+
+    fprintf(brain_reglog, "[brain-regdump] %s t=%lldus cpsr=%08x",
+            tag, (long long)(r->vns / 1000), r->cpsr);
+    for (i = 0; i < 16; i++) {
+        fprintf(brain_reglog, " r%d=%08x", i, r->regs[i]);
     }
-    memcpy(brain_reglog_saved, now, sizeof(now));
-    brain_reglog_have_saved = true;
+    fprintf(brain_reglog, "\n");
+}
+
+/* Did anything move since the last sample?  Remember it either way. */
+static bool brain_reglog_same_state(const BrainRegLogRec *r)
+{
+    bool same = brain_reglog_have_last &&
+                memcmp(brain_reglog_last.regs, r->regs,
+                       sizeof(brain_reglog_last.regs)) == 0 &&
+                brain_reglog_last.cpsr == r->cpsr;
+
+    brain_reglog_last = *r;
+    brain_reglog_have_last = true;
     return same;
 }
 
-/* (re)arm the periodic sampling: needs both a log and a tick interval */
+/*
+ * Which fault kinds arrived since the sample before, and their names for the
+ * header line.  The counters are the core's, so a fault taken and handled
+ * between two samples is still seen -- the state written is then whatever the
+ * guest had reached by the time the sampling looked, which for a fault loop
+ * is the interesting part anyway.
+ */
+static bool brain_reglog_excp_edges(char *names, size_t len)
+{
+    size_t off = 0;
+    unsigned i;
+    bool any = false;
+
+    for (i = 0; i < ARRAY_SIZE(brain_reglog_excp); i++) {
+        uint64_t now = brain_stat_count[brain_reglog_excp[i].stat];
+
+        if (now == brain_reglog_excp_seen[i]) {
+            continue;
+        }
+        brain_reglog_excp_seen[i] = now;
+        if (off < len) {
+            off += g_snprintf(names + off, len - off, "%s%s",
+                              any ? "," : "", brain_reglog_excp[i].name);
+        }
+        any = true;
+    }
+    return any;
+}
+
+/* oldest first, up to the ring's capacity */
+static void brain_reglog_flush_ring(void)
+{
+    unsigned n = MIN(brain_reglog_ring_n, brain_reglog_ring_size);
+    unsigned i;
+
+    for (i = 0; i < n; i++) {
+        unsigned slot = (brain_reglog_ring_head + brain_reglog_ring_size -
+                         n + i) % brain_reglog_ring_size;
+
+        brain_reglog_rec_line("pre", &brain_reglog_ring[slot]);
+    }
+    fflush(brain_reglog);
+}
+
+static void brain_reglog_ring_reset(void)
+{
+    brain_reglog_ring_n = 0;
+    brain_reglog_ring_head = 0;
+    brain_reglog_post = 0;
+    brain_reglog_have_last = false;
+    brain_reglog_repeats = 0;
+}
+
+/*
+ * Give the log the buffer its settings ask for and (re)arm the sampling;
+ * called with the final property values from brain_init, so 'reg-log' and
+ * 'reg-log-ring' may be given in either order.  0 tick samples nothing, 0
+ * ring switches the sampling to the unconditional mode.
+ */
 static void brain_reglog_arm_tick(BrainMachineState *bms)
 {
+    unsigned size = bms->reg_log_ring ?
+        MIN(bms->reg_log_ring, BRAIN_REGLOG_RING_MAX) : 0;
+
     if (brain_reglog && bms->reg_log_tick) {
+        if (size != brain_reglog_ring_size) {
+            g_free(brain_reglog_ring);
+            brain_reglog_ring = size ? g_new0(BrainRegLogRec, size) : NULL;
+            brain_reglog_ring_size = size;
+            brain_reglog_ring_n = 0;
+            brain_reglog_ring_head = 0;
+        }
         if (!brain_reglog_timer) {
             brain_reglog_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                               brain_reglog_tick_cb, bms);
@@ -1073,24 +1210,81 @@ static void brain_reglog_tick_cb(void *opaque)
 {
     BrainMachineState *bms = BRAIN_MACHINE(opaque);
     CPUState *cs = bms->cpu ? CPU(bms->cpu) : NULL;
+    BrainRegLogRec rec;
+    char names[64] = "";
+    bool edges;
 
-    if (cs) {
-        if (brain_reglog_same_state(cs)) {
-            brain_reglog_repeats++;
+    /* the timer is re-armed whatever happens, so a sample missed because the
+     * machine was not up yet (or the log was gone) does not end the sampling */
+    if (cs && brain_reglog) {
+        edges = brain_reglog_excp_edges(names, sizeof(names));
+        brain_reglog_snapshot(cs, &rec);
+
+        if (brain_reglog_ring_size) {
+            /*
+             * Fault-anchored: the samples live in the ring until something
+             * faults, and the ring is what makes the "before" half of the
+             * entry exist at all.
+             */
+            if (brain_reglog_post) {
+                brain_reglog_rec_line("post", &rec);
+                if (--brain_reglog_post == 0) {
+                    fprintf(brain_reglog,
+                        "[brain-regdump] post window closed\n");
+                    fflush(brain_reglog);
+                    brain_reglog_ring_n = 0;
+                    brain_reglog_ring_head = 0;
+                }
+            } else {
+                if (!brain_reglog_same_state(&rec)) {
+                    unsigned slot = brain_reglog_ring_head;
+
+                    brain_reglog_ring[slot] = rec;
+                    brain_reglog_ring_head =
+                        (slot + 1) % brain_reglog_ring_size;
+                    if (brain_reglog_ring_n < brain_reglog_ring_size) {
+                        brain_reglog_ring_n++;
+                    }
+                }
+                if (edges) {
+                    g_autofree char *why =
+                        g_strdup_printf("exception %s", names);
+
+                    fprintf(brain_reglog, "[brain-regdump] == %s: %u before, "
+                            "%u after ==\n", why, brain_reglog_ring_n,
+                            brain_reglog_ring_size);
+                    fflush(brain_reglog);
+                    brain_reglog_flush_ring();
+                    brain_reglog_cpu_state(cs, why);
+                    brain_reglog_post = brain_reglog_ring_size;
+                }
+            }
         } else {
-            g_autofree char *why = brain_reglog_repeats ?
-                g_strdup_printf("tick (+%u unchanged)", brain_reglog_repeats) :
-                g_strdup("tick");
+            /*
+             * The unconditional mode ('reg-log-ring=0'): every sample that
+             * moved is written as it is taken.  A guest parked in an idle
+             * loop would bury the entries that matter in identical ones, so
+             * the folded away count is reported instead.
+             */
+            if (brain_reglog_same_state(&rec)) {
+                brain_reglog_repeats++;
+            } else {
+                g_autofree char *why = brain_reglog_repeats ?
+                    g_strdup_printf("tick (+%u unchanged)",
+                                    brain_reglog_repeats) :
+                    g_strdup("tick");
 
-            brain_reglog_cpu_state(cs, why);
-            brain_reglog_repeats = 0;
+                brain_reglog_cpu_state(cs, why);
+                brain_reglog_repeats = 0;
+            }
         }
-        /* virtual time stands still while the machine is stopped, so this
-         * resumes on its own when the guest does */
-        timer_mod(brain_reglog_timer,
-                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                  (int64_t)bms->reg_log_tick * SCALE_MS);
     }
+
+    /* virtual time stands still while the machine is stopped, so this
+     * resumes on its own when the guest does */
+    timer_mod(brain_reglog_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+              (int64_t)bms->reg_log_tick * SCALE_MS);
 }
 
 /*
@@ -1117,13 +1311,12 @@ static bool brain_reglog_open(BrainMachineState *bms, const char *path,
     brain_reglog = f;
     g_free(bms->reg_log);
     bms->reg_log = f ? g_strdup(path) : NULL;
-    brain_reglog_have_saved = false;
-    brain_reglog_repeats = 0;
+    brain_reglog_ring_reset();
     if (f) {
         fprintf(f, "# brain register log '%s': vCPU register dumps taken at "
-                   "reset and on\n# every brain_watch / brain_bwatch hit"
-                   "%s\n", path,
-                bms->reg_log_tick ? ", sampled every tick" : "");
+                   "reset and on\n# every brain_watch / brain_bwatch hit; "
+                   "faults log %u samples before and after\n",
+                path, bms->reg_log_ring);
         fflush(f);
     }
     brain_reglog_arm_tick(bms);
@@ -2038,11 +2231,11 @@ static void brain_init(MachineState *machine)
     int i;
 
     /*
-     * BRAIN_REGLOG=<file> and BRAIN_REGLOG_TICK=<ms> are the env forms of
-     * 'reg-log' and 'reg-log-tick' (the BRAIN_BWATCH / BRAIN_WATCH /
-     * BRAIN_MBTRACE style); the properties win when both are given.  The
-     * sampling is armed here rather than in the setter so that the order the
-     * two properties arrive in does not matter.
+     * BRAIN_REGLOG=<file>, BRAIN_REGLOG_TICK=<ms> and BRAIN_REGLOG_RING=<n>
+     * are the env forms of 'reg-log', 'reg-log-tick' and 'reg-log-ring' (the
+     * BRAIN_BWATCH / BRAIN_WATCH / BRAIN_MBTRACE style); the properties win
+     * when both are given.  The sampling is armed here rather than in the
+     * setters so that the order the properties arrive in does not matter.
      */
     if (!brain_reglog) {
         const char *rl = getenv("BRAIN_REGLOG");
@@ -2051,11 +2244,23 @@ static void brain_init(MachineState *machine)
             brain_reglog_open(bms, rl, &error_fatal);
         }
     }
-    if (!bms->reg_log_tick) {
+    /*
+     * The properties win, so the environment only fills in what is still at
+     * its default here -- and the ring has to be sized before the sampling is
+     * armed.
+     */
+    if (bms->reg_log_tick == BRAIN_REGLOG_TICK_DEFAULT) {
         const char *rt = getenv("BRAIN_REGLOG_TICK");
 
         if (rt && *rt) {
             bms->reg_log_tick = (uint32_t)atoi(rt);
+        }
+    }
+    if (bms->reg_log_ring == BRAIN_REGLOG_RING_DEFAULT) {
+        const char *rr = getenv("BRAIN_REGLOG_RING");
+
+        if (rr && *rr) {
+            bms->reg_log_ring = (uint32_t)atoi(rr);
         }
     }
     brain_reglog_arm_tick(bms);
@@ -2823,10 +3028,11 @@ static void brain_instance_init(Object *obj)
         "output), written at every reset and at every brain_watch / "
         "brain_bwatch hit; while the log is open those watchpoints and "
         "breakpoints stay armed, so no hit is missed and the guest is not "
-        "stopped by one.  'reg-log-tick=<ms>' adds periodic samples and "
-        "'brain_regdump' writes one on demand.  The register-dump "
-        "counterpart of '-serial file:<file>'.  BRAIN_REGLOG=<file> selects "
-        "the same log.");
+        "stopped by one.  Sampled faults are logged too: 'reg-log-ring' "
+        "samples before and after an undef or abort, 'reg-log-ring=0' logs "
+        "every sample instead, and 'brain_regdump' writes one on demand.  "
+        "The register-dump counterpart of '-serial file:<file>'.  "
+        "BRAIN_REGLOG=<file> selects the same log.");
 
     object_property_add_bool(obj, "strict-hw", brain_get_strict_hw,
                              brain_set_strict_hw);
@@ -2887,14 +3093,28 @@ static void brain_instance_init(Object *obj)
         "BRAIN fault-zone experiment aid: virtual-time delay per zone "
         "read in mode 2");
 
+    /* sampling on by default, anchored on faults (see the register log) */
+    bms->reg_log_tick = BRAIN_REGLOG_TICK_DEFAULT;
+    bms->reg_log_ring = BRAIN_REGLOG_RING_DEFAULT;
+
     object_property_add_uint32_ptr(obj, "reg-log-tick", &bms->reg_log_tick,
                                    OBJ_PROP_FLAG_READWRITE);
     object_property_set_description(obj, "reg-log-tick",
-        "Also sample the vCPU registers into the register log every <ms> of "
-        "virtual time; an entry is skipped when the state has not moved "
-        "since the last one.  0 (the default) logs only reset and "
-        "brain_watch / brain_bwatch hits.  BRAIN_REGLOG_TICK=<ms> sets the "
-        "same interval.");
+        "Period of the register-log sampling, in milliseconds of virtual "
+        "time.  What the samples are used for depends on 'reg-log-ring'.  0 "
+        "samples nothing at all, which leaves the log with its reset entry "
+        "and its brain_watch / brain_bwatch hits.  BRAIN_REGLOG_TICK=<ms> "
+        "sets the same period.");
+
+    object_property_add_uint32_ptr(obj, "reg-log-ring", &bms->reg_log_ring,
+                                   OBJ_PROP_FLAG_READWRITE);
+    object_property_set_description(obj, "reg-log-ring",
+        "How many sampled register dumps are kept around a fault: an undef, "
+        "prefetch abort, data abort or 'other' exception writes the <n> "
+        "samples before it, the full 'info registers' dump at it, and the <n> "
+        "after.  0 selects the unconditional form of the log, where every "
+        "sample that moved is written as it is taken.  IRQ, FIQ and SVC are "
+        "never triggers.  BRAIN_REGLOG_RING=<n> sets the same window.");
 
     object_property_add_uint32_ptr(obj, "lcd-width", &bms->lcd_width,
                                    OBJ_PROP_FLAG_READWRITE);
