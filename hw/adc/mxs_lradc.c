@@ -771,12 +771,27 @@ static void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
     in_strip = s->kbd && on_panel &&
                (px < 0 || px >= BRAIN_TOUCHKEY_STRIP_X0);
 
+    /*
+     * A touch the picture tracking does not cover is neither plate input
+     * nor a key: it is handed to the plate with a coordinate the driver
+     * will most likely discard.  That is the one case in this path that
+     * makes the real device react and the model not, so it says so.
+     */
+    if (down && s->kbd && !on_panel) {
+        fprintf(stderr, "[lradc-strip] %lld off-panel x=%d y=%d: the LCDIF "
+                "picture box does not cover this touch, plate path only\n",
+                (long long)g_get_real_time(), x, y);
+    }
+
     if (in_strip && down) {
         int index = clamp32(py * 9 / BRAIN_TOUCHKEY_STRIP_H, 0, 8);
+        int band0 = index * BRAIN_TOUCHKEY_STRIP_H / 9;
+        int band1 = (index + 1) * BRAIN_TOUCHKEY_STRIP_H / 9;
 
         fprintf(stderr, "[lradc-strip] %lld down px=%d py=%d index=%d "
-                "strip_active=%d\n",
-                (long long)g_get_real_time(), px, py, index, s->strip_active);
+                "strip_active=%d band=%d..%d x=%d y=%d\n",
+                (long long)g_get_real_time(), px, py, index, s->strip_active,
+                band0, band1, x, y);
         if (!s->strip_active) {
             /* The plate may have latched on a coordinate-less button-down
              * that arrived before the absolute position: cancel it.  The
