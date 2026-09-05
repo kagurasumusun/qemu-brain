@@ -12,23 +12,51 @@
  *    continuous transfers step the index by two.
  *  - Three register maps selected by MAPCON (0x1c/0x1d); MAP0 = audio,
  *    MAP1 = PLL + touch-panel ADC interface, MAP2 = PLL external /
- *    "B"-variant coefficients.  Reset (power-on and SOFTRST=1 at
- *    write index 0x11) restores the datasheet initial values.
+ *    "B"-variant coefficients.  MAPCON = 0x3 is prohibited and is not
+ *    accepted (p.48).  A power-on reset restores the datasheet initial
+ *    values; the SOFTRST bit resets the CPU interface and its own
+ *    register only, not the register file (p.46).
  *  - Register semantics: reserved bits read 0 and ignore writes;
  *    empty indices read 0 and ignore writes.
- *  - DAC/ADC data path with the same 48 kHz stereo frame plumbing as
- *    the SGTL5000 model so mxs_saif can drive either codec.  Power
- *    gating is derived from the BU26154 power-management registers
- *    (VMIDCON, DACREN/DACLEN, ADCEN, AVMUTE).  With -audiodev the DAC
+ *  - DAC/ADC data path with the same stereo frame plumbing as the
+ *    SGTL5000 model so mxs_saif can drive either codec.  The frame
+ *    cadence on the SAIF side is the 48 kHz LRCLK the SoC generates;
+ *    the codec's own rate is programmed (SR[3:0], p.45) and is what the
+ *    datasheet timing laws (MCTIME, p.47) are counted in.  Power gating
+ *    is derived from the power-management registers (VMIDCON,
+ *    DACREN/DACLEN, ADCEN, AVMUTE) plus the clock-enable rule below.
+ *  - The record/playback paths only run with a valid internal clock
+ *    (PLLOE, and the source CLKSEL[2:0] names, pp.45-46), and only after
+ *    the MCTIME charging window opened by RECPLAY leaving 0x0 has
+ *    expired (p.47).  RECPLAY may only be entered left from 0x0 (p.47).
+ *  - With -audiodev the DAC
  *    stream is rendered to the host output and the host input is really
  *    captured into the ADC ring; with no backend the codec is the
  *    register model and both paths are a silent sink (the same fallback
  *    the SGTL5000 model uses).
  *
- * Caveat: bit-level initial values below were transcribed from the
- * Rev.002 datasheet tables (evidence_s97 text extraction).  Core audio
- * registers are precise; rarely-used fields (ALC/noise-gate, MAP1/MAP2
- * tails) are best-effort and each uncertain entry is marked "~".
+ * Caveat: the entries below were transcribed from the Rev.002 datasheet
+ * tables.  What has been re-read against the datasheet text itself
+ * (pp.45-48, 55) and is therefore precise: SR, CLKEN, CLKIO, SOFTRST,
+ * RECPLAY, MCTIME, MAPCON, AREFPW, AINPW, OSRSEL, Mic Interface Control
+ * and the sound-effect mode words.  The power-management bit maps on
+ * pp.48 were confirmed register by register.  Still transcribed from the
+ * register *table* only, i.e. field positions are not text-verified and
+ * are marked "~": the MAP1 touch-panel scan block (SCEN, SCTHR*,
+ * SCGAIN, the touch ADC result words), ALC and noise-gate settings, and
+ * the MAP2 tails.  Those fields are stored and read back faithfully but
+ * their *behaviour* (touch conversion, ALC gain ramping, EQ / sound
+ * effect processing) is not modelled; nothing in the model invents a
+ * result for them.
+ *
+ * S102 spec audit (Rev.002 register descriptions, pp.45-48 and 55, read
+ * from the datasheet text rather than inferred): the SOFTRST scope, the
+ * MAPCON and OSRSEL prohibited settings, the RECPLAY code set and its
+ * "only through a stop" transition rule, the MCTIME field width and its
+ * 40/fs + 128/fs per step law, the CLKEN/CLKIO internal-clock rule and
+ * the Mic Interface Control MINVOL[2:0] field (mask, reset value and the
+ * 6..27 dB gain, which is now applied to the capture path) were all
+ * corrected against that text.
  *
  * S101 audit: AREFPW (HPREN|HPLEN|HPVDDEN|MICBEN|VMIDCON), AINPW
  * (PGAATT|PGAEN|ADCEN, no ADCREN bit), SPPW (SPMDSEL|AVREN|COEFSEL|SPEN|
@@ -41,6 +69,8 @@
 #include <math.h>
 #include "qemu/module.h"
 #include "qemu/timer.h"
+#include "qemu/host-utils.h"
+#include "qemu/log.h"
 #include "hw/i2c/i2c.h"
 #include "hw/audio/bu26154.h"
 #include "qemu/audio.h"
@@ -72,6 +102,8 @@
 #define BU_REG_PDATTB    0x39    /* Playback Digital Attenuator B     */
 #define BU_REG_DVMUTE    0x34    /* Digital Volume Control (0x68/69)  */
 #define BU_REG_RDVOL     0x36    /* Record Digital Attenuator         */
+#define BU_REG_OSRSEL    0x2c    /* DAC Clock Setting [5:4] (0x58/59) */
+#define BU_REG_MINIF     0x2d    /* Mic Interface Control (0x5a/0x5b) */
 
 /* bit positions within the registers above (datasheet bit maps) */
 #define BU_BIT_COEFSEL   0x08    /* SPPW b03: select the "B" coefficients */
@@ -82,6 +114,11 @@
 #define BU_BIT_MICBEN    0x04    /* AREFPW b02: microphone bias circuit   */
 #define BU_BIT_DACEN     0x06    /* DACPW b02|b01: DACREN | DACLEN        */
 #define BU_BIT_AVMUTE    0x02    /* AVMUTE register b01                   */
+/* Clock Enable register (0x0c/0x0d) bits, datasheet Rev.002 p.45 */
+#define BU_BIT_TCLKEN    0x80    /* CLKEN b07: touch panel interface clock */
+#define BU_BIT_PLLOE     0x04    /* CLKEN b02: PLL output enable           */
+#define BU_BIT_PLLEN     0x02    /* CLKEN b01: PLL run / stop              */
+#define BU_BIT_MCLKEN    0x01    /* CLKEN b00: MCLKI terminal input enable */
 
 /* bit helpers */
 #define BU_BIT(n) (1u << (n))
@@ -102,8 +139,8 @@ static const BURegInit bu_map0_init[] = {
     { BU_REG_CLKEN,   0x00, 0x87 }, /* 0x0c/0x0d TCLKEN|PLLOE|PLLEN|MCLKEN */
     { BU_REG_CLKIO,   0x00, 0x1f }, /* 0x0e/0x0f PLLISEL[1:0]|CLKSEL[2:0] */
     { BU_REG_SOFTRST, 0x00, 0x01 }, /* 0x10/0x11 SOFTRST */
-    { BU_REG_RECPLAY, 0x00, 0x07 }, /* 0x12/0x13 RECPLAY (bit map ~) */
-    { BU_REG_MCTIME,  0x00, 0x1f }, /* 0x14/0x15 MCTIME[4:0] */
+    { BU_REG_RECPLAY, 0x00, 0x07 }, /* 0x12/0x13 RECPLAY[2:0] (p.47) */
+    { BU_REG_MCTIME,  0x00, 0x3f }, /* 0x14/0x15 MCTIME[5:0] (p.47) */
     { BU_REG_MAPCON,  0x00, 0x03 }, /* 0x1c/0x1d MAPCON[1:0] (global) */
     { BU_REG_AREFPW,  0x00, 0xcf }, /* 0x20/0x21 HPREN|HPLEN|HPVDDEN|MICBEN|VMIDCON[1:0] */
     { BU_REG_AINPW,   0x00, 0x2a }, /* 0x22/0x23 PGAATT|PGAEN|ADCEN */
@@ -119,8 +156,8 @@ static const BURegInit bu_map0_init[] = {
     { 0x25,           0x00, 0x03 }, /* 0x4a/0x4b AVFCON[1:0] */
     { 0x26,           0x00, 0xff }, /* 0x4c/0x4d PHPF2C0L */
     { 0x27,           0x00, 0x3f }, /* 0x4e/0x4f PHPF2C0H */
-    { 0x2c,           0x00, 0x30 }, /* 0x58/0x59 OSRSEL[1:0] */
-    { 0x2d,           0x80, 0xe2 }, /* 0x5a/0x5b MINVOL[2:0]=100|MINDIF */
+    { 0x2c,           0x00, 0x30 }, /* 0x58/0x59 OSRSEL[5:4] (p.55) */
+    { 0x2d,           0x84, 0x87 }, /* 0x5a/0x5b MINDIF|MINVOL=100b (p.55) */
     { 0x2e,           0x00, 0x87 }, /* 0x5c/0x5d SEMODE[7]|SEMODE[2:0] */
     { 0x30,           0xc0, 0xfe }, /* 0x60/0x61 SAI TX: PCMFO24|FMTO=1 */
     { 0x31,           0xc0, 0xfe }, /* 0x62/0x63 SAI RX: PCMFI24|FMTI=1 */
@@ -286,6 +323,15 @@ struct BU26154State {
     unsigned out_start, out_len;
     bool    dac_on;
 
+    /*
+     * MIC Input Charging Time window (datasheet p.47): RECPLAY leaving
+     * 0x0 mutes the record and playback signal paths until MCTIME has
+     * elapsed.  mct_expire_ns is the virtual time the window ends at
+     * (0 = inactive); the timer only re-evaluates the paths when it ends.
+     */
+    int64_t mct_expire_ns;
+    QEMUTimer *mct_timer;
+
     /* capture staging <- host input */
     uint8_t inbuf[BU_RING];
     unsigned in_start, in_len;
@@ -304,6 +350,7 @@ struct BU26154State {
     uint32_t effect[256];
     uint32_t avvol[0x40];
     uint32_t pga[2];
+    uint32_t micvol[8];   /* MINVOL[2:0]: 6 dB .. 27 dB, p.55 */
 
     BU26154Stats stats;
 
@@ -337,6 +384,7 @@ static uint8_t bu_get(BU26154State *s, unsigned map, unsigned w)
 /* (re)load all three register files with their datasheet initial
  * values and clear the map select. */
 static void bu26154_reset_file(BU26154State *s);
+static void bu26154_update_paths(BU26154State *s);
 
 /* ---- gain laws transcribed from the datasheet transfer tables ---- */
 
@@ -407,9 +455,110 @@ static void bu26154_build_gains(BU26154State *s)
     bu_build_avvol_law(s->avvol);
     s->pga[0] = bu_db_to_q15(0.0);      /* PGAATT=0: normal mode  */
     s->pga[1] = bu_db_to_q15(-9.0);     /* PGAATT=1: attenuation  */
+    for (unsigned v = 0; v < 8; v++) {
+        s->micvol[v] = bu_db_to_q15(6.0 + 3.0 * v);  /* MINVOL (p.55) */
+    }
 }
 
 /* ---- register effects / power gating (datasheet-derived) ---- */
+
+/*
+ * Sampling Rate Setting Register (MAP0 w0, 0x00/0x01, datasheet p.45).
+ * The codec's internal rate is programmed, not fixed: SR[3:0] = 0..8
+ * selects 8 kHz .. 48 kHz and the reset value is 0 (8 kHz).  Codes
+ * 0x9..0xf are not defined by the datasheet, so they keep the nominal
+ * rate rather than changing it.
+ */
+static const uint32_t bu_sr_hz[16] = {
+    8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000,
+    0, 0, 0, 0, 0, 0, 0,
+};
+
+static uint32_t bu_fs_hz(BU26154State *s)
+{
+    uint32_t f = bu_sr_hz[bu_get(s, BU26154_MAP0, BU_REG_SR) & 0x0f];
+
+    return f ? f : BU26154_FREQ_HZ;
+}
+
+/*
+ * MIC Input Charging Time Register (MAP0 w0x0a, 0x14/0x15, datasheet
+ * p.47): "the LSI work recording signal or playback signal are mute
+ * when from RECPLAY is changed from 0x0 until MCTIME".  The law is
+ * 40/fs for MCTIME = 0 and 128/fs per step above that (0x3f -> 8064/fs,
+ * 168 ms at 48 kHz).
+ */
+static int64_t bu_mctime_ns(BU26154State *s)
+{
+    uint64_t n = bu_get(s, BU26154_MAP0, BU_REG_MCTIME) & 0x3f;
+    uint64_t frames = n ? 128 * n : 40;
+
+    return muldiv64(frames, 1000000000LL, bu_fs_hz(s));
+}
+
+static bool bu_in_mctime(BU26154State *s)
+{
+    return s->mct_expire_ns &&
+           qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) < s->mct_expire_ns;
+}
+
+static void bu_mct_tick(void *opaque)
+{
+    BU26154State *s = opaque;
+
+    s->mct_expire_ns = 0;
+    bu26154_update_paths(s);
+}
+
+/*
+ * Clock Enable Register (MAP0 w6, 0x0c/0x0d) and Clock Input / Output
+ * Control Register (MAP0 w7, 0x0e/0x0f), datasheet pp.45-46.  The
+ * datasheet note "a function with (*) bit doesn't need internal clock to
+ * change state" means everything else here only works with the internal
+ * clock running: PLLOE "must be set to 1 ... otherwise internal clock
+ * cannot be provided", and the source named by CLKSEL[2:0] must be
+ * enabled (the PLL for CLKSEL 0/2/3, the MCLKI terminal for 4/6/7).
+ * Without a clock the digital filters and the analog paths produce
+ * nothing, so both streams are gated.
+ */
+static bool bu_clock_ok(BU26154State *s)
+{
+    uint8_t en = bu_get(s, BU26154_MAP0, BU_REG_CLKEN);
+    uint8_t sel = bu_get(s, BU26154_MAP0, BU_REG_CLKIO) & 0x07;
+    bool from_pll = (sel == 0x0 || sel == 0x2 || sel == 0x3);
+
+    if (!(en & BU_BIT_PLLOE)) {
+        return false;
+    }
+    return (en & (from_pll ? BU_BIT_PLLEN : BU_BIT_MCLKEN)) != 0;
+}
+
+/*
+ * DAC Clock Setting Register (MAP0 w0x2c, 0x58/0x59, datasheet p.55)
+ * groups the sampling rates the DAC clock is built for: 0x0 =
+ * 8k/11.025k/12k, 0x1 = 16k/22.05k/24k, 0x2 = 32k/44.1k/48k, 0x3 =
+ * prohibited.  A programming error here leaves the DAC unsynchronised on
+ * real hardware, so surface it rather than papering over it.
+ */
+static unsigned bu_sr_group(unsigned sr)
+{
+    return sr <= 0x2 ? 0 : (sr <= 0x5 ? 1 : 2);
+}
+
+static void bu26154_check_sr_osr(BU26154State *s)
+{
+    unsigned sr = bu_get(s, BU26154_MAP0, BU_REG_SR) & 0x0f;
+    unsigned osr = (bu_get(s, BU26154_MAP0, BU_REG_OSRSEL) >> 4) & 0x03;
+
+    if (sr > 0x8 || osr > 0x2) {
+        return;
+    }
+    if (bu_sr_group(sr) != osr) {
+        qemu_log_mask(LOG_GUEST_ERROR, "bu26154: SR 0x%x (%u Hz) does not "
+                      "match OSRSEL %u; the DAC clock group must cover the "
+                      "sampling rate\n", sr, bu_sr_hz[sr], osr);
+    }
+}
 
 static bool bu_vmid_on(BU26154State *s)
 {
@@ -422,14 +571,16 @@ static bool bu_dac_on(BU26154State *s)
     uint8_t pwr = bu_get(s, BU26154_MAP0, BU_REG_DACPW);
     uint8_t mute = bu_get(s, BU26154_MAP0, BU_REG_AVMUTE);
 
-    return bu_vmid_on(s) && (pwr & BU_BIT_DACEN) && !(mute & BU_BIT_AVMUTE);
+    return bu_vmid_on(s) && (pwr & BU_BIT_DACEN) && !(mute & BU_BIT_AVMUTE) &&
+           bu_clock_ok(s) && !bu_in_mctime(s);
 }
 
 static bool bu_adc_on(BU26154State *s)
 {
     uint8_t pw = bu_get(s, BU26154_MAP0, BU_REG_AINPW);
 
-    return bu_vmid_on(s) && (pw & BU_BIT_ADCEN);
+    return bu_vmid_on(s) && (pw & BU_BIT_ADCEN) &&
+           bu_clock_ok(s) && !bu_in_mctime(s);
 }
 
 /*
@@ -542,6 +693,47 @@ static void bu26154_in_cb(void *opaque, int avail_b)
 
 /* ---- register file ---- */
 
+/*
+ * Record/Playback Running Control Register (MAP0 w9, 0x12/0x13, datasheet
+ * p.47).  RECPLAY[2:0] = 0x0 stop, 0x1 rec, 0x2 play, 0x3 rec+play,
+ * 0x7 monitor; the other codes are undefined.  The datasheet also forbids
+ * going from one running state to another: "Transition between other
+ * states is prohibited.  Please move to the next movement once by all
+ * means after having let recording/playback movement make a stop
+ * (RECPLAY = 0x0)."  A start from the stopped state additionally opens
+ * the MCTIME charging window, during which both paths are muted.
+ */
+static void bu26154_set_recplay(BU26154State *s, uint8_t nw)
+{
+    uint8_t old = bu_get(s, BU26154_MAP0, BU_REG_RECPLAY) & 0x07;
+
+    switch (nw) {
+    case 0x0: case 0x1: case 0x2: case 0x3: case 0x7:
+        break;
+    default:
+        qemu_log_mask(LOG_GUEST_ERROR, "bu26154: RECPLAY 0x%x is not a "
+                      "defined operation\n", nw);
+        return;
+    }
+    if (old && nw && old != nw) {
+        qemu_log_mask(LOG_GUEST_ERROR, "bu26154: RECPLAY 0x%x -> 0x%x "
+                      "without a stop is prohibited\n", old, nw);
+        return;
+    }
+    s->regs[BU_REG_IDX(BU26154_MAP0, BU_REG_RECPLAY)] = nw;
+    BU26154_DBG(s, "RECPLAY %u -> %u\n", old, nw);
+
+    if (old == 0x0 && nw != 0x0) {
+        s->mct_expire_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                           bu_mctime_ns(s);
+        timer_mod(s->mct_timer, s->mct_expire_ns);
+    } else if (nw == 0x0) {
+        s->mct_expire_ns = 0;
+        timer_del(s->mct_timer);
+    }
+    bu26154_update_paths(s);
+}
+
 static void bu26154_reg_write(BU26154State *s, uint8_t idx, uint8_t v)
 {
     unsigned w = idx >> 1;
@@ -550,19 +742,43 @@ static void bu26154_reg_write(BU26154State *s, uint8_t idx, uint8_t v)
         return;   /* even index = read address; writes are ignored */
     }
     if (idx == 0x1d) {           /* MAPCON (odd write index 0x1d) */
+        if ((v & 0x03) == 0x03) {
+            /* MAPCON = 0x3 is "prohibited from setting" (p.48). */
+            qemu_log_mask(LOG_GUEST_ERROR, "bu26154: MAPCON 0x3 is "
+                          "prohibited, map select unchanged\n");
+            return;
+        }
         s->map = v & 0x03;
         BU26154_DBG(s, "MAPCON <- %u\n", s->map);
         return;
     }
-    if (idx == 0x11) {           /* SOFTRST: write 1 resets, write 0 releases */
+    if (idx == 0x11) {           /* Software Reset Register (p.46) */
+        /*
+         * "CPU interface and this register are reset by writing SOFTRST
+         * bit to '1'.  And then, write '0' for releasing reset.  Only the
+         * CPU interface (the index pointer and the transfer state) and
+         * this register are reset - the audio register file and the map
+         * select survive, which is what a driver that toggles SOFTRST in
+         * the middle of its init sequence relies on.
+         */
         if (v & 0x01) {
-            BU26154_DBG(s, "software reset\n");
-            bu26154_reset_file(s);
-            return;
+            s->regs[BU_REG_IDX(BU26154_MAP0, BU_REG_SOFTRST)] = 0x00;
+            s->want_idx = true;
+            s->cur_idx = 0;
+            BU26154_DBG(s, "software reset (CPU interface)\n");
         }
         return;
     }
     if (w >= BU26154_WORDS) {
+        return;
+    }
+    if (s->map == BU26154_MAP0 && w == BU_REG_OSRSEL && (v & 0x30) == 0x30) {
+        qemu_log_mask(LOG_GUEST_ERROR, "bu26154: OSRSEL 0x3 is prohibited, "
+                      "DAC clock setting unchanged\n");
+        return;
+    }
+    if (s->map == BU26154_MAP0 && w == BU_REG_RECPLAY) {
+        bu26154_set_recplay(s, v & 0x07);
         return;
     }
     if (s->map == BU26154_MAP0 && w == BU_REG_SPPW) {
@@ -577,6 +793,13 @@ static void bu26154_reg_write(BU26154State *s, uint8_t idx, uint8_t v)
         case BU_REG_SPPW:
         case BU_REG_AVMUTE:
             bu26154_update_paths(s);
+            break;
+        case BU_REG_CLKEN:
+        case BU_REG_CLKIO:
+        case BU_REG_SR:
+        case BU_REG_OSRSEL:
+            bu26154_update_paths(s);
+            bu26154_check_sr_osr(s);
             break;
         default:
             break;
@@ -649,6 +872,10 @@ static void bu26154_reset_file(BU26154State *s)
     bu26154_apply_inits(s, bu_map2_init, ARRAY_SIZE(bu_map2_init),
                         BU26154_MAP2);
     s->map = 0;
+    s->mct_expire_ns = 0;
+    if (s->mct_timer) {
+        timer_del(s->mct_timer);
+    }
 }
 
 static void bu26154_reset(DeviceState *dev)
@@ -841,6 +1068,14 @@ uint32_t bu26154_adc_output(BU26154State *s)
     uint32_t g = s->rdvol[bu_get(s, BU26154_MAP0, BU_REG_RDVOL)];
 
     g = (uint32_t)(((uint64_t)g * s->pga[bu_adc_pgaatt(s)]) >> 15);
+    /*
+     * The analog microphone volume in front of the PGA: MINVOL[2:0] in
+     * the Mic Interface Control register adds 6 dB .. 27 dB in 3 dB
+     * steps (datasheet p.55), which the capture level must follow.
+     */
+    g = (uint32_t)(((uint64_t)g *
+                    s->micvol[bu_get(s, BU26154_MAP0, BU_REG_MINIF) & 0x07])
+                   >> 15);
     if (!bu_mic_on(s) || (dvm & 0x10)) {
         g = 0;
     }
@@ -861,6 +1096,13 @@ void bu26154_get_stats(BU26154State *s, BU26154Stats *st)
     st->micben = (bu_get(s, BU26154_MAP0, BU_REG_AREFPW) >> 2) & 0x01;
     st->micbcon = bu_get(s, BU26154_MAP0, BU_REG_MICB) & 0x03;
     st->adc_pwr = bu_get(s, BU26154_MAP0, BU_REG_AINPW);
+    st->clken = bu_get(s, BU26154_MAP0, BU_REG_CLKEN);
+    st->recplay = bu_get(s, BU26154_MAP0, BU_REG_RECPLAY) & 0x07;
+    st->mctime = bu_get(s, BU26154_MAP0, BU_REG_MCTIME) & 0x3f;
+    st->minif = bu_get(s, BU26154_MAP0, BU_REG_MINIF);
+    st->mct_active = s->mct_expire_ns &&
+                     qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) < s->mct_expire_ns;
+    st->clk_ok = bu_clock_ok(s);
     st->pgaen = (st->adc_pwr >> 3) & 0x01;
     st->pgaatt = (st->adc_pwr >> 5) & 0x01;
     st->dac_pwr = bu_get(s, BU26154_MAP0, BU_REG_DACPW);
@@ -927,6 +1169,8 @@ static void bu26154_realize(DeviceState *dev, Error **errp)
     s->dbg = bu26154_debug();
     s->last_dbg_ns = 0;
     bu26154_build_gains(s);
+    s->mct_expire_ns = 0;
+    s->mct_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, bu_mct_tick, s);
 
     /*
      * The codec is always present on the board (I2C register model).
@@ -963,6 +1207,12 @@ static void bu26154_realize(DeviceState *dev, Error **errp)
 static void bu26154_exit(DeviceState *dev)
 {
     BU26154State *s = BU26154(dev);
+
+    if (s->mct_timer) {
+        timer_del(s->mct_timer);
+        timer_free(s->mct_timer);
+        s->mct_timer = NULL;
+    }
 
     if (s->audio_be) {
         if (s->dac_voice) {

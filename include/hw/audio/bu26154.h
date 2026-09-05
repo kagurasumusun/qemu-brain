@@ -21,7 +21,8 @@
  * This header is shared with the i.MX28 SAIF model (hw/misc/mxs_saif.c)
  * exactly like include/hw/audio/sgtl5000.h so the SAIF serial engine
  * can push playback frames into the codec and pull captured frames out
- * of it at the fixed 48 kHz frame rate.
+ * of it; the SAIF supplies the frame clock, while the codec's internal
+ * rate follows its programmed SR[3:0] (datasheet p.45).
  */
 #ifndef HW_BU26154_H
 #define HW_BU26154_H
@@ -37,6 +38,14 @@ OBJECT_DECLARE_SIMPLE_TYPE(BU26154State, BU26154)
  */
 #define BU26154_I2C_ADDR 0x1a
 
+/*
+ * Frame cadence the SAIF model pushes at, i.e. the LRCLK the i.MX28
+ * generates.  It is *not* the codec's own rate: that one is programmed
+ * through the Sampling Rate Setting Register SR[3:0] (datasheet Rev.002
+ * p.45, reset value 0 = 8 kHz) and the model uses it for the datasheet
+ * timing laws.  A guest that programs SR to something else than what
+ * SAIF clocks in is out of the datasheet's contract and is reported.
+ */
 #define BU26154_FREQ_HZ 48000
 
 /* MAPCON values select one of three register maps. */
@@ -84,6 +93,12 @@ typedef struct BU26154Stats {
     uint8_t rdvol;                /* Record Digital Attenuator */
     uint8_t avmute;               /* Amplifier Volume Ctrl Fn Enable */
     uint8_t dvmute;               /* Digital Volume Control */
+    uint8_t clken;                /* Clock Enable reg (MAP0 w6, p.45) */
+    uint8_t recplay;              /* RECPLAY[2:0] (MAP0 w9, p.47) */
+    uint8_t mctime;               /* MCTIME[5:0] (MAP0 w0x0a, p.47) */
+    uint8_t minif;                /* MINDIF|MINVOL (MAP0 w0x2d, p.55) */
+    bool    mct_active;           /* mic charging mute window running */
+    bool    clk_ok;               /* internal clock valid (pp.45-46) */
     /* true when a host audio backend is attached (not a silent sink) */
     bool backend_out;
     bool backend_in;

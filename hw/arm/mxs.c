@@ -957,6 +957,8 @@ void hmp_brain_sgtl(Monitor *mon, const QDict *qdict)
                        "DACPWR=0x%02x SPPWR=0x%02x\n"
                        "         PDATT=0x%02x AVVOL=0x%02x RDVOL=0x%02x "
                        "AVMUTE=0x%02x DVMUTE=0x%02x\n"
+                       "         CLKEN=0x%02x (clock %s) RECPLAY=%u "
+                       "MCTIME=0x%02x%s MINIF=0x%02x\n"
                        "         host backend: out=%s in=%s\n",
                        st.dac_in_frames, st.dac_out_frames, st.dac_out_bytes,
                        st.dac_dropped,
@@ -965,6 +967,8 @@ void hmp_brain_sgtl(Monitor *mon, const QDict *qdict)
                        st.mapcon, st.sr, st.vmicon, st.micben, st.micbcon,
                        st.adc_pwr, st.pgaen, st.pgaatt, st.dac_pwr, st.sp_pwr,
                        st.pdatt, st.avvol, st.rdvol, st.avmute, st.dvmute,
+                       st.clken, st.clk_ok ? "ok" : "none", st.recplay,
+                       st.mctime, st.mct_active ? " (muted)" : "", st.minif,
                        st.backend_out ? "yes" : "no (silent sink)",
                        st.backend_in ? "yes" : "no (silent sink)");
     } else {
