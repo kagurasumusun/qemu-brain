@@ -138,6 +138,7 @@ typedef struct BrainMachineState {
     BlockBackend *emmc_blk;
     BlockBackend *sd_blk;
     char *boot_mode;
+    char *reg_log;            /* 'reg-log=<file>': dump log, see below */
     uint32_t lcd_width;
     uint32_t lcd_height;
     uint32_t lcd_rotate;
@@ -967,12 +968,100 @@ void hmp_brain_sgtl(Monitor *mon, const QDict *qdict)
 
 /*
  * ------------------------------------------------------------------
+ * Register log: register dumps saved to a file
+ *
+ * '-machine brain,reg-log=<file>' (or BRAIN_REGLOG=<file>, see brain_init)
+ * keeps the register dumps in a file instead of only in the stderr
+ * scrollback -- the equivalent of saving the guest console with
+ * '-serial file=<file>'.  Everything written here is flushed per line, so a
+ * wedged or killed guest still leaves a complete log behind.
+ *
+ * What the file collects:
+ *   - every MXS MMIO register access (the "[mxs] ..." lines, with the
+ *     accessing guest PC) that the models report through mxs_trace_access();
+ *   - the EDNA2 mailbox page traffic and MCU command sequence;
+ *   - a full vCPU register dump for every brain_watch / brain_bwatch hit,
+ *     next to the one-line summary those aids already print.
+ *
+ * mxs_reglog_emit() is the single sink: the file always gets the line, and
+ * stderr only when the caller's own switch (MXS_TRACE, brain_trace,
+ * BRAIN_MBTRACE, ...) asked for it.  Turning the log on therefore never
+ * floods the console, and stderr output is byte-for-byte what it was.
+ * ------------------------------------------------------------------
+ */
+FILE *mxs_reglog;
+
+void mxs_reglog_emit(bool to_stderr, const char *fmt, ...)
+{
+    va_list ap;
+
+    if (to_stderr) {
+        va_start(ap, fmt);
+        vfprintf(stderr, fmt, ap);
+        va_end(ap);
+    }
+    if (mxs_reglog) {
+        va_start(ap, fmt);
+        vfprintf(mxs_reglog, fmt, ap);
+        va_end(ap);
+        fflush(mxs_reglog);
+    }
+}
+
+/*
+ * Open @path as the register log.  Also used as the closing entry point
+ * (@path empty) and by the BRAIN_REGLOG fallback.  Note that an open log
+ * switches the MXS access trace machinery on (mxs_trace_enabled()), so this
+ * has to happen before the devices are realized - both call sites do.
+ */
+static bool brain_reglog_open(BrainMachineState *bms, const char *path,
+                              Error **errp)
+{
+    FILE *f = NULL;
+
+    if (path && *path) {
+        f = fopen(path, "w");
+        if (!f) {
+            error_setg_errno(errp, errno, "could not open register log '%s'",
+                             path);
+            return false;
+        }
+    }
+    if (mxs_reglog && mxs_reglog != f) {
+        fclose(mxs_reglog);
+    }
+    mxs_reglog = f;
+    g_free(bms->reg_log);
+    bms->reg_log = f ? g_strdup(path) : NULL;
+    if (f) {
+        fprintf(f, "# brain register log '%s': MXS MMIO accesses, EDNA2 "
+                   "mailbox traffic and\n# vCPU register dumps on "
+                   "brain_watch / brain_bwatch hits\n", path);
+        fflush(f);
+    }
+    return true;
+}
+
+/* the 'info registers' equivalent, straight into the log file */
+static void brain_reglog_cpu_state(CPUState *cs, const char *why)
+{
+    if (!mxs_reglog) {
+        return;
+    }
+    fprintf(mxs_reglog, "[brain-regdump] %s:\n", why);
+    cpu_dump_state(cs, mxs_reglog, CPU_DUMP_FPU | CPU_DUMP_VPU);
+    fflush(mxs_reglog);
+}
+
+/*
+ * ------------------------------------------------------------------
  * Analysis aids: brain_watch / BRAIN_UARTWATCH
  *
  * Two debugging aids used to locate guest code paths dynamically
  * (e.g. which driver prints the touchkey calibration failure).  Both
  * are inert unless invoked (HMP command / env var) and add no state
- * changes when unused.
+ * changes when unused.  Their register dumps are mirrored into the
+ * register log when one is open.
  * ------------------------------------------------------------------
  */
 
@@ -1022,32 +1111,39 @@ static void brain_watch_debug_excp_handler(CPUState *cs)
         uint8_t buf[128];
         int i, w;
 
-        fprintf(stderr,
-                "[brain-watch] HIT %d va=0x%08x pc=0x%08x r0=%08x r1=%08x "
-                "r2=%08x r3=%08x r4=%08x r5=%08x r6=%08x r7=%08x "
-                "r8=%08x r9=%08x r10=%08x r11=%08x lr=%08x sp=%08x "
-                "cpsr=%08x flags=%x\n",
-                ++brain_watch_hit_count,
-                (unsigned)wp->hitaddr, (unsigned)env->regs[15],
-                (unsigned)env->regs[0], (unsigned)env->regs[1],
-                (unsigned)env->regs[2], (unsigned)env->regs[3],
-                (unsigned)env->regs[4], (unsigned)env->regs[5],
-                (unsigned)env->regs[6], (unsigned)env->regs[7],
-                (unsigned)env->regs[8], (unsigned)env->regs[9],
-                (unsigned)env->regs[10], (unsigned)env->regs[11],
-                (unsigned)env->regs[14], (unsigned)env->regs[13],
-                (unsigned)cpsr_read(env), wp->flags);
+        mxs_reglog_emit(true,
+                        "[brain-watch] HIT %d va=0x%08x pc=0x%08x "
+                        "r0=%08x r1=%08x r2=%08x r3=%08x r4=%08x r5=%08x "
+                        "r6=%08x r7=%08x r8=%08x r9=%08x r10=%08x "
+                        "r11=%08x lr=%08x sp=%08x cpsr=%08x flags=%x\n",
+                        ++brain_watch_hit_count,
+                        (unsigned)wp->hitaddr, (unsigned)env->regs[15],
+                        (unsigned)env->regs[0], (unsigned)env->regs[1],
+                        (unsigned)env->regs[2], (unsigned)env->regs[3],
+                        (unsigned)env->regs[4], (unsigned)env->regs[5],
+                        (unsigned)env->regs[6], (unsigned)env->regs[7],
+                        (unsigned)env->regs[8], (unsigned)env->regs[9],
+                        (unsigned)env->regs[10], (unsigned)env->regs[11],
+                        (unsigned)env->regs[14], (unsigned)env->regs[13],
+                        (unsigned)cpsr_read(env), wp->flags);
         for (w = 0; w < 4; w++) {
             if (cpu_memory_rw_debug(cs, env->regs[13] + w * 0x80,
                                     buf, sizeof(buf), 0) == 0) {
-                fprintf(stderr, "[brain-watch] stack+0x%03x:",
-                        w * 0x80);
-                for (i = 0; i < 32; i++) {
-                    fprintf(stderr, " %08x", ldl_le_p(buf + i * 4));
+                char line[400];
+                int off = g_snprintf(line, sizeof(line),
+                                     "[brain-watch] stack+0x%03x:",
+                                     w * 0x80);
+
+                for (i = 0; i < 32 && off + 9 < (int)sizeof(line); i++) {
+                    off += g_snprintf(line + off, sizeof(line) - off,
+                                      " %08x", ldl_le_p(buf + i * 4));
                 }
-                fprintf(stderr, "\n");
+                g_strlcpy(line + off, "\n", sizeof(line) - off);
+                mxs_reglog_emit(true, "%s", line);
             }
         }
+        /* the same snapshot the log file is about: full register dump */
+        brain_reglog_cpu_state(cs, "brain-watch hit");
         /* dump-once: remove only the hit watchpoint (others stay
          * armed so several BRAIN_WATCH entries each fire once) */
         cpu_watchpoint_remove_by_ref(cs, wp);
@@ -1111,17 +1207,19 @@ static void brain_watch_debug_excp_handler(CPUState *cs)
                 break;
             }
         }
-        fprintf(stderr,
-                "[brain-bwatch] HIT %d pc=0x%08x r0=%08x r1=%08x r2=%08x "
-                "r3=%08x r4=%08x r5=%08x lr=%08x sp=%08x cpsr=%08x "
-                "(alive=%d)\n",
-                ++brain_watch_hit_count,
-                (unsigned)pc,
-                (unsigned)env->regs[0], (unsigned)env->regs[1],
-                (unsigned)env->regs[2], (unsigned)env->regs[3],
-                (unsigned)env->regs[4], (unsigned)env->regs[5],
-                (unsigned)env->regs[14], (unsigned)env->regs[13],
-                (unsigned)cpsr_read(env), alive);
+        mxs_reglog_emit(true,
+                        "[brain-bwatch] HIT %d pc=0x%08x r0=%08x r1=%08x "
+                        "r2=%08x r3=%08x r4=%08x r5=%08x lr=%08x sp=%08x "
+                        "cpsr=%08x (alive=%d)\n",
+                        ++brain_watch_hit_count,
+                        (unsigned)pc,
+                        (unsigned)env->regs[0], (unsigned)env->regs[1],
+                        (unsigned)env->regs[2], (unsigned)env->regs[3],
+                        (unsigned)env->regs[4], (unsigned)env->regs[5],
+                        (unsigned)env->regs[14], (unsigned)env->regs[13],
+                        (unsigned)cpsr_read(env), alive);
+        /* full snapshot of the registers at the breakpoint into the log */
+        brain_reglog_cpu_state(cs, "brain-bwatch hit");
         if (!alive) {
             cpu_breakpoint_remove_all(cs, BP_GDB);
             fprintf(stderr, "[brain-bwatch] all disarmed\n");
@@ -1476,9 +1574,10 @@ static void brain_edna2_mcu_latch(BrainMachineState *bms)
     }
     timer_mod(bms->edna2_mcu_timer,
               qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + (uint64_t)delay * 1000);
-    if (mxs_trace_live || brain_mb_trace_live) {
-        fprintf(stderr, "[edna2-mcu] cmd 0x%02x latched, busy %u us\n",
-                bms->edna2_mcu_cmd, delay);
+    if (mxs_trace_live || brain_mb_trace_live || mxs_reglog) {
+        mxs_reglog_emit(mxs_trace_live || brain_mb_trace_live,
+                        "[edna2-mcu] cmd 0x%02x latched, busy %u us\n",
+                        bms->edna2_mcu_cmd, delay);
     }
 }
 
@@ -1562,12 +1661,13 @@ static void brain_edna2_mcu_execute(BrainMachineState *bms)
         break;
     }
 
-    if (mxs_trace_live || brain_mb_trace_live) {
-        fprintf(stderr, "[edna2-mcu] cmd 0x%02x done at vnow=%" PRIu64
-                " us (done-flag posted, +0x404=0x%08x)\n",
-                bms->edna2_mcu_cmd,
-                qemu_clock_get_us(QEMU_CLOCK_VIRTUAL),
-                ldl_le_p(bms->edna2_mb + BRAIN_EDNA2_MCU_TOUCHKEY_OFF));
+    if (mxs_trace_live || brain_mb_trace_live || mxs_reglog) {
+        mxs_reglog_emit(mxs_trace_live || brain_mb_trace_live,
+                        "[edna2-mcu] cmd 0x%02x done at vnow=%" PRIu64
+                        " us (done-flag posted, +0x404=0x%08x)\n",
+                        bms->edna2_mcu_cmd,
+                        qemu_clock_get_us(QEMU_CLOCK_VIRTUAL),
+                        ldl_le_p(bms->edna2_mb + BRAIN_EDNA2_MCU_TOUCHKEY_OFF));
     }
 }
 
@@ -1583,9 +1683,10 @@ static void brain_edna2_mcu_kick(BrainMachineState *bms)
     timer_mod(bms->edna2_mcu_timer,
               qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
               (uint64_t)BRAIN_EDNA2_MCU_POLL_US * 1000);
-    if (mxs_trace_live || brain_mb_trace_live) {
-        fprintf(stderr, "[edna2-mcu] doorbell kick at vnow=%" PRIu64 " us\n",
-                qemu_clock_get_us(QEMU_CLOCK_VIRTUAL));
+    if (mxs_trace_live || brain_mb_trace_live || mxs_reglog) {
+        mxs_reglog_emit(mxs_trace_live || brain_mb_trace_live,
+                        "[edna2-mcu] doorbell kick at vnow=%" PRIu64 " us\n",
+                        qemu_clock_get_us(QEMU_CLOCK_VIRTUAL));
     }
 }
 
@@ -1594,8 +1695,9 @@ static void brain_edna2_mcu_kick(BrainMachineState *bms)
  * MXS MMIO trace can not see who touches it.  For wedge/suspend
  * analysis we overlay a logged IO region on the mailbox page that
  * reports every access (guest PC included) while mxs_trace_live is
- * on.  The backing store is copied from / to the DRAM page so guest
- * behaviour is unchanged.  Release builds should drop the overlay.
+ * on (and into the register log whenever one is open).  The backing
+ * store is copied from / to the DRAM page so guest behaviour is
+ * unchanged.  Release builds should drop the overlay.
  */
 
 static uint64_t brain_edna2_mb_read(void *opaque, hwaddr offset, unsigned size)
@@ -1604,11 +1706,12 @@ static uint64_t brain_edna2_mb_read(void *opaque, hwaddr offset, unsigned size)
     uint64_t v = 0;
 
     memcpy(&v, bms->edna2_mb + offset, size);
-    if (brain_mb_trace_live) {
-        fprintf(stderr, "[edna2-mb] %lld R +0x%" HWADDR_PRIx
-                " = 0x%08" PRIx64 " pc=0x%08x\n",
-                (long long)g_get_real_time(), offset, v,
-                (unsigned)mxs_trace_guest_pc());
+    if (brain_mb_trace_live || mxs_reglog) {
+        mxs_reglog_emit(brain_mb_trace_live,
+                        "[edna2-mb] %lld R +0x%" HWADDR_PRIx
+                        " = 0x%08" PRIx64 " pc=0x%08x\n",
+                        (long long)g_get_real_time(), offset, v,
+                        (unsigned)mxs_trace_guest_pc());
     }
     return v;
 }
@@ -1619,11 +1722,12 @@ static void brain_edna2_mb_write(void *opaque, hwaddr offset, uint64_t value,
     BrainMachineState *bms = opaque;
 
     memcpy(bms->edna2_mb + offset, &value, size);
-    if (brain_mb_trace_live) {
-        fprintf(stderr, "[edna2-mb] %lld W +0x%" HWADDR_PRIx
-                " <- 0x%08" PRIx64 " pc=0x%08x\n",
-                (long long)g_get_real_time(), offset, value,
-                (unsigned)mxs_trace_guest_pc());
+    if (brain_mb_trace_live || mxs_reglog) {
+        mxs_reglog_emit(brain_mb_trace_live,
+                        "[edna2-mb] %lld W +0x%" HWADDR_PRIx
+                        " <- 0x%08" PRIx64 " pc=0x%08x\n",
+                        (long long)g_get_real_time(), offset, value,
+                        (unsigned)mxs_trace_guest_pc());
     }
 
     /* Doorbell: the guest kicks the MCU by writing 1 to +0x3C. */
@@ -1759,6 +1863,9 @@ static void brain_cpu_reset(void *opaque)
                         "launcher (the EBOOT equivalent)");
         }
     }
+
+    /* baseline of the register log: where this run starts from */
+    brain_reglog_cpu_state(cs, "reset");
 }
 
 /* ------------------------------------------------------------------ */
@@ -1822,6 +1929,20 @@ static void brain_init(MachineState *machine)
     DeviceState *icoll, *dev;
     DriveInfo *di;
     int i;
+
+    /*
+     * BRAIN_REGLOG=<file> is the env form of 'reg-log' (BRAIN_MBTRACE &
+     * co. style); the property wins when both are given.  Has to happen
+     * before the first device is created: an open register log is what
+     * switches the MXS access trace machinery on.
+     */
+    if (!mxs_reglog) {
+        const char *rl = getenv("BRAIN_REGLOG");
+
+        if (rl && *rl) {
+            brain_reglog_open(bms, rl, &error_fatal);
+        }
+    }
 
     /*
      * Apply the per-instance bus-error policy to the machine class.  The
@@ -2413,6 +2534,23 @@ static void brain_set_boot_mode(Object *obj, const char *value, Error **errp)
     bms->boot_mode = g_strdup(value);
 }
 
+/*
+ * 'reg-log=<file>': keep the register dumps in a file, the register-dump
+ * equivalent of saving the serial log with '-serial file=<file>'.  Setting
+ * it to an empty string closes the log again.
+ */
+static char *brain_get_reg_log(Object *obj, Error **errp)
+{
+    BrainMachineState *bms = BRAIN_MACHINE(obj);
+
+    return g_strdup(bms->reg_log ? bms->reg_log : "");
+}
+
+static void brain_set_reg_log(Object *obj, const char *value, Error **errp)
+{
+    brain_reglog_open(BRAIN_MACHINE(obj), value, errp);
+}
+
 static bool brain_get_verbose(Object *obj, Error **errp)
 {
     return BRAIN_MACHINE(obj)->verbose;
@@ -2561,6 +2699,19 @@ static void brain_instance_init(Object *obj)
         "'full' (also run the XLDR DDR init)");
     object_property_add_bool(obj, "rom-verbose", brain_get_verbose,
                              brain_set_verbose);
+
+    /*
+     * Register dumps to a file, so that they can be inspected the same way
+     * the guest console is when it is captured with '-serial file:<file>'.
+     */
+    object_property_add_str(obj, "reg-log", brain_get_reg_log,
+                            brain_set_reg_log);
+    object_property_set_description(obj, "reg-log",
+        "Write the register dumps to this file: every MXS MMIO register "
+        "access (with the accessing guest PC), the EDNA2 mailbox traffic "
+        "and a full vCPU register dump for each brain_watch / brain_bwatch "
+        "hit.  This is the register-dump counterpart of '-serial "
+        "file:<file>'; BRAIN_REGLOG=<file> selects the same log.");
 
     object_property_add_bool(obj, "strict-hw", brain_get_strict_hw,
                              brain_set_strict_hw);

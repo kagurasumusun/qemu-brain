@@ -107,7 +107,20 @@ extern bool mxs_trace_live;
 uint32_t mxs_trace_guest_pc(void);
 uint32_t brain_sd_trace_pc(void);
 
-static inline bool mxs_trace_enabled(const char *name)
+/*
+ * Register log: an optional file that keeps the register dumps, the
+ * counterpart of saving the guest console with '-serial file:<path>'.
+ * Selected with '-machine brain,reg-log=<path>' or BRAIN_REGLOG=<path>
+ * (implementation: hw/arm/mxs.c).  While it is open every MXS block traces
+ * -- its accesses land in the file -- but stderr stays quiet unless
+ * MXS_TRACE or 'brain_trace' asks for those lines too.
+ */
+extern FILE *mxs_reglog;
+
+void mxs_reglog_emit(bool to_stderr, const char *fmt, ...) G_GNUC_PRINTF(2, 3);
+
+/* does the MXS_TRACE environment ask for @name on stderr? */
+static inline bool mxs_trace_stderr(const char *name)
 {
     const char *e = getenv("MXS_TRACE");
 
@@ -117,15 +130,45 @@ static inline bool mxs_trace_enabled(const char *name)
     return !strcmp(e, "all") || strstr(e, name) != NULL;
 }
 
+/* does @name's traffic have to be formatted at all (stderr or reg log)? */
+static inline bool mxs_trace_enabled(const char *name)
+{
+    return mxs_reglog != NULL || mxs_trace_stderr(name);
+}
+
+/*
+ * Whether the trace line also goes to stderr.  Without a register log the
+ * callers' own check (their per-block flag or 'brain_trace') already decided,
+ * so print unconditionally - exactly what the models always did.  With a log
+ * open, blocks get traced that MXS_TRACE never asked for, so the stderr
+ * decision has to be re-derived here.
+ */
+static inline bool mxs_trace_want_stderr(const char *name)
+{
+    if (!mxs_reglog) {
+        return true;
+    }
+    return mxs_trace_live || mxs_trace_stderr(name);
+}
+
+/*
+ * Emit one access line to the register log and, when @to_stderr says so, to
+ * stderr.  Kept as a single format string so both sinks always agree.  A
+ * block without a name property is only ever seen here through the register
+ * log (MXS_TRACE can not name it), and '%s' with NULL would be fatal on
+ * Windows, so it is labelled explicitly.
+ */
 static inline void mxs_trace_access(const char *name, bool write,
                                     hwaddr offset, uint32_t value)
 {
     static const char *const op[4] = { "  ", "set", "clr", "tog" };
 
-    fprintf(stderr, "[mxs] %-8s %s +0x%03x %s 0x%08x pc=0x%08x\n", name,
-            write ? "W" : "R", (unsigned)offset,
-            write ? op[MXS_BANK_OP(offset)] : "->", value,
-            (unsigned)mxs_trace_guest_pc());
+    mxs_reglog_emit(mxs_trace_want_stderr(name),
+                    "[mxs] %-8s %s +0x%03x %s 0x%08x pc=0x%08x\n",
+                    name ? name : "(unnamed)",
+                    write ? "W" : "R", (unsigned)offset,
+                    write ? op[MXS_BANK_OP(offset)] : "->", value,
+                    (unsigned)mxs_trace_guest_pc());
 }
 
 /*
@@ -136,9 +179,11 @@ static inline void mxs_trace_access(const char *name, bool write,
 static inline void mxs_trace_access_word(const char *name, bool write,
                                          hwaddr offset, uint32_t value)
 {
-    fprintf(stderr, "[mxs] %-8s %s +0x%03x %s 0x%08x pc=0x%08x\n", name,
-            write ? "W" : "R", (unsigned)offset, write ? "=" : "->", value,
-            (unsigned)mxs_trace_guest_pc());
+    mxs_reglog_emit(mxs_trace_want_stderr(name),
+                    "[mxs] %-8s %s +0x%03x %s 0x%08x pc=0x%08x\n",
+                    name ? name : "(unnamed)",
+                    write ? "W" : "R", (unsigned)offset, write ? "=" : "->",
+                    value, (unsigned)mxs_trace_guest_pc());
 }
 
 static inline uint32_t mxs_bank_sftrst(uint32_t old, uint32_t new_val)
