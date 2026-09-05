@@ -916,7 +916,7 @@ static void brain_kbd_init(Object *obj)
     qdev_init_gpio_in_named(dev, brain_kbd_panel_wake, "panel-wake", 1);
 }
 
-static void brain_kbd_post_load(void *opaque, int version_id)
+static int brain_kbd_post_load(void *opaque, int version_id)
 {
     BrainKbdState *s = opaque;
 
@@ -931,6 +931,7 @@ static void brain_kbd_post_load(void *opaque, int version_id)
                   qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
                   BRAIN_KBD_TOUCHKEY_SCAN_NS);
     }
+    return 0;
 }
 
 static const VMStateDescription vmstate_brain_kbd = {
