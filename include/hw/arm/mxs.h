@@ -239,6 +239,8 @@ void brain_kbd_edna2_pulse_ext(DeviceState *kbd);
 /* Right-edge touchkey strip: a press on the panel's right band is a
  * touchkey pad, routed from the LRADC to the keyboard MCU model. */
 void brain_kbd_touchkey_strip(DeviceState *kbd, int index, bool down);
+/* The host read mailbox +0x404: stop holding back a released pad. */
+void brain_kbd_touchkey_ack(DeviceState *kbd);
 /* Wire the keyboard MCU device into the LRADC strip router. */
 void mxs_lradc_set_touchkey_kbd(DeviceState *lradc, DeviceState *kbd);
 

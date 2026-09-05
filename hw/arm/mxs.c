@@ -2008,6 +2008,10 @@ static uint64_t brain_edna2_mb_read(void *opaque, hwaddr offset, unsigned size)
     uint64_t v = 0;
 
     memcpy(&v, bms->edna2_mb + offset, size);
+    if (offset == BRAIN_EDNA2_MCU_TOUCHKEY_OFF) {
+        /* the keyboard MCU is entitled to know that its report was read */
+        brain_kbd_touchkey_ack(bms->kbd);
+    }
     if (brain_mb_trace_live) {
         fprintf(stderr, "[edna2-mb] %lld R +0x%" HWADDR_PRIx
                 " = 0x%08" PRIx64 " pc=0x%08x\n",
