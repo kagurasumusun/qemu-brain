@@ -104,13 +104,15 @@ static const int brain_kbd_col_pins[BRAIN_KBD_COLS] = { 0, 1, 2, 3, 4, 6, 7 };
  *   bits 0x2, 0x4, 0x8, 0x20, 0x40, 0x100, 0x200, 0x400, 0x800
  *                = per-key PRESSED state, ACTIVE-LOW (bit clear = pressed)
  *
- * On the real Brain the EDNA2 MCU scans the touchkeys and posts this
- * word into the mailbox continuously; the host wake path is the MCU
- * attention IRQ (ICOL 33, the same `edna2_int` line).  With no pad
- * touched the word is 0xf7e: the 0x10 valid bit and all nine pad bits
- * set, the 0x80 scan bit clear.  A pressed pad clears its bit.  The
- * word encoding is shared with the mailbox seed in hw/arm/mxs.c, so
- * the constants live in include/hw/arm/mxs.h.
+ * On the real Brain the EDNA2 MCU scans the touchkeys on its own cycle
+ * and posts the sampled state into the mailbox; between two scans the
+ * word simply keeps the last sample.  The host wake path is the MCU
+ * attention IRQ (ICOL 33, the same `edna2_int` line), asserted by the
+ * scan that first sees a pad and dropped by the scan that finds the pads
+ * released.  With no pad touched the word is 0xf7e: the 0x10 valid bit
+ * and all nine pad bits set, the 0x80 scan bit clear.  A pressed pad
+ * clears its bit.  The word encoding is shared with the mailbox seed in
+ * hw/arm/mxs.c, so the constants live in include/hw/arm/mxs.h.
  */
 /*
  * The exact physical assignment of the nine pads is not documented, so
@@ -154,9 +156,9 @@ typedef struct BrainKbdState {
     uint64_t *touchkey_mb_reads; /* mailbox reads, all of them             */
     uint64_t *touchkey_tk_reads; /* reads that hit the +0x404 report word   */
     uint32_t touchkey_want;     /* pads the finger is actually on          */
-    uint32_t touchkey_held;     /* released pads still posted, waiting for
-                                 * the host to read the report word        */
-    QEMUTimer *touchkey_timer;  /* ... and giving up on that wait          */
+    uint32_t touchkey_pub;      /* what the MCU's last finished scan saw   */
+    QEMUTimer *touchkey_scan_timer; /* the MCU key scan cycle              */
+    bool touchkey_scan_busy;    /* a conversion is running (report 0x80)   */
     uint32_t mrs_low;           /* MRSensor lines pulled low on GPIO0
                                  * (only BRAIN_MRS_GPIO0_PINS bits used) */
 } BrainKbdState;
@@ -177,19 +179,22 @@ static bool brain_kbd_debug(void)
 
 static void brain_kbd_touchkey_update(BrainKbdState *s, QKeyCode qcode,
                                       bool down);
-static void brain_kbd_touchkey_post(BrainKbdState *s, int index, bool down,
-                                    const char *why);
+static void brain_kbd_touchkey_publish(BrainKbdState *s, const char *why);
+static void brain_kbd_touchkey_release_irq(BrainKbdState *s);
 
 /*
- * How long a released pad stays in the report word when the host has not
- * read it.  A real EDNA2 MCU holds its attention line until its scan has
- * been consumed; the model needs the same, because the guest wakes from a
- * deep idle on its own schedule and a ~70 ms tap that is cleared the moment
- * the finger lifts can be gone before the reader ever runs -- which looks
- * exactly like "QEMU saw the press, the virtual machine did not", and, since
- * it depends on where the guest happened to be, like flaky input.
+ * The MCU does not watch the pads continuously: it scans them.  SCAN_NS is
+ * the interval between two scans and BUSY_NS how long one conversion takes;
+ * while a conversion runs the report word carries the "scan in progress"
+ * flag (bit 0x80), which is what that bit is for on the part.  A touch is
+ * therefore visible for whole scan cycles around the finger's own press and
+ * release, and a tap shorter than one cycle is not reported at all -- the
+ * same behaviour the hardware has, and the reason the model deliberately
+ * keeps no "hold until the guest looked" latch: such a latch turns a
+ * position the guest never touched into a key press.
  */
-#define BRAIN_KBD_TOUCHKEY_HOLD_NS  (200 * 1000 * 1000LL)
+#define BRAIN_KBD_TOUCHKEY_SCAN_NS  (10 * 1000 * 1000LL)
+#define BRAIN_KBD_TOUCHKEY_BUSY_NS  (1 * 1000 * 1000LL)
 
 /*
  * Host key -> matrix cell.
@@ -665,34 +670,86 @@ uint32_t brain_kbd_get_mrs(DeviceState *kbd)
 }
 
 /*
- * Publish the pads the host is to see: the finger's own set, plus the ones a
- * release is holding back.  @index/@down/@why only say what caused it, for the
- * log line.
+ * Write the report the MCU owns: what the last finished scan sampled, plus
+ * the "scan in progress" flag while a conversion is running.  The pad bits
+ * are active-low (see BRAIN_TOUCHKEY_IDLE above), so the pressed set is the
+ * cleared bits of the idle word with the 0x10 valid flag set.  An unchanged
+ * report is not rewritten and not logged: the word changes when a scan has
+ * sampled something, not when the host happens to look.  The mailbox word is
+ * compared against what it actually holds, because the MCU command executor
+ * seeds that word too (see brain_edna2_mcu_execute() in hw/arm/mxs.c).
  */
-static void brain_kbd_touchkey_post(BrainKbdState *s, int index, bool down,
-                                    const char *why)
+static void brain_kbd_touchkey_publish(BrainKbdState *s, const char *why)
 {
+    uint32_t pads = s->touchkey_pub;
+    uint32_t word = (BRAIN_TOUCHKEY_IDLE & ~pads) |
+                    (s->touchkey_scan_busy ? BRAIN_TOUCHKEY_SCAN : 0);
+
     if (!s->touchkey_state) {
         return;
     }
-    *s->touchkey_state = s->touchkey_want | s->touchkey_held;
-
-    /*
-     * The real EDNA2 MCU keeps the mailbox word current while the host
-     * polls it through VMCopy.dll (0xc05f2d24 ff.).  The pad bits are
-     * active-low (see BRAIN_TOUCHKEY_IDLE above): mirror the pressed set
-     * as cleared bits of the idle word, with the 0x10 valid flag set and
-     * the 0x80 scan flag clear.
-     */
+    if (pads == *s->touchkey_state &&
+        (!s->touchkey_mb || word == *s->touchkey_mb)) {
+        return;
+    }
+    *s->touchkey_state = pads;
     if (s->touchkey_mb) {
-        *s->touchkey_mb = BRAIN_TOUCHKEY_IDLE & ~(*s->touchkey_state);
-        fprintf(stderr, "[touchkey] %lld %s idx=%d %s posted=0x%03x -> "
+        *s->touchkey_mb = word;
+        fprintf(stderr, "[touchkey] %lld %s pads=0x%03x -> "
                 "+0x404=0x%08x mb=%" PRIu64 "/%" PRIu64 "\n",
-                (long long)g_get_real_time(), why, index,
-                down ? "down" : "up", *s->touchkey_state, *s->touchkey_mb,
+                (long long)g_get_real_time(), why, pads, word,
                 s->touchkey_mb_reads ? *s->touchkey_mb_reads : 0,
                 s->touchkey_tk_reads ? *s->touchkey_tk_reads : 0);
     }
+}
+
+/*
+ * One edge of the MCU's key-scan cycle: open a conversion, and BUSY_NS later
+ * sample the pad level and make it the report.  The pads are a level the
+ * scanner reads, so a press reaches the guest within one scan cycle and a
+ * release leaves the report one cycle after the finger lifted -- and nothing
+ * is ever posted that the finger did not actually cover.
+ */
+static void brain_kbd_touchkey_scan(void *opaque)
+{
+    BrainKbdState *s = opaque;
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    uint32_t prev;
+    bool fresh;
+
+    if (!s->touchkey_scan_busy) {
+        s->touchkey_scan_busy = true;
+        brain_kbd_touchkey_publish(s, "scan start");
+        timer_mod(s->touchkey_scan_timer, now + BRAIN_KBD_TOUCHKEY_BUSY_NS);
+        return;
+    }
+
+    prev = s->touchkey_pub;
+    fresh = s->touchkey_want & ~prev;
+    s->touchkey_scan_busy = false;
+    s->touchkey_pub = s->touchkey_want;
+    brain_kbd_touchkey_publish(s, "scan end");
+
+    /*
+     * The strip is handled by the EDNA2 MCU, not by the resistive plate, so
+     * the plate's panel-wake line never fires.  The scan that first sees a
+     * pad is what raises ICOLL 33 (the `edna2_int` line) and asks for a
+     * system wake so the keybd_EDNA2 IST (ISRMainProc) wakes and samples the
+     * touchkey mailbox word through VMC1: ioctl 0x8000208b.  The line is a
+     * level for as long as a pad is held down, so a pending auto-clear from
+     * the matrix path must not undo it; the scan that finds the pads
+     * released drops it again.
+     */
+    if (fresh) {
+        timer_del(s->edna2_pulse_timer);
+        brain_kbd_edna2_pulse(s);
+        qemu_system_wakeup_request(QEMU_WAKEUP_REASON_OTHER, NULL);
+    }
+    if (!s->touchkey_pub) {
+        brain_kbd_touchkey_release_irq(s);
+    }
+
+    timer_mod(s->touchkey_scan_timer, now + BRAIN_KBD_TOUCHKEY_SCAN_NS);
 }
 
 /* Nothing posted any more: the MCU may drop its attention line. */
@@ -704,41 +761,23 @@ static void brain_kbd_touchkey_release_irq(BrainKbdState *s)
 }
 
 /*
- * Post one pad.  A press is held in the report until the host has read it
- * (see brain_kbd_touchkey_ack) and, failing that, for one hold window.
+ * A finger only ever makes and breaks a level on one pad; that is all the
+ * input side of the model does.  The report follows at the next scan.
  */
 static void brain_kbd_touchkey_drive(BrainKbdState *s, int index, bool down,
                                      const char *why)
 {
     uint32_t bit = brain_touchkey_bits[index];
-    bool fresh = down && !(s->touchkey_want & bit);
 
     if (down) {
-        /* a new press supersedes whatever was being held back */
-        timer_del(s->touchkey_timer);
-        s->touchkey_held &= ~bit;
         s->touchkey_want |= bit;
     } else {
         s->touchkey_want &= ~bit;
     }
-    brain_kbd_touchkey_post(s, index, down, why);
-
-    /*
-     * The strip is handled by the EDNA2 MCU, not the resistive plate, so
-     * the plate's panel-wake line never fires.  Mirror the matrix-key wake
-     * path instead: assert ICOLL 33 (the `edna2_int` line) for the whole
-     * press and request a system wake so the keybd_EDNA2 IST (ISRMainProc)
-     * wakes and samples the touchkey mailbox word through VMC1: ioctl
-     * 0x8000208b.  A 100 us auto-clear would expire before a deep-idle
-     * guest re-schedules and silently drop the key, which is exactly why
-     * the matrix path holds the line until release.
-     */
-    if (fresh) {
-        timer_del(s->edna2_pulse_timer);
-        brain_kbd_edna2_pulse(s);
-        qemu_system_wakeup_request(QEMU_WAKEUP_REASON_OTHER, NULL);
+    if (brain_kbd_debug()) {
+        fprintf(stderr, "[brain-kbd] %s touchkey %d %s, level 0x%03x\n",
+                why, index, down ? "down" : "up", s->touchkey_want);
     }
-    brain_kbd_touchkey_release_irq(s);
 }
 
 static void brain_kbd_touchkey_press(BrainKbdState *s, int index, bool down)
@@ -773,47 +812,7 @@ void brain_kbd_touchkey_strip(DeviceState *kbd, int index, bool down)
         index >= ARRAY_SIZE(brain_touchkey_bits)) {
         return;
     }
-    if (!down) {
-        s->touchkey_held |= brain_touchkey_bits[index];
-        timer_mod(s->touchkey_timer,
-                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
-                  BRAIN_KBD_TOUCHKEY_HOLD_NS);
-    }
     brain_kbd_touchkey_drive(s, index, down, "strip");
-}
-
-/*
- * The ack, on the state: shared by the mailbox read handler (the guest
- * really looking) and by the hold window that gives up on that look.
- */
-static void brain_kbd_touchkey_ack_state(BrainKbdState *s)
-{
-    if (!s->touchkey_state || !s->touchkey_held) {
-        return;
-    }
-    s->touchkey_held = 0;
-    timer_del(s->touchkey_timer);
-    brain_kbd_touchkey_post(s, -1, false, "ack");
-    brain_kbd_touchkey_release_irq(s);
-}
-
-static void brain_kbd_touchkey_hold_tick(void *opaque)
-{
-    brain_kbd_touchkey_ack_state(opaque);
-}
-
-/*
- * The host read the report word: the MCU has been seen, so a released pad
- * may leave it.  Called from the mailbox read handler, i.e. this is the guest
- * actually looking rather than a timer guessing when it looked, and the
- * reader's own "data valid" test (bit 0x10) stays satisfied throughout.
- */
-void brain_kbd_touchkey_ack(DeviceState *kbd)
-{
-    if (!kbd) {
-        return;
-    }
-    brain_kbd_touchkey_ack_state(BRAIN_KBD(kbd));
 }
 
 void brain_kbd_touchkey_set_mb_counters(DeviceState *kbd, uint64_t *mb,
@@ -846,8 +845,17 @@ static void brain_kbd_realize(DeviceState *dev, Error **errp)
     s->edna2_pulse_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
                                         brain_kbd_edna2_pulse_tick, s);
     s->attn_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, brain_kbd_attn_tick, s);
-    s->touchkey_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
-                                     brain_kbd_touchkey_hold_tick, s);
+    /*
+     * The MCU's touchkey scan runs from power-on: the report word is only
+     * ever a sampled copy of the pad level, so the scan has to be going
+     * whether or not a finger is on the glass.
+     */
+    s->touchkey_scan_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                          brain_kbd_touchkey_scan, s);
+    s->touchkey_scan_busy = false;
+    timer_mod(s->touchkey_scan_timer,
+              qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+              BRAIN_KBD_TOUCHKEY_SCAN_NS);
     /* power-key sense line: low at rest, before the guest ever scans */
     s->power = false;
     s->attn = false;
@@ -875,13 +883,19 @@ static void brain_kbd_reset(DeviceState *dev)
     if (s->attn_timer) {
         timer_del(s->attn_timer);
     }
-    if (s->touchkey_timer) {
-        timer_del(s->touchkey_timer);
+    if (s->touchkey_scan_timer) {
+        timer_del(s->touchkey_scan_timer);
     }
     s->touchkey_want = 0;
-    s->touchkey_held = 0;
+    s->touchkey_pub = 0;
+    s->touchkey_scan_busy = false;
     if (s->touchkey_state) {
         *s->touchkey_state = 0;
+    }
+    if (s->touchkey_scan_timer) {
+        timer_mod(s->touchkey_scan_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  BRAIN_KBD_TOUCHKEY_SCAN_NS);
     }
     s->attn = false;
     s->mrs_low = 0;             /* MRSensor lines high at rest */
@@ -902,14 +916,34 @@ static void brain_kbd_init(Object *obj)
     qdev_init_gpio_in_named(dev, brain_kbd_panel_wake, "panel-wake", 1);
 }
 
+static void brain_kbd_post_load(void *opaque, int version_id)
+{
+    BrainKbdState *s = opaque;
+
+    /*
+     * The scan cycle is a free-running timer and timers are not migrated,
+     * so restart it; the report itself was migrated with the mailbox page
+     * and needs no resync.
+     */
+    s->touchkey_scan_busy = false;
+    if (s->touchkey_scan_timer) {
+        timer_mod(s->touchkey_scan_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  BRAIN_KBD_TOUCHKEY_SCAN_NS);
+    }
+}
+
 static const VMStateDescription vmstate_brain_kbd = {
     .name = "brain-keyboard",
-    .version_id = 4,
+    .version_id = 5,
     .minimum_version_id = 4,
+    .post_load = brain_kbd_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT8_ARRAY(want, BrainKbdState, BRAIN_KBD_COLS),
         VMSTATE_UINT8_ARRAY(state, BrainKbdState, BRAIN_KBD_COLS),
         VMSTATE_UINT32(mrs_low, BrainKbdState),
+        VMSTATE_UINT32_V(touchkey_want, BrainKbdState, 5),
+        VMSTATE_UINT32_V(touchkey_pub, BrainKbdState, 5),
         VMSTATE_END_OF_LIST()
     }
 };

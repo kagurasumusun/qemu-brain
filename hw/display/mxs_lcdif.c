@@ -687,6 +687,52 @@ static const GraphicHwOps mxs_lcdif_gfx_ops = {
 };
 
 /*
+ * The box the guest's picture occupies, in console coordinates, together
+ * with the size of the console (the glass): where picture column 0 sits on
+ * the panel and how many rows the panel has.  Every touch decision is
+ * measured from this one origin, so the plate law and the touchkey strip can
+ * not disagree about where the finger is.  Returns false while there is no
+ * panel to ask or no picture in it yet.
+ */
+static bool mxs_lcdif_box_at(const MXSLcdifState *s, int *bx0, int *by0,
+                             int *cols, int *rows)
+{
+    int gx, gy, bx1, by1;
+
+    if (s->cols < 1 || s->rows < 1) {
+        return false;
+    }
+    mxs_lcdif_to_console(s, s->pic_x0, s->pic_y0, &gx, &gy);
+    *bx0 = gx;
+    *by0 = gy;
+    mxs_lcdif_to_console(s, s->pic_x1, s->pic_y1, &gx, &gy);
+    bx1 = gx;
+    by1 = gy;
+    if (bx1 < *bx0) {
+        *bx0 = bx1;
+    }
+    if (by1 < *by0) {
+        *by0 = by1;
+    }
+    if (cols) {
+        *cols = s->cols;
+    }
+    if (rows) {
+        *rows = s->rows;
+    }
+    return true;
+}
+
+bool mxs_lcdif_touch_box(DeviceState *dev, int *bx0, int *by0,
+                         int *cols, int *rows)
+{
+    if (!dev || !object_dynamic_cast(OBJECT(dev), TYPE_MXS_LCDIF)) {
+        return false;
+    }
+    return mxs_lcdif_box_at(MXS_LCDIF(dev), bx0, by0, cols, rows);
+}
+
+/*
  * Geometry the touchscreen has to agree with.  A finger sits on the panel
  * array, so convert the front end's normalised absolute axis into a GRAM
  * coordinate and let the LRADC apply the plate law to it.  This function
@@ -698,7 +744,7 @@ bool mxs_lcdif_touch_position(DeviceState *dev, int axis_x, int axis_y,
                               int *px, int *py)
 {
     MXSLcdifState *s;
-    int gx, gy, cx, cy, bx0, by0, bx1, by1;
+    int cx, cy, bx0, by0;
 
     if (!dev || !object_dynamic_cast(OBJECT(dev), TYPE_MXS_LCDIF)) {
         return false;
@@ -728,17 +774,8 @@ bool mxs_lcdif_touch_position(DeviceState *dev, int axis_x, int axis_y,
      * Reporting the raw GRAM coordinate instead would hand the X plate an
      * array *column* (and, with the module mounted sideways, an inverted one).
      */
-    mxs_lcdif_to_console(s, s->pic_x0, s->pic_y0, &gx, &gy);
-    bx0 = gx;
-    by0 = gy;
-    mxs_lcdif_to_console(s, s->pic_x1, s->pic_y1, &gx, &gy);
-    bx1 = gx;
-    by1 = gy;
-    if (bx1 < bx0) {
-        SWAP_INT(bx0, bx1);
-    }
-    if (by1 < by0) {
-        SWAP_INT(by0, by1);
+    if (!mxs_lcdif_box_at(s, &bx0, &by0, NULL, NULL)) {
+        return false;
     }
     *px = cx - bx0;
     *py = cy - by0;

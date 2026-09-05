@@ -141,12 +141,7 @@
 #define BRAIN_PLATE_Y_AT_PIC480 211     /* and one pixel past the bottom edge */
 #define BRAIN_PLATE_X_SPAN      800      /* picture columns the X law spans */
 #define BRAIN_PLATE_Y_SPAN      480      /* picture rows the Y law spans */
-#define BRAIN_TOUCHKEY_STRIP_X0 800      /* first picture column past the
-                                          * calibrated span, where the strip
-                                          * touchkey band begins (a touch left
-                                          * of the picture counts as the band
-                                          * at the other end of the glass) */
-#define BRAIN_TOUCHKEY_STRIP_H  480      /* strip pad rows = panel height */
+#define BRAIN_TOUCHKEY_STRIP_H  480      /* rows: fallback only, see below */
 
 typedef struct MXSLradcState {
     SysBusDevice parent_obj;
@@ -217,12 +212,14 @@ typedef struct MXSLradcState {
 
     /*
      * The Brain keyboard (TYPE_BRAIN_KBD) owns the EDNA2 MCU touchkey
-     * scanner.  A touch landing on the right-edge strip (console x >=
-     * BRAIN_TOUCHKEY_STRIP_X0) is a touchkey press, not plate input: the
-     * resistive plate's factory calibration ends one column short of the
-     * strip, so the press is routed to the keyboard device, which posts
-     * the pad to mailbox +0x404 and raises the MCU attention line.
-     * Optional: without it the strip is inert.
+     * scanner.  A touch landing on the band of glass the LCD raster does
+     * not cover is a touchkey press, not plate input: the resistive
+     * plate's factory calibration ends one column short of that band, so
+     * the press is routed to the keyboard device, whose scan posts the pad
+     * to mailbox +0x404 and raises the MCU attention line.  Which side of
+     * the panel the band sits on follows the window the guest programmed
+     * (see mxs_lradc_set_touch), not a fixed column count.  Optional:
+     * without the keyboard the strip is inert.
      */
     DeviceState *kbd;
 
@@ -741,25 +738,26 @@ static void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
 {
     MXSLradcState *s = MXS_LRADC(dev);
     int px = -1, py = -1;
-    bool in_strip, on_panel;
+    int bx0 = 0, by0 = 0, crows = 0;
+    bool in_strip, have_box;
+    int glass_rows;
 
     /*
-     * Right-edge touchkey strip.  On the real Brain the capacitive
-     * touchkey pads sit along the panel's edge, in the 54-column band the
-     * LCD active area does not cover: the resistive plate's factory
-     * calibration ends at x' = 799 (raw span 888..2961), so a touch beyond
-     * the calibrated columns is not plate input but a key for the EDNA2 MCU
-     * touchkey scanner, which posts the pressed pad to mailbox +0x404 and
-     * raises the attention line.
+     * Touchkey strip.  On the real Brain the capacitive touchkey pads sit
+     * along the edge of the panel, in the band of glass the LCD does not
+     * paint: the resistive plate's factory calibration ends at x' = 799
+     * (raw span 888..2961), so a touch beyond the calibrated columns is not
+     * plate input but a key for the EDNA2 MCU touchkey scanner, whose scan
+     * posts the pressed pad to mailbox +0x404 and raises the attention line.
      *
-     * The decision is therefore "off the calibrated span", tested on both
-     * sides and not against one fixed console column: which end of the
-     * array the unused band sits at is the driver's choice (RASET may start
-     * at row 0 and stop at 799, or run 54..853), and comparing against the
-     * picture-relative x alone made the strip unreachable for the guest
-     * whose picture starts one band in -- its presses were folded into the
-     * plate instead, which the driver then discarded as out of range, so the
-     * right edge of the window did nothing at all.
+     * The boundary is therefore the *calibrated span*, which is a property
+     * of the module, and not the width of whatever the guest happens to be
+     * scanning.  It is tested on both sides because which end of the glass
+     * the unused band sits at is the driver's choice (the picture may start
+     * at column 0 and stop at 799, or start one band in at 54): comparing
+     * only against the picture-relative x made the strip unreachable for a
+     * guest whose picture starts inset, because those presses were folded
+     * into the plate and the driver then discarded them as out of range.
      *
      * The console can deliver the button-down before the absolute
      * coordinates, so the strip-vs-plate decision is re-made on every event
@@ -767,31 +765,49 @@ static void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
      * transient plate latch that a coordinate-less button-down may have
      * produced.
      */
-    on_panel = mxs_lcdif_touch_position(s->panel, x, y, &px, &py);
-    in_strip = s->kbd && on_panel &&
-               (px < 0 || px >= BRAIN_TOUCHKEY_STRIP_X0);
+    /*
+     * Same origin as the plate conversions use (mxs_lradc_finger), so a
+     * position can never be "on the strip" for the key decision and inside
+     * the picture for the coordinates handed to the driver.
+     */
+    mxs_lradc_finger(s, x, y, &px, &py);
+    have_box = mxs_lcdif_touch_box(s->panel, &bx0, &by0, NULL, &crows);
+    if (!have_box) {
+        bx0 = 0;
+        by0 = 0;
+        crows = BRAIN_TOUCHKEY_STRIP_H;
+    }
+    glass_rows = crows > 0 ? crows : BRAIN_TOUCHKEY_STRIP_H;
+    in_strip = s->kbd && (px < 0 || px >= BRAIN_PLATE_X_SPAN);
 
     /*
-     * A touch the picture tracking does not cover is neither plate input
-     * nor a key: it is handed to the plate with a coordinate the driver
-     * will most likely discard.  That is the one case in this path that
-     * makes the real device react and the model not, so it says so.
+     * A touch outside the picture the LCDIF is tracking is measured against
+     * the raw axis span instead; say so, because that is the one case where
+     * the origin the plate law uses is not the one the guest is looking at.
      */
-    if (down && s->kbd && !on_panel) {
-        fprintf(stderr, "[lradc-strip] %lld off-panel x=%d y=%d: the LCDIF "
-                "picture box does not cover this touch, plate path only\n",
-                (long long)g_get_real_time(), x, y);
+    if (down && s->kbd && !have_box) {
+        fprintf(stderr, "[lradc-strip] %lld no picture box: using the raw "
+                "axis, x=%d y=%d px=%d py=%d\n",
+                (long long)g_get_real_time(), x, y, px, py);
     }
 
     if (in_strip && down) {
-        int index = clamp32(py * 9 / BRAIN_TOUCHKEY_STRIP_H, 0, 8);
-        int band0 = index * BRAIN_TOUCHKEY_STRIP_H / 9;
-        int band1 = (index + 1) * BRAIN_TOUCHKEY_STRIP_H / 9;
+        /*
+         * The nine pads run down the edge of the *glass*, so the row that
+         * picks the pad is the console row the finger sits on, not a row
+         * measured from wherever the guest's picture happens to start: an
+         * inset window would otherwise shift every pad by that inset and
+         * report the neighbour of the key that was touched.
+         */
+        int row = py + by0;
+        int index = clamp32(row * 9 / glass_rows, 0, 8);
+        int band0 = index * glass_rows / 9;
+        int band1 = (index + 1) * glass_rows / 9;
 
-        fprintf(stderr, "[lradc-strip] %lld down px=%d py=%d index=%d "
-                "strip_active=%d band=%d..%d x=%d y=%d\n",
-                (long long)g_get_real_time(), px, py, index, s->strip_active,
-                band0, band1, x, y);
+        fprintf(stderr, "[lradc-strip] %lld down px=%d py=%d row=%d/%d "
+                "index=%d strip_active=%d band=%d..%d x=%d y=%d box=%d\n",
+                (long long)g_get_real_time(), px, py, row, glass_rows,
+                index, s->strip_active, band0, band1, x, y, have_box);
         if (!s->strip_active) {
             /* The plate may have latched on a coordinate-less button-down
              * that arrived before the absolute position: cancel it.  The

@@ -163,6 +163,15 @@
  */
 bool mxs_lcdif_touch_position(DeviceState *dev, int axis_x, int axis_y,
                               int *px, int *py);
+/*
+ * Where the guest's picture starts on the glass, and how big the glass is,
+ * in console coordinates.  The plate law and the touchkey strip are both
+ * measured from this origin, so a decision about which end of the panel a
+ * touch fell on cannot disagree with the coordinates handed to the plate.
+ * @cols / @rows are optional.  Returns false with no panel or no picture.
+ */
+bool mxs_lcdif_touch_box(DeviceState *dev, int *bx0, int *by0,
+                         int *cols, int *rows);
 #define TYPE_MXS_PXP        "mxs-pxp"
 #define TYPE_MXS_LRADC      "mxs-lradc"
 
@@ -239,8 +248,6 @@ void brain_kbd_edna2_pulse_ext(DeviceState *kbd);
 /* Right-edge touchkey strip: a press on the panel's right band is a
  * touchkey pad, routed from the LRADC to the keyboard MCU model. */
 void brain_kbd_touchkey_strip(DeviceState *kbd, int index, bool down);
-/* The host read mailbox +0x404: stop holding back a released pad. */
-void brain_kbd_touchkey_ack(DeviceState *kbd);
 /*
  * How often the host reads the mailbox at all, and the report word
  * specifically; printed with each press, so a key that was lost can be

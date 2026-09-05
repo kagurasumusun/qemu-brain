@@ -2049,9 +2049,12 @@ static uint64_t brain_edna2_mb_read(void *opaque, hwaddr offset, unsigned size)
     memcpy(&v, bms->edna2_mb + offset, size);
     bms->edna2_mb_reads++;
     if (offset == BRAIN_EDNA2_MCU_TOUCHKEY_OFF) {
+        /*
+         * Reading the report word is a plain read: the MCU owns the word
+         * and only its next scan changes it, so the reader is counted but
+         * nothing is acked or cleared here.
+         */
         bms->edna2_mb_tk_reads++;
-        /* the keyboard MCU is entitled to know that its report was read */
-        brain_kbd_touchkey_ack(bms->kbd);
     }
     if (brain_mb_trace_live) {
         fprintf(stderr, "[edna2-mb] %lld R +0x%" HWADDR_PRIx
