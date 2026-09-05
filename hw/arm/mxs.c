@@ -974,8 +974,14 @@ void hmp_brain_sgtl(Monitor *mon, const QDict *qdict)
  * keeps the vCPU register dumps in a file, the way the guest console is
  * kept by '-serial file=<file>'.  A dump is written at every reset and at
  * every brain_watch / brain_bwatch hit, flushed as it is written so that a
- * wedged or killed guest still leaves a complete log behind.  Setting the
- * path to an empty string closes the log again.
+ * wedged or killed guest still leaves a complete log behind.
+ *
+ * Those hits are the only source of dumps, so while a log is open the
+ * watchpoints and breakpoints that feed it are kept armed: a BRAIN_WATCH
+ * address is not dropped after its first hit, a counted BRAIN_BWATCH entry
+ * does not run out, and a hit does not stop the vCPU.  Without a log both
+ * aids keep their original one-shot / counted behaviour.  Setting the path
+ * to an empty string closes the log again and restores that behaviour.
  * ------------------------------------------------------------------
  */
 static FILE *brain_reglog;
@@ -1108,9 +1114,19 @@ static void brain_watch_debug_excp_handler(CPUState *cs)
             }
         }
         brain_reglog_cpu_state(cs, "brain-watch hit");
-        /* dump-once: remove only the hit watchpoint (others stay
-         * armed so several BRAIN_WATCH entries each fire once) */
-        cpu_watchpoint_remove_by_ref(cs, wp);
+        /*
+         * dump-once: remove only the hit watchpoint (others stay armed so
+         * several BRAIN_WATCH entries each fire once).  With a register log
+         * open the log is the point of the exercise, so the watchpoint stays
+         * armed and every access is recorded; the vCPU then keeps running
+         * instead of stopping in RUN_STATE_DEBUG, because EXCP_DEBUG is only
+         * swallowed while the auto resume flag is set (see cpu-exec.c).
+         */
+        if (!brain_reglog) {
+            cpu_watchpoint_remove_by_ref(cs, wp);
+        } else {
+            brain_bwatch_auto_resume = 1;
+        }
         cs->watchpoint_hit = NULL;
         return;
     }
@@ -1153,6 +1169,13 @@ static void brain_watch_debug_excp_handler(CPUState *cs)
         for (i = 0; i < BRAIN_BWATCH_MAX; i++) {
             if (brain_bwatch_slots[i].remaining > 0 &&
                 brain_bwatch_slots[i].va == pc) {
+                if (brain_reglog) {
+                    /*
+                     * The log wants every visit, so while it is open the
+                     * slots never run dry and the breakpoints stay armed.
+                     */
+                    continue;
+                }
                 brain_bwatch_slots[i].remaining--;
                 if (brain_bwatch_slots[i].remaining == 0) {
                     /* this slot is done: remove only ITS breakpoint so
@@ -2409,7 +2432,8 @@ static void brain_init(MachineState *machine)
      *      BP_MEM_ACCESS only (BP_STOP_BEFORE_ACCESS halts the VM at
      *      boot; with plain BP_MEM_ACCESS the first hit records and
      *      the debug handler dumps once, then removes itself so boot
-     *      continues)
+     *      continues -- with 'reg-log' open the watchpoint is kept armed
+     *      and every hit is dumped to the log instead)
      */
     {
         const char *bw = getenv("BRAIN_BWATCH");
@@ -2660,7 +2684,9 @@ static void brain_instance_init(Object *obj)
     object_property_set_description(obj, "reg-log",
         "File that receives the vCPU register dumps (the 'info registers' "
         "output), written at every reset and at every brain_watch / "
-        "brain_bwatch hit; the register-dump counterpart of '-serial "
+        "brain_bwatch hit; while the log is open those watchpoints and "
+        "breakpoints stay armed, so no hit is missed and the guest is not "
+        "stopped by one.  The register-dump counterpart of '-serial "
         "file:<file>'.  BRAIN_REGLOG=<file> selects the same log.");
 
     object_property_add_bool(obj, "strict-hw", brain_get_strict_hw,
