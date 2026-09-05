@@ -9,8 +9,16 @@
  * BU26154 register-faithful model.
  *
  * Datasheet: ROHM "BU26154MUV Monaural Audio CODEC with Touch Panel
- * Interface", Rev.002 (26.Oct.2015) - kept in
- * work-log/2026-09-02/evidence_s97/BU26154MUV_datasheet_Rev002_89p.pdf
+ * Interface", Rev.002 (26.Oct.2015).  The model was written against that
+ * document; the copy cited in earlier rounds
+ * (work-log/2026-09-02/evidence_s97/BU26154MUV_datasheet_Rev002_89p.pdf)
+ * is *not* in this repository, so anything below that cites a page is
+ * from the datasheet text of pp.33-34 (touch panel interface, interrupt
+ * wait settings), pp.44-48 (register descriptions: EQ tails, SR, CLKEN,
+ * CLKIO, SOFTRST, RECPLAY, MCTIME, MAPCON, AREFPW, AINPW) and p.55
+ * (OSRSEL, Mic Interface Control, SEMODE).  Register *fields* not covered
+ * by that text are taken from the summary tables on pp.41-44 and are
+ * marked "~"; no register value in this model is guessed silently.
  *
  * Control interface (datasheet "2 wire serial interface"): I2C slave,
  * 7-bit address 0x1a (0011010, SAD="L") or 0x1b (0011011, SAD="H").
@@ -50,7 +58,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(BU26154State, BU26154)
 
 /* MAPCON values select one of three register maps. */
 #define BU26154_MAP0 0   /* audio (default) */
-#define BU26154_MAP1 1   /* PLL settings + touch-panel ADC interface */
+#define BU26154_MAP1 1   /* PLL settings + touch-panel pen-detect interface */
 #define BU26154_MAP2 2   /* PLL external / "B" variant coefficients */
 
 /* Number of register words per map (index space 0x00..0xff). */

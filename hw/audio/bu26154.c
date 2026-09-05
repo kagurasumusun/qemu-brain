@@ -11,8 +11,8 @@
  *    odd = write address of the same 8-bit word (word = index >> 1),
  *    continuous transfers step the index by two.
  *  - Three register maps selected by MAPCON (0x1c/0x1d); MAP0 = audio,
- *    MAP1 = PLL + touch-panel ADC interface, MAP2 = PLL external /
- *    "B"-variant coefficients.  MAPCON = 0x3 is prohibited and is not
+ *    MAP1 = PLL + touch-panel (pen detect) interface, MAP2 = PLL
+ *    external / "B"-variant coefficients.  MAPCON = 0x3 is prohibited and is not
  *    accepted (p.48).  A power-on reset restores the datasheet initial
  *    values; the SOFTRST bit resets the CPU interface and its own
  *    register only, not the register file (p.46).
@@ -205,10 +205,26 @@ static const BURegInit bu_map0_init[] = {
 };
 
 /*
- * MAP1 (PLL + touch-panel ADC interface, datasheet pp.41-42).
- * Touch-panel conversion result registers are read-mostly; their
- * word values stay at reset 0x00 until a future touch model fills
- * them (separate S97 item: touchraw / BU26154 touch I/F).
+ * MAP1 (PLL + touch-panel interface, datasheet pp.41-42).
+ *
+ * What this block really is, from the functional description (Rev.002
+ * pp.33-34): the BU26154 touch interface is a *pen detector for the
+ * 4-wire resistive plate* (YP/XP/YN/XN).  Its oscillation circuit is
+ * enabled with MAP0 CLKEN.TCLKEN (the datasheet's own interrupt-wait
+ * recipe writes 0x0d = 0x80 to enable and 0x0d = 0x00 to disable), the
+ * interrupt circuit with MAP1 w0x30 (the recipe writes index 0x61 = 0x38
+ * for "touch panel interface interrupt circuit Enable"), and a plate
+ * contact pulls the open-drain IRQB pin low through the plate
+ * resistance, with an internal pull-up holding it high otherwise.  IRQB is
+ * also low while RESETB is low, with the first valid edge at least 1 ms
+ * after reset release.
+ *
+ * It is *not* the right-edge touchkey strip: those nine flexible keys are
+ * scanned by the EDNA2 MCU and reported in the mailbox (see
+ * brain_kbd_touchkey_scan() in hw/input/brain_kbd.c), and the panel's
+ * conversions go through the i.MX28 LRADC.  So nothing here fabricates a
+ * touch conversion: the result words (0x62/0x63, 0x64/0x65) are stored and
+ * read back exactly as written and are otherwise at their reset value.
  */
 static const BURegInit bu_map1_init[] = {
     { 0x01, 0x00, 0x07 }, /* 0x02/0x03 FPLLM[2:0] */
@@ -226,7 +242,10 @@ static const BURegInit bu_map1_init[] = {
     { 0x12, 0x00, 0xff }, /* 0x24/0x25 SCTHRM */
     { 0x13, 0x00, 0xff }, /* 0x26/0x27 SCTHRL */
     { 0x14, 0x01, 0x07 }, /* 0x28/0x29 SCGAIN[2:0] init 001b */
-    { 0x30, 0x70, 0xde }, /* 0x60/0x61 Touch ADC Ctrl TCHA2..0=111 (~ rv) */
+    { 0x30, 0x70, 0xde }, /* 0x60/0x61 touch panel interface interrupt
+                            * circuit: p.34 enables it with 0x38 (bit field
+                            * positions beyond that are from the register
+                            * table, so the reset value stays "~") */
     { 0x31, 0x00, 0xff }, /* 0x62/0x63 ADCR1 (result, read-mostly) */
     { 0x32, 0x00, 0x0f }, /* 0x64/0x65 ADCR2[3:0] (result, read-mostly) */
     { 0x41, 0x00, 0x31 }, /* 0x82/0x83 HP input select */
@@ -259,8 +278,10 @@ static const BURegInit bu_map1_init[] = {
  */
 static const BURegInit bu_map2_init[] = {
     { 0x00, 0x01, 0x01 }, /* 0x00/0x01 EXMODE=1 */
-    { 0x02, 0x26, 0x26 }, /* 0x04/0x05 HPLSEN... init 00100110b (~) */
-    { 0x09, 0x01, 0x01 }, /* 0x12/0x13 AREFI1EN=1 */
+    { 0x02, 0x26, 0x26 }, /* 0x04/0x05 level shifter for headphone: b02
+                            * (p.34 writes 0x26 to turn it on, 0x22 off) */
+    { 0x09, 0x01, 0x01 }, /* 0x12/0x13 reference current circuit for the
+                            * audio system, on at reset (p.34) */
     { BU_REG_MAPCON, 0x00, 0x03 }, /* 0x1c/0x1d MAPCON (global) */
     { 0x12, 0x00, 0xff }, /* 0x24/0x25 P2B param0A */
     { 0x13, 0x00, 0xff }, /* 0x26/0x27 P2B param1A */
