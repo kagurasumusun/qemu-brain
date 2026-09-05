@@ -783,32 +783,11 @@ void brain_kbd_touchkey_strip(DeviceState *kbd, int index, bool down)
 }
 
 /*
- * The host read the report word: the MCU has been seen, so a released pad
- * may leave it.  Called from the mailbox read handler, i.e. this is the guest
- * actually looking rather than a timer guessing when it looked, and the
- * reader's own "data valid" test (bit 0x10) stays satisfied throughout.
+ * The ack, on the state: shared by the mailbox read handler (the guest
+ * really looking) and by the hold window that gives up on that look.
  */
-void brain_kbd_touchkey_set_mb_counters(DeviceState *kbd, uint64_t *mb,
-                                        uint64_t *tk)
+static void brain_kbd_touchkey_ack_state(BrainKbdState *s)
 {
-    BrainKbdState *s;
-
-    if (!kbd) {
-        return;
-    }
-    s = BRAIN_KBD(kbd);
-    s->touchkey_mb_reads = mb;
-    s->touchkey_tk_reads = tk;
-}
-
-void brain_kbd_touchkey_ack(DeviceState *kbd)
-{
-    BrainKbdState *s;
-
-    if (!kbd) {
-        return;
-    }
-    s = BRAIN_KBD(kbd);
     if (!s->touchkey_state || !s->touchkey_held) {
         return;
     }
@@ -820,7 +799,34 @@ void brain_kbd_touchkey_ack(DeviceState *kbd)
 
 static void brain_kbd_touchkey_hold_tick(void *opaque)
 {
-    brain_kbd_touchkey_ack(opaque);
+    brain_kbd_touchkey_ack_state(opaque);
+}
+
+/*
+ * The host read the report word: the MCU has been seen, so a released pad
+ * may leave it.  Called from the mailbox read handler, i.e. this is the guest
+ * actually looking rather than a timer guessing when it looked, and the
+ * reader's own "data valid" test (bit 0x10) stays satisfied throughout.
+ */
+void brain_kbd_touchkey_ack(DeviceState *kbd)
+{
+    if (!kbd) {
+        return;
+    }
+    brain_kbd_touchkey_ack_state(BRAIN_KBD(kbd));
+}
+
+void brain_kbd_touchkey_set_mb_counters(DeviceState *kbd, uint64_t *mb,
+                                        uint64_t *tk)
+{
+    BrainKbdState *s;
+
+    if (!kbd) {
+        return;
+    }
+    s = BRAIN_KBD(kbd);
+    s->touchkey_mb_reads = mb;
+    s->touchkey_tk_reads = tk;
 }
 
 void brain_kbd_set_pinctrl(DeviceState *kbd, DeviceState *pinctrl)

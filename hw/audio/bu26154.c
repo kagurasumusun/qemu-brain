@@ -19,10 +19,11 @@
  *  - DAC/ADC data path with the same 48 kHz stereo frame plumbing as
  *    the SGTL5000 model so mxs_saif can drive either codec.  Power
  *    gating is derived from the BU26154 power-management registers
- *    (VMIDCON, DACREN/DACLEN, ADCEN, AVMUTE).  No QEMU host
- *    audiodev backend yet: with no backend the codec is the register
- *    model with a silent sink (same fallback as SGTL5000 without an
- *    audiodev); host audio plumbing is a P1 item.
+ *    (VMIDCON, DACREN/DACLEN, ADCEN, AVMUTE).  With -audiodev the DAC
+ *    stream is rendered to the host output and the host input is really
+ *    captured into the ADC ring; with no backend the codec is the
+ *    register model and both paths are a silent sink (the same fallback
+ *    the SGTL5000 model uses).
  *
  * Caveat: bit-level initial values below were transcribed from the
  * Rev.002 datasheet tables (evidence_s97 text extraction).  Core audio
