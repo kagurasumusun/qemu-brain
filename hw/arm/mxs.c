@@ -846,8 +846,8 @@ void hmp_brain_saifpump(Monitor *mon, const QDict *qdict)
         return;
     }
     done = mxs_saif_pump_capture(saif, n);
-    monitor_printf(mon, "brain_saifpump: saif%ld pumped %u frame(s) into the "
-                   "RX FIFO\n", qdict_get_int(qdict, "idx"), done);
+    monitor_printf(mon, "brain_saifpump: saif%" PRId64 " pumped %u frame(s) "
+                   "into the RX FIFO\n", qdict_get_int(qdict, "idx"), done);
 }
 
 void hmp_brain_saifplay(Monitor *mon, const QDict *qdict)
