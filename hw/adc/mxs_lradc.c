@@ -738,7 +738,7 @@ static void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
 {
     MXSLradcState *s = MXS_LRADC(dev);
     int px = -1, py = -1;
-    int bx0 = 0, by0 = 0, crows = 0;
+    int by0 = 0, crows = 0;
     bool in_strip, have_box;
     int glass_rows;
 
@@ -764,16 +764,15 @@ static void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
      * while the button is held; a strip press therefore first cancels the
      * transient plate latch that a coordinate-less button-down may have
      * produced.
-     */
-    /*
-     * Same origin as the plate conversions use (mxs_lradc_finger), so a
-     * position can never be "on the strip" for the key decision and inside
-     * the picture for the coordinates handed to the driver.
+     *
+     * The position is taken from the same origin the plate conversions use
+     * (mxs_lradc_finger), so a touch can never be "on the strip" for the key
+     * decision and inside the picture for the coordinates handed to the
+     * driver: one question, one answer.
      */
     mxs_lradc_finger(s, x, y, &px, &py);
-    have_box = mxs_lcdif_touch_box(s->panel, &bx0, &by0, NULL, &crows);
+    have_box = mxs_lcdif_touch_box(s->panel, NULL, &by0, NULL, &crows);
     if (!have_box) {
-        bx0 = 0;
         by0 = 0;
         crows = BRAIN_TOUCHKEY_STRIP_H;
     }
