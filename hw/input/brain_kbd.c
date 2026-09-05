@@ -151,6 +151,8 @@ typedef struct BrainKbdState {
     bool mod_alt;  /* host Alt held (chord prefix, never forwarded) */
     uint32_t *touchkey_state;   /* points at bms->edna2_touchkey */
     uint32_t *touchkey_mb;      /* points at mailbox +0x404 word */
+    uint64_t *touchkey_mb_reads; /* mailbox reads, all of them             */
+    uint64_t *touchkey_tk_reads; /* reads that hit the +0x404 report word   */
     uint32_t touchkey_want;     /* pads the finger is actually on          */
     uint32_t touchkey_held;     /* released pads still posted, waiting for
                                  * the host to read the report word        */
@@ -685,8 +687,11 @@ static void brain_kbd_touchkey_post(BrainKbdState *s, int index, bool down,
     if (s->touchkey_mb) {
         *s->touchkey_mb = BRAIN_TOUCHKEY_IDLE & ~(*s->touchkey_state);
         fprintf(stderr, "[touchkey] %lld %s idx=%d %s posted=0x%03x -> "
-                "+0x404=0x%08x\n", (long long)g_get_real_time(), why, index,
-                down ? "down" : "up", *s->touchkey_state, *s->touchkey_mb);
+                "+0x404=0x%08x mb=%" PRIu64 "/%" PRIu64 "\n",
+                (long long)g_get_real_time(), why, index,
+                down ? "down" : "up", *s->touchkey_state, *s->touchkey_mb,
+                s->touchkey_mb_reads ? *s->touchkey_mb_reads : 0,
+                s->touchkey_tk_reads ? *s->touchkey_tk_reads : 0);
     }
 }
 
@@ -783,6 +788,19 @@ void brain_kbd_touchkey_strip(DeviceState *kbd, int index, bool down)
  * actually looking rather than a timer guessing when it looked, and the
  * reader's own "data valid" test (bit 0x10) stays satisfied throughout.
  */
+void brain_kbd_touchkey_set_mb_counters(DeviceState *kbd, uint64_t *mb,
+                                        uint64_t *tk)
+{
+    BrainKbdState *s;
+
+    if (!kbd) {
+        return;
+    }
+    s = BRAIN_KBD(kbd);
+    s->touchkey_mb_reads = mb;
+    s->touchkey_tk_reads = tk;
+}
+
 void brain_kbd_touchkey_ack(DeviceState *kbd)
 {
     BrainKbdState *s;

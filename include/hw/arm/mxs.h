@@ -241,6 +241,13 @@ void brain_kbd_edna2_pulse_ext(DeviceState *kbd);
 void brain_kbd_touchkey_strip(DeviceState *kbd, int index, bool down);
 /* The host read mailbox +0x404: stop holding back a released pad. */
 void brain_kbd_touchkey_ack(DeviceState *kbd);
+/*
+ * How often the host reads the mailbox at all, and the report word
+ * specifically; printed with each press, so a key that was lost can be
+ * told apart from a key nobody ever looked for.
+ */
+void brain_kbd_touchkey_set_mb_counters(DeviceState *kbd, uint64_t *mb,
+                                        uint64_t *tk);
 /* Wire the keyboard MCU device into the LRADC strip router. */
 void mxs_lradc_set_touchkey_kbd(DeviceState *lradc, DeviceState *kbd);
 

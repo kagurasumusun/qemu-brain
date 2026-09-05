@@ -9673,6 +9673,12 @@ void arm_cpu_do_interrupt(CPUState *cs)
         brain_stat_inc(BST_EXCP_PABORT);
         {
             uint32_t pva = (uint32_t)env->exception.vaddress;
+
+            brain_last_fault.kind = cs->exception_index;
+            brain_last_fault.va = pva;
+            brain_last_fault.fsr = (uint32_t)env->exception.fsr;
+            brain_last_fault.pc = (uint32_t)last_pc;
+            brain_last_fault.seq++;
             /* BRAIN_ABTRACE: dump every abort (with fault status) so the
              * source of the anomalous pabort storm can be attributed. */
             if (getenv("BRAIN_ABTRACE")) {
@@ -9691,6 +9697,11 @@ void arm_cpu_do_interrupt(CPUState *cs)
         break;
     case EXCP_DATA_ABORT:
         brain_stat_inc(BST_EXCP_DABORT);
+        brain_last_fault.kind = cs->exception_index;
+        brain_last_fault.va = (uint32_t)env->exception.vaddress;
+        brain_last_fault.fsr = (uint32_t)env->exception.fsr;
+        brain_last_fault.pc = (uint32_t)last_pc;
+        brain_last_fault.seq++;
         if (getenv("BRAIN_ABTRACE")) {
             static int dab_budget = 300;
             if (dab_budget > 0) {

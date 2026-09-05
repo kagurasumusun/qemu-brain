@@ -11,6 +11,8 @@ uint64_t brain_stat_count[BST_MAX];
 BrainEvent brain_events[BRAIN_EVENT_RING];
 uint32_t brain_events_pos;
 
+BrainExcpFault brain_last_fault;
+
 /* see include/brain_stats.h -- auto-resume across counted brain_bwatch */
 int brain_bwatch_auto_resume;
 

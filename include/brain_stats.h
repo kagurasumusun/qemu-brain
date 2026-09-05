@@ -81,6 +81,23 @@ static inline void brain_log_event(uint32_t kind, uint32_t a,
     brain_events[p].d = d;
 }
 
+/*
+ * The fault status of the exception the CPU is taking, recorded at the moment
+ * the exception is built (arm_cpu_do_interrupt).  The ARM926 keeps IFSR/DFSR
+ * and the fault address in transient CPU state that the handler overwrites,
+ * and the readers that want them -- the register log, chiefly -- are not on
+ * the vCPU thread, so they have to be lifted out here and now.
+ */
+typedef struct BrainExcpFault {
+    uint32_t kind;          /* CPUState::exception_index                  */
+    uint32_t va;            /* env->exception.vaddress, the fault address */
+    uint32_t fsr;           /* env->exception.fsr: IFSR / DFSR           */
+    uint32_t pc;            /* the instruction that took the fault        */
+    uint64_t seq;           /* bumped per recorded fault                  */
+} BrainExcpFault;
+
+extern BrainExcpFault brain_last_fault;
+
 /* helpers to form a 4-char tag */
 #define BSTAG(c0, c1, c2, c3) \
     (((uint32_t)(uint8_t)(c0) << 24) | ((uint32_t)(uint8_t)(c1) << 16) | \

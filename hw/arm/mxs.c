@@ -125,6 +125,8 @@ typedef struct BrainMachineState {
     DeviceState *kbd;
     DeviceState *lradc;
     uint32_t edna2_touchkey;   /* +0x404 key bits (see brain_kbd.c) */
+    uint64_t edna2_mb_reads;   /* every guest read of the mailbox       */
+    uint64_t edna2_mb_tk_reads; /* reads that hit the +0x404 report word */
 
     MemoryRegion ocram;
     MemoryRegion ocram_alias;
@@ -1167,6 +1169,37 @@ static void brain_reglog_flush_ring(void)
     fflush(brain_reglog);
 }
 
+/*
+ * One line naming the fault the block brackets, written between the banner and
+ * the samples.  It is the address that makes a prefetch abort readable: when
+ * the faulting address IS the PC, the CPU could not fetch the very instruction
+ * it is parked on, and what is left to know is whether anything backs that
+ * address as a physical one at all -- which is what the fetch would have seen
+ * with the MMU bypassed.  Recorded where the exception is built, because
+ * IFSR/DFSR are transient and the handler is running by the time a timer
+ * sample would notice the fault.
+ */
+static void brain_reglog_fault(CPUState *cs)
+{
+    static uint64_t seen;
+    BrainExcpFault *f = &brain_last_fault;
+    bool pa_ok;
+
+    if (f->seq == seen || f->kind != cs->exception_index) {
+        return;
+    }
+    seen = f->seq;
+    pa_ok = address_space_access_valid(&address_space_memory, f->va, 4,
+                                       false, MEMTXATTRS_UNSPECIFIED);
+    fprintf(brain_reglog, "[brain-regdump] fault va=0x%08" PRIx32
+            " fsr=0x%08" PRIx32 " pc=0x%08" PRIx32 "%s%s\n", f->va, f->fsr,
+            f->pc,
+            f->va == f->pc ? ", the abort is on the fetch of the PC itself" :
+                             "",
+            pa_ok ? "" : "; nothing backs this address as a physical one, so "
+                          "only a live translation reaches it");
+}
+
 static void brain_reglog_ring_reset(void)
 {
     brain_reglog_ring_n = 0;
@@ -1254,6 +1287,7 @@ static void brain_reglog_tick_cb(void *opaque)
                     fprintf(brain_reglog, "[brain-regdump] == %s: %u before, "
                             "%u after ==\n", why, brain_reglog_ring_n,
                             brain_reglog_ring_size);
+                    brain_reglog_fault(cs);
                     fflush(brain_reglog);
                     brain_reglog_flush_ring();
                     brain_reglog_cpu_state(cs, why);
@@ -2009,7 +2043,9 @@ static uint64_t brain_edna2_mb_read(void *opaque, hwaddr offset, unsigned size)
     uint64_t v = 0;
 
     memcpy(&v, bms->edna2_mb + offset, size);
+    bms->edna2_mb_reads++;
     if (offset == BRAIN_EDNA2_MCU_TOUCHKEY_OFF) {
+        bms->edna2_mb_tk_reads++;
         /* the keyboard MCU is entitled to know that its report was read */
         brain_kbd_touchkey_ack(bms->kbd);
     }
@@ -2072,6 +2108,8 @@ static void brain_cpu_reset(void *opaque)
      */
     memset(bms->edna2_mb, 0, sizeof(bms->edna2_mb));
     bms->edna2_touchkey = 0;
+    bms->edna2_mb_reads = 0;
+    bms->edna2_mb_tk_reads = 0;
 
     /*
      * VMCopy.dll touchkey block (real EDNA2 MCU posts it at boot):
@@ -2565,6 +2603,8 @@ static void brain_init(MachineState *machine)
     brain_kbd_set_touchkey_state(dev, &bms->edna2_touchkey,
                                  (uint32_t *)(bms->edna2_mb +
                                               BRAIN_EDNA2_MCU_TOUCHKEY_OFF));
+    brain_kbd_touchkey_set_mb_counters(dev, &bms->edna2_mb_reads,
+                                       &bms->edna2_mb_tk_reads);
     mxs_lradc_set_touchkey_kbd(bms->lradc, bms->kbd);
     /*
      * EDNA2 MCU attention line (power key / wake / key press pulse).
