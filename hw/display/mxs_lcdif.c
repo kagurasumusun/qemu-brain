@@ -474,12 +474,27 @@ static void mxs_lcdif_start_transfer(MXSLcdifState *s)
      * window -- moved the origin used by the touchscreen to the middle of the
      * last repaint: measured as every delivered coordinate sitting 54 px left
      * of the finger after a 54-line push (runs/s89, mode ui: tap(252,130) came
-     * back as plate X 1039, i.e. logical 198).  Grow, never shrink.
+     * back as plate X 1039, i.e. logical 198).
+     *
+     * Growing the box from *every* push has the same defect in the other
+     * direction: a band refresh is a window of its own, so its column range
+     * widened the picture box towards the panel's overscan side and the
+     * touchscreen ended up measuring the finger from a corner the guest never
+     * drew in.  Only a push that spans the panel in the *other* axis carries
+     * information about where the picture sits: a full-height scan says where
+     * the picture starts and ends along the columns, a full-width one says the
+     * same about the rows -- and it is the rows that the touchkey strip band
+     * lies beyond, because the module is mounted turned.  Grow, never shrink,
+     * and only on a scan that can actually define an edge.
      */
-    s->pic_x0 = MIN(s->pic_x0, s->col_start);
-    s->pic_y0 = MIN(s->pic_y0, s->row_start);
-    s->pic_x1 = MAX(s->pic_x1, s->col_end);
-    s->pic_y1 = MAX(s->pic_y1, s->row_end);
+    if (s->row_start == 0 && s->row_end == s->panel_h - 1) {
+        s->pic_x0 = MIN(s->pic_x0, s->col_start);
+        s->pic_x1 = MAX(s->pic_x1, s->col_end);
+    }
+    if (s->col_start == 0 && s->col_end == s->panel_w - 1) {
+        s->pic_y0 = MIN(s->pic_y0, s->row_start);
+        s->pic_y1 = MAX(s->pic_y1, s->row_end);
+    }
 
     /*
      * The block streams its words straight out of DRAM -- there is no stride

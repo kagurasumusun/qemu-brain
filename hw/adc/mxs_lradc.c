@@ -141,8 +141,11 @@
 #define BRAIN_PLATE_Y_AT_PIC480 211     /* and one pixel past the bottom edge */
 #define BRAIN_PLATE_X_SPAN      800      /* picture columns the X law spans */
 #define BRAIN_PLATE_Y_SPAN      480      /* picture rows the Y law spans */
-#define BRAIN_TOUCHKEY_STRIP_X0 800      /* console column where the strip
-                                          * touchkey band starts */
+#define BRAIN_TOUCHKEY_STRIP_X0 800      /* first picture column past the
+                                          * calibrated span, where the strip
+                                          * touchkey band begins (a touch left
+                                          * of the picture counts as the band
+                                          * at the other end of the glass) */
 #define BRAIN_TOUCHKEY_STRIP_H  480      /* strip pad rows = panel height */
 
 typedef struct MXSLradcState {
@@ -738,24 +741,35 @@ static void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
 {
     MXSLradcState *s = MXS_LRADC(dev);
     int px = -1, py = -1;
-    bool in_strip;
+    bool in_strip, on_panel;
 
     /*
      * Right-edge touchkey strip.  On the real Brain the capacitive
-     * touchkey pads sit along the panel's right edge, the 54-column band
-     * from console x = 800 to 853: the resistive plate's factory
-     * calibration ends at x' = 799 (raw span 888..2961), so a touch in
-     * this band is not plate input but a key for the EDNA2 MCU touchkey
-     * scanner, which posts the pressed pad to mailbox +0x404 and raises
-     * the attention line.  The console can deliver the button-down before
-     * the absolute coordinates, so the strip-vs-plate decision is re-made
-     * on every event while the button is held; a strip press therefore
-     * first cancels the transient plate latch that a coordinate-less
-     * button-down may have produced.
+     * touchkey pads sit along the panel's edge, in the 54-column band the
+     * LCD active area does not cover: the resistive plate's factory
+     * calibration ends at x' = 799 (raw span 888..2961), so a touch beyond
+     * the calibrated columns is not plate input but a key for the EDNA2 MCU
+     * touchkey scanner, which posts the pressed pad to mailbox +0x404 and
+     * raises the attention line.
+     *
+     * The decision is therefore "off the calibrated span", tested on both
+     * sides and not against one fixed console column: which end of the
+     * array the unused band sits at is the driver's choice (RASET may start
+     * at row 0 and stop at 799, or run 54..853), and comparing against the
+     * picture-relative x alone made the strip unreachable for the guest
+     * whose picture starts one band in -- its presses were folded into the
+     * plate instead, which the driver then discarded as out of range, so the
+     * right edge of the window did nothing at all.
+     *
+     * The console can deliver the button-down before the absolute
+     * coordinates, so the strip-vs-plate decision is re-made on every event
+     * while the button is held; a strip press therefore first cancels the
+     * transient plate latch that a coordinate-less button-down may have
+     * produced.
      */
-    in_strip = s->kbd &&
-               mxs_lcdif_touch_position(s->panel, x, y, &px, &py) &&
-               px >= BRAIN_TOUCHKEY_STRIP_X0;
+    on_panel = mxs_lcdif_touch_position(s->panel, x, y, &px, &py);
+    in_strip = s->kbd && on_panel &&
+               (px < 0 || px >= BRAIN_TOUCHKEY_STRIP_X0);
 
     if (in_strip && down) {
         int index = clamp32(py * 9 / BRAIN_TOUCHKEY_STRIP_H, 0, 8);
@@ -841,6 +855,7 @@ static void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
 
     trace_mxs_lradc_set_touch(s->touch_x, s->touch_y, down,
                               s->regs[LRADC_CTRL0], s->regs[LRADC_CTRL1],
+                              px, py, in_strip,
                               qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
 
     if (!down) {
