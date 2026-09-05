@@ -106,6 +106,7 @@ void hmp_brain_events(Monitor *mon, const QDict *qdict);
 void hmp_brain_trace(Monitor *mon, const QDict *qdict);
 void hmp_brain_mbtrace(Monitor *mon, const QDict *qdict);
 void hmp_brain_mrs(Monitor *mon, const QDict *qdict);
+void hmp_brain_regdump(Monitor *mon, const QDict *qdict);
 void hmp_chardev_add(Monitor *mon, const QDict *qdict);
 void hmp_chardev_change(Monitor *mon, const QDict *qdict);
 void hmp_chardev_remove(Monitor *mon, const QDict *qdict);

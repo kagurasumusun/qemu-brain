@@ -460,6 +460,24 @@ ERST
         .cmd        = hmp_brain_mrs,
     },
 
+    {
+        .name       = "brain_regdump",
+        .args_type  = "",
+        .params     = "",
+        .help       = "write one vCPU register dump to the machine's "
+                      "register log (-machine brain,reg-log=<file>)",
+        .cmd        = hmp_brain_regdump,
+    },
+
+SRST
+``brain_regdump``
+  Append one vCPU register dump -- the 'info registers' output plus the
+  stack window at SP -- to the file selected by '-machine
+  brain,reg-log=<file>', and echo it to the monitor.  Use it when nothing
+  is being watched: it captures the state at a moment chosen from the
+  outside, which is what tells a spinning loop apart from a wait.
+ERST
+
 SRST
 ``brain_trace`` [``on``|``off``]
   Toggle live tracing of every MXS MMIO register access to stderr,

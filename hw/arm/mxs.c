@@ -139,6 +139,7 @@ typedef struct BrainMachineState {
     BlockBackend *sd_blk;
     char *boot_mode;
     char *reg_log;            /* 'reg-log=<file>', see the register log below */
+    uint32_t reg_log_tick;    /* 'reg-log-tick=<ms>' periodic sampling      */
     uint32_t lcd_width;
     uint32_t lcd_height;
     uint32_t lcd_rotate;
@@ -982,19 +983,114 @@ void hmp_brain_sgtl(Monitor *mon, const QDict *qdict)
  * does not run out, and a hit does not stop the vCPU.  Without a log both
  * aids keep their original one-shot / counted behaviour.  Setting the path
  * to an empty string closes the log again and restores that behaviour.
+ *
+ * Two ways to keep the log flowing when no address of interest is being
+ * watched: 'reg-log-tick=<ms>' (or BRAIN_REGLOG_TICK) samples the vCPU
+ * periodically on virtual time, and the `brain_regdump` monitor command
+ * writes one entry right now.  A tick entry is skipped when the state is
+ * what the last one was -- a guest parked in an idle loop would otherwise
+ * bury the interesting entry in identical ones; the number of dumps the
+ * sampling folded away is reported on the next entry that is written.
  * ------------------------------------------------------------------
  */
 static FILE *brain_reglog;
+static QEMUTimer *brain_reglog_timer;
+static uint32_t brain_reglog_saved[17];   /* R0..R15 + CPSR of the last dump */
+static bool brain_reglog_have_saved;
+static unsigned brain_reglog_repeats;
 
-/* one entry: why it was taken, then the same dump 'info registers' prints */
+static void brain_reglog_tick_cb(void *opaque);
+
+/* one entry: why it was taken, the same dump 'info registers' prints, and
+ * the stack window that makes an entry readable on its own */
 static void brain_reglog_cpu_state(CPUState *cs, const char *why)
 {
+    CPUARMState *env;
+    uint8_t buf[64];
+    int i, w;
+
     if (!brain_reglog) {
         return;
     }
-    fprintf(brain_reglog, "[brain-regdump] %s\n", why);
+    env = &ARM_CPU(cs)->env;
+    fprintf(brain_reglog,
+            "[brain-regdump] %s pc=0x%08x lr=0x%08x sp=0x%08x cpsr=0x%08x\n",
+            why, (unsigned)env->regs[15], (unsigned)env->regs[14],
+            (unsigned)env->regs[13], (unsigned)cpsr_read(env));
     cpu_dump_state(cs, brain_reglog, CPU_DUMP_FPU | CPU_DUMP_VPU);
+    for (w = 0; w < 2; w++) {
+        if (cpu_memory_rw_debug(cs, env->regs[13] + w * sizeof(buf),
+                                buf, sizeof(buf), 0) != 0) {
+            break;
+        }
+        fprintf(brain_reglog, "[brain-regdump]  sp+0x%02x:",
+                (unsigned)(w * sizeof(buf)));
+        for (i = 0; i < (int)sizeof(buf) / 4; i++) {
+            fprintf(brain_reglog, " %08x", ldl_le_p(buf + i * 4));
+        }
+        fprintf(brain_reglog, "\n");
+    }
     fflush(brain_reglog);
+}
+
+/* Did anything move since the last dump?  Remember the state either way. */
+static bool brain_reglog_same_state(CPUState *cs)
+{
+    CPUARMState *env = &ARM_CPU(cs)->env;
+    uint32_t now[ARRAY_SIZE(brain_reglog_saved)];
+    bool same = brain_reglog_have_saved;
+    int i;
+
+    for (i = 0; i < 16; i++) {
+        now[i] = (uint32_t)env->regs[i];
+    }
+    now[16] = (uint32_t)cpsr_read(env);
+    if (same) {
+        same = memcmp(now, brain_reglog_saved, sizeof(now)) == 0;
+    }
+    memcpy(brain_reglog_saved, now, sizeof(now));
+    brain_reglog_have_saved = true;
+    return same;
+}
+
+/* (re)arm the periodic sampling: needs both a log and a tick interval */
+static void brain_reglog_arm_tick(BrainMachineState *bms)
+{
+    if (brain_reglog && bms->reg_log_tick) {
+        if (!brain_reglog_timer) {
+            brain_reglog_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
+                                              brain_reglog_tick_cb, bms);
+        }
+        timer_mod(brain_reglog_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  (int64_t)bms->reg_log_tick * SCALE_MS);
+    } else if (brain_reglog_timer) {
+        timer_del(brain_reglog_timer);
+    }
+}
+
+static void brain_reglog_tick_cb(void *opaque)
+{
+    BrainMachineState *bms = BRAIN_MACHINE(opaque);
+    CPUState *cs = bms->cpu ? CPU(bms->cpu) : NULL;
+
+    if (cs) {
+        if (brain_reglog_same_state(cs)) {
+            brain_reglog_repeats++;
+        } else {
+            g_autofree char *why = brain_reglog_repeats ?
+                g_strdup_printf("tick (+%u unchanged)", brain_reglog_repeats) :
+                g_strdup("tick");
+
+            brain_reglog_cpu_state(cs, why);
+            brain_reglog_repeats = 0;
+        }
+        /* virtual time stands still while the machine is stopped, so this
+         * resumes on its own when the guest does */
+        timer_mod(brain_reglog_timer,
+                  qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  (int64_t)bms->reg_log_tick * SCALE_MS);
+    }
 }
 
 /*
@@ -1021,13 +1117,44 @@ static bool brain_reglog_open(BrainMachineState *bms, const char *path,
     brain_reglog = f;
     g_free(bms->reg_log);
     bms->reg_log = f ? g_strdup(path) : NULL;
+    brain_reglog_have_saved = false;
+    brain_reglog_repeats = 0;
     if (f) {
         fprintf(f, "# brain register log '%s': vCPU register dumps taken at "
-                   "reset and on\n# every brain_watch / brain_bwatch hit\n",
-                path);
+                   "reset and on\n# every brain_watch / brain_bwatch hit"
+                   "%s\n", path,
+                bms->reg_log_tick ? ", sampled every tick" : "");
         fflush(f);
     }
+    brain_reglog_arm_tick(bms);
     return true;
+}
+
+/*
+ * `brain_regdump`: write one entry now.  This is the answer to "nothing is
+ * being watched and the guest is wedged" -- the log gets the state at a point
+ * the user picked, exactly as 'info registers' shows it, plus the same entry
+ * in the file for later reading.
+ */
+void hmp_brain_regdump(Monitor *mon, const QDict *qdict)
+{
+    BrainMachineState *bms;
+    CPUState *cs;
+
+    if (!current_machine || !brain_reglog) {
+        monitor_printf(mon, "brain_regdump: no register log (use -machine "
+                       "brain,reg-log=<file>)\n");
+        return;
+    }
+    bms = BRAIN_MACHINE(current_machine);
+    cs = bms->cpu ? CPU(bms->cpu) : NULL;
+    if (!cs) {
+        monitor_printf(mon, "brain_regdump: no vCPU yet\n");
+        return;
+    }
+    brain_reglog_cpu_state(cs, "monitor");
+    monitor_printf(mon, "brain_regdump: one dump appended to %s\n",
+                   bms->reg_log);
 }
 
 /*
@@ -1911,9 +2038,11 @@ static void brain_init(MachineState *machine)
     int i;
 
     /*
-     * BRAIN_REGLOG=<file> is the env form of 'reg-log' (the BRAIN_BWATCH /
-     * BRAIN_WATCH / BRAIN_MBTRACE style); the property wins when both are
-     * given.
+     * BRAIN_REGLOG=<file> and BRAIN_REGLOG_TICK=<ms> are the env forms of
+     * 'reg-log' and 'reg-log-tick' (the BRAIN_BWATCH / BRAIN_WATCH /
+     * BRAIN_MBTRACE style); the properties win when both are given.  The
+     * sampling is armed here rather than in the setter so that the order the
+     * two properties arrive in does not matter.
      */
     if (!brain_reglog) {
         const char *rl = getenv("BRAIN_REGLOG");
@@ -1922,6 +2051,14 @@ static void brain_init(MachineState *machine)
             brain_reglog_open(bms, rl, &error_fatal);
         }
     }
+    if (!bms->reg_log_tick) {
+        const char *rt = getenv("BRAIN_REGLOG_TICK");
+
+        if (rt && *rt) {
+            bms->reg_log_tick = (uint32_t)atoi(rt);
+        }
+    }
+    brain_reglog_arm_tick(bms);
 
     /*
      * Apply the per-instance bus-error policy to the machine class.  The
@@ -2686,8 +2823,10 @@ static void brain_instance_init(Object *obj)
         "output), written at every reset and at every brain_watch / "
         "brain_bwatch hit; while the log is open those watchpoints and "
         "breakpoints stay armed, so no hit is missed and the guest is not "
-        "stopped by one.  The register-dump counterpart of '-serial "
-        "file:<file>'.  BRAIN_REGLOG=<file> selects the same log.");
+        "stopped by one.  'reg-log-tick=<ms>' adds periodic samples and "
+        "'brain_regdump' writes one on demand.  The register-dump "
+        "counterpart of '-serial file:<file>'.  BRAIN_REGLOG=<file> selects "
+        "the same log.");
 
     object_property_add_bool(obj, "strict-hw", brain_get_strict_hw,
                              brain_set_strict_hw);
@@ -2747,6 +2886,15 @@ static void brain_instance_init(Object *obj)
     object_property_set_description(obj, "exp-fault-delay-us",
         "BRAIN fault-zone experiment aid: virtual-time delay per zone "
         "read in mode 2");
+
+    object_property_add_uint32_ptr(obj, "reg-log-tick", &bms->reg_log_tick,
+                                   OBJ_PROP_FLAG_READWRITE);
+    object_property_set_description(obj, "reg-log-tick",
+        "Also sample the vCPU registers into the register log every <ms> of "
+        "virtual time; an entry is skipped when the state has not moved "
+        "since the last one.  0 (the default) logs only reset and "
+        "brain_watch / brain_bwatch hits.  BRAIN_REGLOG_TICK=<ms> sets the "
+        "same interval.");
 
     object_property_add_uint32_ptr(obj, "lcd-width", &bms->lcd_width,
                                    OBJ_PROP_FLAG_READWRITE);
