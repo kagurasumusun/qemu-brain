@@ -55,6 +55,15 @@
 #define CTRL1_IRQ_MASK              0xff
 
 #define STATUS_TOUCH_DETECT_RAW     (1u << 0)
+/*
+ * HW_LRADC_STATUS[23]: the converter has a burst armed and has not streamed
+ * its results yet, i.e. it is busy.  A driver waits on this bit before it
+ * reads HW_LRADC_CHn -- mxs-lradc-ts.c treats it as "ongoing conversion" and
+ * warns when the block stays in it -- so it must follow the model's own run
+ * latch (run_valid is set when a burst latches its sample and cleared when
+ * the last channel of that burst has been converted), not stay low.
+ */
+#define STATUS_CONV_BUSY            (1u << 23)
 
 #define DELAY_TRIGGER_LRADCS_SHIFT  24
 #define DELAY_KICK                  (1u << 20)
@@ -586,9 +595,12 @@ static uint64_t mxs_lradc_read(void *opaque, hwaddr offset, unsigned size)
         val = 0x02000000;
         break;
     case LRADC_STATUS:
-        val = s->regs[idx] & ~STATUS_TOUCH_DETECT_RAW;
+        val = s->regs[idx] & ~(STATUS_TOUCH_DETECT_RAW | STATUS_CONV_BUSY);
         if (s->touch_down) {
             val |= STATUS_TOUCH_DETECT_RAW;
+        }
+        if (s->run_valid) {
+            val |= STATUS_CONV_BUSY;
         }
         break;
     default:
