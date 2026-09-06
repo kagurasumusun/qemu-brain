@@ -165,18 +165,6 @@ typedef struct BrainMachineState {
     bool aid_sd_launcher;
     bool aid_ignore_bus_err;
     /*
-     * BRAIN fault-zone experiment aid (verification-only, default off).
-     * Injects faulty responses for guest reads of the fault-erased head
-     * sectors (Nand2 LBA 0x27800.., Nand4 LBA 0x47800..) to reproduce the
-     * real unit's "しばらくお待ちください" hang in QEMU:
-     *   exp_fault_mode 0 = off, 1 = read error (R1 ADDRESS_ERROR),
-     *                  2 = virtual-time read delay, 3 = trace only.
-     */
-    uint32_t exp_fault_start;
-    uint32_t exp_fault_len;
-    uint32_t exp_fault_mode;
-    uint32_t exp_fault_delay_us;
-    /*
      * EDNA2 MCU command-processing state (real-device model, not an aid).
      * The MCU executes the mailbox command protocol: the guest writes a
      * command byte to +0xE8 and kicks the doorbell at +0x3C; the MCU
@@ -1625,7 +1613,6 @@ static void brain_bwatch_arm(Monitor *mon, CPUState *cs, vaddr va,
     }
 }
 
-
 /*
  * brain_vread <va> [len] -- read guest *virtual* memory.
  *
@@ -2485,19 +2472,6 @@ static void brain_init(MachineState *machine)
         };
 
         dev = qdev_new(TYPE_MXS_SSP);
-        /* BRAIN fault-zone experiment aid (mode 2 = virtual-time read
-         * delay) lives on SSP0, the eMMC controller. */
-        if (i == 0 && bms->exp_fault_len && bms->exp_fault_mode == 2) {
-            qdev_prop_set_uint32(dev, "exp-fault-start",
-                                 bms->exp_fault_start);
-            qdev_prop_set_uint32(dev, "exp-fault-len", bms->exp_fault_len);
-            qdev_prop_set_uint32(dev, "exp-fault-mode", bms->exp_fault_mode);
-            qdev_prop_set_uint32(dev, "exp-fault-delay-us",
-                                 bms->exp_fault_delay_us);
-            warn_report("brain: exp fault delay: sec 0x%x len 0x%x "
-                        "delay %u us", bms->exp_fault_start,
-                        bms->exp_fault_len, bms->exp_fault_delay_us);
-        }
         sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, ssp_base[i]);
         sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
@@ -2527,16 +2501,6 @@ static void brain_init(MachineState *machine)
          */
         if (bms->aid_region4_remap) {
             qdev_prop_set_bit(card, "brain-region4-remap", true);
-        }
-        /* BRAIN fault-zone experiment aid (verification-only) */
-        if (bms->exp_fault_len && bms->exp_fault_mode) {
-            qdev_prop_set_uint32(card, "exp-fault-start",
-                                 bms->exp_fault_start);
-            qdev_prop_set_uint32(card, "exp-fault-len", bms->exp_fault_len);
-            qdev_prop_set_uint32(card, "exp-fault-mode", bms->exp_fault_mode);
-            warn_report("brain: exp fault zone: sec 0x%x len 0x%x mode %u",
-                        bms->exp_fault_start, bms->exp_fault_len,
-                        bms->exp_fault_mode);
         }
         qdev_realize_and_unref(card,
                                qdev_get_child_bus(bms->ssp[0], "sd-bus"),
@@ -3060,21 +3024,6 @@ BRAIN_AID_ACCESSOR(region4_remap, aid_region4_remap)
 BRAIN_AID_ACCESSOR(sd_launcher,   aid_sd_launcher)
 BRAIN_AID_ACCESSOR(ignore_bus_err,aid_ignore_bus_err)
 
-#define BRAIN_EXP_FAULT_ACCESSOR(pid, field)                               \
-    static void brain_get_exp_##pid(Object *obj, Visitor *v,              \
-                                    const char *name, void *opaque,        \
-                                    Error **errp)                          \
-    { visit_type_uint32(v, name, &BRAIN_MACHINE(obj)->field, errp); }      \
-    static void brain_set_exp_##pid(Object *obj, Visitor *v,              \
-                                    const char *name, void *opaque,        \
-                                    Error **errp)                          \
-    { visit_type_uint32(v, name, &BRAIN_MACHINE(obj)->field, errp); }
-
-BRAIN_EXP_FAULT_ACCESSOR(fault_start, exp_fault_start)
-BRAIN_EXP_FAULT_ACCESSOR(fault_len,   exp_fault_len)
-BRAIN_EXP_FAULT_ACCESSOR(fault_mode,  exp_fault_mode)
-BRAIN_EXP_FAULT_ACCESSOR(fault_delay_us, exp_fault_delay_us)
-
 static void brain_add_aid_prop(Object *obj, const char *name,
                               bool (*get)(Object *, Error **),
                               void (*set)(Object *, bool, Error **),
@@ -3128,10 +3077,6 @@ static void brain_instance_init(Object *obj)
     bms->aid_region4_remap = false;  /* QEMU-only sector remap */
     bms->aid_sd_launcher = false;    /* EBOOT-equivalent auto-boot */
     bms->aid_ignore_bus_err = false; /* report real bus aborts */
-    bms->exp_fault_start = 0;        /* fault-zone experiment aid: off */
-    bms->exp_fault_len = 0;
-    bms->exp_fault_mode = 0;         /* 0=off 1=error 2=delay 3=trace */
-    bms->exp_fault_delay_us = 500000; /* 500 ms virtual-time delay */
 
     bms->codec = g_strdup("bu26154");
     object_property_add_str(obj, "codec", brain_get_codec, brain_set_codec);
@@ -3196,30 +3141,6 @@ static void brain_instance_init(Object *obj)
                        brain_set_aid_ignore_bus_err,
                        "Ignore unmapped/aborted memory transactions "
                        "(off in strict-HW mode)");
-
-    object_property_add(obj, "exp-fault-start", "uint32",
-                        brain_get_exp_fault_start,
-                        brain_set_exp_fault_start, NULL, NULL);
-    object_property_set_description(obj, "exp-fault-start",
-        "BRAIN fault-zone experiment aid: first sector of the injected "
-        "zone (verification-only, off when len=0/mode=0)");
-    object_property_add(obj, "exp-fault-len", "uint32",
-                        brain_get_exp_fault_len,
-                        brain_set_exp_fault_len, NULL, NULL);
-    object_property_set_description(obj, "exp-fault-len",
-        "BRAIN fault-zone experiment aid: zone length in sectors");
-    object_property_add(obj, "exp-fault-mode", "uint32",
-                        brain_get_exp_fault_mode,
-                        brain_set_exp_fault_mode, NULL, NULL);
-    object_property_set_description(obj, "exp-fault-mode",
-        "BRAIN fault-zone experiment aid: 0=off 1=read-error 2=read-delay "
-        "3=trace-only");
-    object_property_add(obj, "exp-fault-delay-us", "uint32",
-                        brain_get_exp_fault_delay_us,
-                        brain_set_exp_fault_delay_us, NULL, NULL);
-    object_property_set_description(obj, "exp-fault-delay-us",
-        "BRAIN fault-zone experiment aid: virtual-time delay per zone "
-        "read in mode 2");
 
     /* sampling on by default, anchored on faults (see the register log) */
     bms->reg_log_tick = BRAIN_REGLOG_TICK_DEFAULT;
