@@ -1494,7 +1494,21 @@ static void emmc_function_switch(SDState *sd, uint32_t arg)
 
         if (((part == EXT_CSD_PART_CONFIG_ACC_BOOT1 ||
               part == EXT_CSD_PART_CONFIG_ACC_BOOT2) && !sd->boot_part_size) ||
-            (part == EXT_CSD_PART_CONFIG_ACC_RPMB && !sd->rpmb_part_size)) {
+            (part == EXT_CSD_PART_CONFIG_ACC_RPMB && !sd->rpmb_part_size) ||
+            part > EXT_CSD_PART_CONFIG_ACC_RPMB) {
+            /*
+             * Beyond the boot/RPMB sizes, a general partition is only
+             * addressable if it has been carved out, and this model never
+             * carves one out (the GP size fields read back zero, and the
+             * backing file is laid out as boot1 + boot2 + RPMB + user), so
+             * any selection above the three the model has windows for is
+             * refused the same way an oversized boot or RPMB selection is.
+             * Refusing is also what keeps the selection legal-looking:
+             * sd_part_offset() has no window to hand out for a GP, and it
+             * used to assert() on these values -- a guest CMD6 write of
+             * 4..7 into EXT_CSD[179] therefore aborted QEMU on the next
+             * read or write.
+             */
             qemu_log_mask(LOG_GUEST_ERROR,
                           "MMC switching to illegal partition\n");
             sd->card_status |= R_CSR_SWITCH_ERROR_MASK;
