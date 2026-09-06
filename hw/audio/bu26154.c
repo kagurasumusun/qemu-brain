@@ -205,7 +205,24 @@ static const BURegInit bu_map0_init[] = {
 };
 
 /*
- * MAP1 (PLL + touch-panel interface, datasheet pp.41-42).
+ * MAP1 -- the bank the MAPCON=0x1 register table (p.41) documents: PLL
+ * setting, soft clip, touch ADC, headphone/speaker input select, the
+ * programmable LPFs and the noise gate.  Verified against that table:
+ *   0x20/0x21 SCEN      soft clip enable          init 0
+ *   0x22-0x27 SCTHRH/M/L soft clip thresholds      init 0
+ *   0x28/0x29 SCGAIN    soft clip gain             init 001b
+ *   0x60/0x61           Touch ADC Control: TCHSEN, TCHA[2:0], TCHRSEL,
+ *                       TCHMODE
+ *   0x62/0x63 ADCR1     Touch ADC result 1         init 0
+ *   0x64/0x65 ADCR2[3:0] Touch ADC result 2        init 0
+ * Note the *soft clip* group: SCEN/SCTHR*/SCGAIN name the limiter, not the
+ * touch panel, and the table's masks (0x01, 0x7f, 0xff, 0xff, 0x07) are
+ * exactly what the entries below use.  Index 0x60/0x61 is bank-relative:
+ * the audio bank (MAPCON=0) puts the SAI Transmitter Control register there
+ * (p.56) and MAPCON=1 puts the Touch ADC Control register there, so p.34's
+ * "touch panel interface interrupt circuit Enable" (0x61 = 0x38) is this
+ * bank's word and needs MAPCON=1 -- the per-bank tables are what make that
+ * legible at all.
  *
  * What this block really is, from the functional description (Rev.002
  * pp.33-34): the BU26154 touch interface is a *pen detector for the
@@ -243,16 +260,12 @@ static const BURegInit bu_map1_init[] = {
     { 0x13, 0x00, 0xff }, /* 0x26/0x27 SCTHRL */
     { 0x14, 0x01, 0x07 }, /* 0x28/0x29 SCGAIN[2:0] init 001b */
     { 0x30, 0x70, 0xde }, /* 0x60/0x61 touch panel interface interrupt
-                            * circuit: p.34 enables it with 0x38 (bit field
-                            * positions beyond that are from the register
-                            * table, so the reset value stays "~").  NOTE:
-                            * the register table gives 0x60/0x61 in the
-                            * audio bank as the SAI Transmitter Control
-                            * register (FMTO/MSBO/ISSCKO/AFOO/DLYO/WSLO,
-                            * p.56), so which MAPCON bank this write belongs
-                            * to is what p.34's sequence fixes, not the
-                            * index; the enable is kept in this bank until
-                            * pp.41-42 say otherwise.
+                            * circuit: p.41 names the fields (TCHSEN,
+                            * TCHA[2:0], TCHRSEL, TCHMODE) and p.34 enables
+                            * it with 0x38.  Which of those bits each of the
+                            * two gaps falls in is printed only in the
+                            * register diagram's graphics, so the mask and
+                            * reset value stay "~".
                             */
     { 0x31, 0x00, 0xff }, /* 0x62/0x63 ADCR1 (result, read-mostly) */
     { 0x32, 0x00, 0x0f }, /* 0x64/0x65 ADCR2[3:0] (result, read-mostly) */
