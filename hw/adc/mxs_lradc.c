@@ -904,9 +904,13 @@ static void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
      * CPU currently has the interrupt unmasked.
      */
     s->regs[LRADC_CTRL1] |= CTRL1_TOUCH_DETECT_IRQ;
-    /* Drop then raise so ICOLL sees a new edge even if the previous
-     * tap's raw bit was still set. */
-    qemu_set_irq(s->irq_touch, 0);
+    /*
+     * The line is a level the comparator drives, so it is derived from state
+     * and nothing else: no synthetic falling edge is needed to make a new tap
+     * visible.  (One used to be poked here, before update_irq() was made to
+     * follow the pen state; with that in place it could not change anything,
+     * because the very next call raises the line again from the same inputs.)
+     */
     mxs_lradc_update_irq(s);
     /*
      * The EDNA2 MCU owns the panel wake line on the real Brain: it watches
