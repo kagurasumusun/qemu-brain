@@ -9679,20 +9679,6 @@ void arm_cpu_do_interrupt(CPUState *cs)
             brain_last_fault.fsr = (uint32_t)env->exception.fsr;
             brain_last_fault.pc = (uint32_t)last_pc;
             brain_last_fault.seq++;
-            /* BRAIN_ABTRACE: dump every abort (with fault status) so the
-             * source of the anomalous pabort storm can be attributed. */
-            if (getenv("BRAIN_ABTRACE")) {
-                static int pab_budget = 500;
-                if (pab_budget > 0) {
-                    pab_budget--;
-                    fprintf(stderr,
-                            "brain-pabort: pc=%08x vaddr=%08x fsr=%08x "
-                            "cpsr=%08x\n",
-                            (uint32_t)last_pc, pva,
-                            (uint32_t)env->exception.fsr,
-                            (uint32_t)cpsr_read(env));
-                }
-            }
         }
         break;
     case EXCP_DATA_ABORT:
@@ -9702,19 +9688,6 @@ void arm_cpu_do_interrupt(CPUState *cs)
         brain_last_fault.fsr = (uint32_t)env->exception.fsr;
         brain_last_fault.pc = (uint32_t)last_pc;
         brain_last_fault.seq++;
-        if (getenv("BRAIN_ABTRACE")) {
-            static int dab_budget = 300;
-            if (dab_budget > 0) {
-                dab_budget--;
-                fprintf(stderr,
-                        "brain-dabort: pc=%08x addr=%08x fsr=%08x "
-                        "cpsr=%08x\n",
-                        (uint32_t)last_pc,
-                        (uint32_t)env->exception.vaddress,
-                        (uint32_t)env->exception.fsr,
-                        (uint32_t)cpsr_read(env));
-            }
-        }
         break;
     case EXCP_IRQ:
         brain_stat_inc(BST_EXCP_IRQ);
