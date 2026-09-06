@@ -695,6 +695,9 @@ static void brain_kbd_touchkey_publish(BrainKbdState *s, const char *why)
     *s->touchkey_state = pads;
     if (s->touchkey_mb) {
         *s->touchkey_mb = word;
+        if (!brain_kbd_debug()) {
+            return;
+        }
         fprintf(stderr, "[touchkey] %lld %s pads=0x%03x -> "
                 "+0x404=0x%08x mb=%" PRIu64 "/%" PRIu64 "\n",
                 (long long)g_get_real_time(), why, pads, word,

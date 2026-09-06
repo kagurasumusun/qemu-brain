@@ -773,22 +773,15 @@ static void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
     mxs_lradc_finger(s, x, y, &px, &py);
     have_box = mxs_lcdif_touch_box(s->panel, NULL, &by0, NULL, &crows);
     if (!have_box) {
+        /*
+         * Boot, or no LCDIF at all: the picture origin is unknown, so the pad
+         * bands are laid out over the raw axis span rather than vetoed.
+         */
         by0 = 0;
         crows = BRAIN_TOUCHKEY_STRIP_H;
     }
     glass_rows = crows > 0 ? crows : BRAIN_TOUCHKEY_STRIP_H;
     in_strip = s->kbd && (px < 0 || px >= BRAIN_PLATE_X_SPAN);
-
-    /*
-     * A touch outside the picture the LCDIF is tracking is measured against
-     * the raw axis span instead; say so, because that is the one case where
-     * the origin the plate law uses is not the one the guest is looking at.
-     */
-    if (down && s->kbd && !have_box) {
-        fprintf(stderr, "[lradc-strip] %lld no picture box: using the raw "
-                "axis, x=%d y=%d px=%d py=%d\n",
-                (long long)g_get_real_time(), x, y, px, py);
-    }
 
     if (in_strip && down) {
         /*
@@ -800,13 +793,7 @@ static void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
          */
         int row = py + by0;
         int index = clamp32(row * 9 / glass_rows, 0, 8);
-        int band0 = index * glass_rows / 9;
-        int band1 = (index + 1) * glass_rows / 9;
-
-        fprintf(stderr, "[lradc-strip] %lld down px=%d py=%d row=%d/%d "
-                "index=%d strip_active=%d band=%d..%d x=%d y=%d box=%d\n",
-                (long long)g_get_real_time(), px, py, row, glass_rows,
-                index, s->strip_active, band0, band1, x, y, have_box);
+        trace_mxs_lradc_touchkey_strip(px, py, row, glass_rows, index, true);
         if (!s->strip_active) {
             /* The plate may have latched on a coordinate-less button-down
              * that arrived before the absolute position: cancel it.  The
@@ -820,8 +807,6 @@ static void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
             s->strip_index = index;
             brain_kbd_touchkey_strip(s->kbd, index, true);
         } else if (s->strip_index != index) {
-            fprintf(stderr, "[lradc-strip] %lld slide %d->%d\n",
-                    (long long)g_get_real_time(), s->strip_index, index);
             brain_kbd_touchkey_strip(s->kbd, s->strip_index, false);
             brain_kbd_touchkey_strip(s->kbd, index, true);
             s->strip_index = index;
@@ -834,8 +819,8 @@ static void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
 
     if (s->strip_active) {
         /* anything that is not a strip press ends the strip touch */
-        fprintf(stderr, "[lradc-strip] %lld end px=%d py=%d down=%d idx=%d\n",
-                (long long)g_get_real_time(), px, py, down, s->strip_index);
+        trace_mxs_lradc_touchkey_strip(px, py, -1, glass_rows,
+                                       s->strip_index, false);
         brain_kbd_touchkey_strip(s->kbd, s->strip_index, false);
         s->strip_active = false;
         s->strip_index = -1;
@@ -885,7 +870,7 @@ static void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
 
     trace_mxs_lradc_set_touch(s->touch_x, s->touch_y, down,
                               s->regs[LRADC_CTRL0], s->regs[LRADC_CTRL1],
-                              px, py, in_strip,
+                              px, py, in_strip, have_box,
                               qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
 
     if (!down) {
