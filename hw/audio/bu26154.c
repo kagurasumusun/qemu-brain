@@ -215,7 +215,8 @@ static const BURegInit bu_map0_init[] = {
  *                       TCHMODE
  *   0x62/0x63 ADCR1     Touch ADC result 1         init 0
  *   0x64/0x65 ADCR2[3:0] Touch ADC result 2        init 0
- * Note the *soft clip* group: SCEN/SCTHR*/SCGAIN name the limiter, not the
+ * Note the soft clip group: SCEN, SCTHRH, SCTHRM, SCTHRL and SCGAIN name
+ * the limiter, not the
  * touch panel, and the table's masks (0x01, 0x7f, 0xff, 0xff, 0x07) are
  * exactly what the entries below use.  Index 0x60/0x61 is bank-relative:
  * the audio bank (MAPCON=0) puts the SAI Transmitter Control register there
