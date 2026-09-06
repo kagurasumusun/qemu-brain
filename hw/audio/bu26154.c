@@ -212,8 +212,8 @@ static const BURegInit bu_map0_init[] = {
  * 4-wire resistive plate* (YP/XP/YN/XN).  Its oscillation circuit is
  * enabled with MAP0 CLKEN.TCLKEN (the datasheet's own interrupt-wait
  * recipe writes 0x0d = 0x80 to enable and 0x0d = 0x00 to disable), the
- * interrupt circuit with MAP1 w0x30 (the recipe writes index 0x61 = 0x38
- * for "touch panel interface interrupt circuit Enable"), and a plate
+ * interrupt circuit with w0x30 (0x60/0x61: the recipe writes index 0x61 =
+ * 0x38 for "touch panel interface interrupt circuit Enable"), and a plate
  * contact pulls the open-drain IRQB pin low through the plate
  * resistance, with an internal pull-up holding it high otherwise.  IRQB is
  * also low while RESETB is low, with the first valid edge at least 1 ms
@@ -245,7 +245,15 @@ static const BURegInit bu_map1_init[] = {
     { 0x30, 0x70, 0xde }, /* 0x60/0x61 touch panel interface interrupt
                             * circuit: p.34 enables it with 0x38 (bit field
                             * positions beyond that are from the register
-                            * table, so the reset value stays "~") */
+                            * table, so the reset value stays "~").  NOTE:
+                            * the register table gives 0x60/0x61 in the
+                            * audio bank as the SAI Transmitter Control
+                            * register (FMTO/MSBO/ISSCKO/AFOO/DLYO/WSLO,
+                            * p.56), so which MAPCON bank this write belongs
+                            * to is what p.34's sequence fixes, not the
+                            * index; the enable is kept in this bank until
+                            * pp.41-42 say otherwise.
+                            */
     { 0x31, 0x00, 0xff }, /* 0x62/0x63 ADCR1 (result, read-mostly) */
     { 0x32, 0x00, 0x0f }, /* 0x64/0x65 ADCR2[3:0] (result, read-mostly) */
     { 0x41, 0x00, 0x31 }, /* 0x82/0x83 HP input select */
