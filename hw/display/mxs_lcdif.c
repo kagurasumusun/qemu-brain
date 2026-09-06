@@ -692,27 +692,32 @@ static const GraphicHwOps mxs_lcdif_gfx_ops = {
  * the panel and how many rows the panel has.  Every touch decision is
  * measured from this one origin, so the plate law and the touchkey strip can
  * not disagree about where the finger is.  Returns false while there is no
- * panel to ask or no picture in it yet.
+ * panel to ask or no picture in it yet.  Any of the four outputs may be
+ * NULL: a caller takes the parts it needs and ignores the rest.
  */
 static bool mxs_lcdif_box_at(const MXSLcdifState *s, int *bx0, int *by0,
                              int *cols, int *rows)
 {
-    int gx, gy, bx1, by1;
+    int gx, gy, x0, y0;
 
     if (s->cols < 1 || s->rows < 1) {
         return false;
     }
-    mxs_lcdif_to_console(s, s->pic_x0, s->pic_y0, &gx, &gy);
-    *bx0 = gx;
-    *by0 = gy;
+    /*
+     * Normalise locally and write out only what was asked for.  Passing the
+     * result straight through the caller's pointers was fatal for anyone who
+     * wanted just the row origin -- which is what mxs_lradc_set_touch() does,
+     * so the first mouse motion the guest received killed the emulator.
+     */
+    mxs_lcdif_to_console(s, s->pic_x0, s->pic_y0, &x0, &y0);
     mxs_lcdif_to_console(s, s->pic_x1, s->pic_y1, &gx, &gy);
-    bx1 = gx;
-    by1 = gy;
-    if (bx1 < *bx0) {
-        *bx0 = bx1;
+    x0 = MIN(x0, gx);
+    y0 = MIN(y0, gy);
+    if (bx0) {
+        *bx0 = x0;
     }
-    if (by1 < *by0) {
-        *by0 = by1;
+    if (by0) {
+        *by0 = y0;
     }
     if (cols) {
         *cols = s->cols;
