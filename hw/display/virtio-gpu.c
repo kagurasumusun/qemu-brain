@@ -1568,7 +1568,6 @@ void virtio_gpu_device_realize(DeviceState *qdev, Error **errp)
 #endif
     }
 
-<<<<<<< qemu-11.0.3-brain
     if (virtio_gpu_drm_enabled(g->parent_obj.conf)) {
 #ifdef VIRGL_VERSION_MAJOR
     #if VIRGL_VERSION_MAJOR >= 1
@@ -1584,8 +1583,7 @@ void virtio_gpu_device_realize(DeviceState *qdev, Error **errp)
 #endif
     }
 
-||||||| qemu-10.0.12
-=======
+
     if (virtio_gpu_neptune_enabled(g->parent_obj.conf)) {
 #ifdef HAVE_VIRGL_RENDERER_NEPTUNE
         if (!virtio_gpu_blob_enabled(g->parent_obj.conf) ||
@@ -1599,7 +1597,6 @@ void virtio_gpu_device_realize(DeviceState *qdev, Error **errp)
 #endif
     }
 
->>>>>>> qemu-10.0.12-utm
     if (!virtio_gpu_base_device_realize(qdev,
                                         virtio_gpu_handle_ctrl_cb,
                                         virtio_gpu_handle_cursor_cb,

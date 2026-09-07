@@ -851,50 +851,33 @@ static void qemu_spice_init(void)
     g_free(x509_cacert_file);
     g_free(password);
 
-<<<<<<< qemu-11.0.3-brain
 #ifdef HAVE_SPICE_GL
-    if (qemu_opt_get_bool(opts, "gl", 0)) {
-        if ((port != 0) || (tls_port != 0)) {
+    if ((port != 0) || (tls_port != 0)) {
 #if SPICE_SERVER_VERSION >= 0x000f03 /* release 0.15.3 */
-            const char *video_codec = NULL;
-            g_autofree char *enc_codec = NULL;
+        const char *video_codec = NULL;
+        g_autofree char *enc_codec = NULL;
 
-            spice_remote_client = 1;
+        spice_remote_client = 1;
 
-            video_codec = qemu_opt_get(opts, "video-codec");
-            if (video_codec) {
-                enc_codec = g_strconcat("gstreamer:", video_codec, NULL);
-            }
-            if (spice_server_set_video_codecs(spice_server,
-                                              enc_codec ?: "gstreamer:h264")) {
-                error_report("invalid video codec");
-                exit(1);
-            }
+        video_codec = qemu_opt_get(opts, "video-codec");
+        if (video_codec) {
+            enc_codec = g_strconcat("gstreamer:", video_codec, NULL);
+        }
+        if (spice_server_set_video_codecs(spice_server,
+                                          enc_codec ?: "gstreamer:h264")) {
+            error_report("invalid video codec");
+            exit(1);
+        }
 #else
-            error_report("SPICE GL support is local-only for now and "
-                         "incompatible with -spice port/tls-port");
-            exit(1);
+        error_report("SPICE GL support is local-only for now and "
+                     "incompatible with -spice port/tls-port");
+        exit(1);
 #endif
-        }
-        egl_init(qemu_opt_get(opts, "rendernode"), DISPLAY_GL_MODE_ON, &error_fatal);
-        spice_opengl = 1;
     }
 #endif
-||||||| qemu-10.0.12
-#ifdef HAVE_SPICE_GL
-    if (qemu_opt_get_bool(opts, "gl", 0)) {
-        if ((port != 0) || (tls_port != 0)) {
-            error_report("SPICE GL support is local-only for now and "
-                         "incompatible with -spice port/tls-port");
-            exit(1);
-        }
-        egl_init(qemu_opt_get(opts, "rendernode"), DISPLAY_GL_MODE_ON, &error_fatal);
-        spice_opengl = 1;
-    }
-#endif
-=======
+    /* UTM: the GL setup proper lives in ui/spice-display.c so that it can
+     * pick the Core GL / EGL(ANGLE) backend before the display is created */
     qemu_spice_display_early_init();
->>>>>>> qemu-10.0.12-utm
 }
 
 static int qemu_spice_add_interface(SpiceBaseInstance *sin)

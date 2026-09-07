@@ -40,18 +40,13 @@
 
 #include "ui/spice-display.h"
 
-<<<<<<< qemu-11.0.3-brain
 #include "standard-headers/drm/drm_fourcc.h"
 
-bool spice_opengl;
-bool spice_remote_client;
-int spice_max_refresh_rate;
-||||||| qemu-10.0.12
-bool spice_opengl;
-=======
+/* UTM: the GL mode is a tri-state now (off / ES / Core GL) */
 static DisplayGLMode spice_opengl;
 QEMUGLContext spice_gl_ctx;
->>>>>>> qemu-10.0.12-utm
+bool spice_remote_client;
+int spice_max_refresh_rate;
 
 int qemu_spice_rect_is_empty(const QXLRect* r)
 {
@@ -1202,9 +1197,9 @@ static void qemu_spice_gl_block_timer(void *opaque)
     warn_report("spice: no gl-draw-done within one second");
 }
 
-<<<<<<< qemu-11.0.3-brain
 static void spice_gl_draw(SimpleSpiceDisplay *ssd,
-                           uint32_t x, uint32_t y, uint32_t w, uint32_t h)
+                           uint32_t x, uint32_t y,
+                           uint32_t w, uint32_t h)
 {
     uint64_t cookie;
 
@@ -1212,12 +1207,9 @@ static void spice_gl_draw(SimpleSpiceDisplay *ssd,
     spice_qxl_gl_draw_async(&ssd->qxl, x, y, w, h, cookie);
 }
 
-||||||| qemu-10.0.12
-=======
 static int qemu_spice_gl_make_context_current(DisplayGLCtx *dgc,
                                               QEMUGLContext ctx);
 
->>>>>>> qemu-10.0.12-utm
 static void spice_gl_refresh(DisplayChangeListener *dcl)
 {
     SimpleSpiceDisplay *ssd = container_of(dcl, SimpleSpiceDisplay, dcl);
@@ -1372,16 +1364,11 @@ static void spice_gl_switch(DisplayChangeListener *dcl,
                             struct DisplaySurface *new_surface)
 {
     SimpleSpiceDisplay *ssd = container_of(dcl, SimpleSpiceDisplay, dcl);
-<<<<<<< qemu-11.0.3-brain
     bool ret;
-||||||| qemu-10.0.12
-    EGLint stride, fourcc;
-    int fd;
-=======
-    EGLint stride = 0, fourcc = 0;
-    int fd = -1;
-    int width = 0, height = 0;
->>>>>>> qemu-10.0.12-utm
+#if defined(CONFIG_IOSURFACE)
+    EGLint sw_fourcc = 0;
+    int sw_fd = -1;
+#endif
 
     qemu_spice_gl_make_context_current(NULL, spice_gl_ctx);
     if (ssd->ds) {
@@ -1396,7 +1383,7 @@ static void spice_gl_switch(DisplayChangeListener *dcl,
         uint64_t modifier;
 
         surface_gl_create_texture(ssd->gls, ssd->ds);
-<<<<<<< qemu-11.0.3-brain
+#if defined(CONFIG_GBM)
         if (!egl_dmabuf_export_texture(ssd->ds->texture,
                                        fd,
                                        (EGLint *)offset,
@@ -1410,18 +1397,6 @@ static void spice_gl_switch(DisplayChangeListener *dcl,
 
         ret = spice_gl_replace_fd_texture(ssd, fd, &modifier, &num_planes);
         if (!ret) {
-||||||| qemu-10.0.12
-        fd = egl_get_fd_for_texture(ssd->ds->texture,
-                                    &stride, &fourcc,
-                                    NULL);
-        if (fd < 0) {
-=======
-#if defined(CONFIG_GBM)
-        fd = egl_get_fd_for_texture(ssd->ds->texture,
-                                    &stride, &fourcc,
-                                    NULL);
-        if (fd < 0) {
->>>>>>> qemu-10.0.12-utm
             surface_gl_destroy_texture(ssd->gls, ssd->ds);
             return;
         }
@@ -1449,23 +1424,24 @@ static void spice_gl_switch(DisplayChangeListener *dcl,
                                     fourcc);
 
         /* note: spice server will close the fd */
-<<<<<<< qemu-11.0.3-brain
+#if defined(CONFIG_GBM)
         spice_server_gl_scanout(&ssd->qxl, fd,
                                 surface_width(ssd->ds),
                                 surface_height(ssd->ds),
                                 offset, stride, num_planes,
                                 fourcc, modifier, false);
-||||||| qemu-10.0.12
-        spice_qxl_gl_scanout(&ssd->qxl, fd,
-                             surface_width(ssd->ds),
-                             surface_height(ssd->ds),
-                             stride, fourcc, false);
-=======
-        spice_qxl_gl_scanout(&ssd->qxl, fd,
-                             width,
-                             height,
-                             stride, fourcc, false);
->>>>>>> qemu-10.0.12-utm
+#elif defined(CONFIG_IOSURFACE)
+        {
+            int fds[1] = { sw_fd };
+            uint32_t offs[1] = { 0 };
+            uint32_t strs[1] = { width * 4 };
+
+            spice_server_gl_scanout(&ssd->qxl, fds, width, height,
+                                    offs, strs, 1,
+                                    sw_fourcc, DRM_FORMAT_MOD_LINEAR,
+                                    false);
+        }
+#endif
         ssd->have_surface = true;
         ssd->have_scanout = false;
 
@@ -1478,13 +1454,6 @@ static void spice_gl_switch(DisplayChangeListener *dcl,
 static QEMUGLContext qemu_spice_gl_create_context(DisplayGLCtx *dgc,
                                                   QEMUGLParams *params)
 {
-<<<<<<< qemu-11.0.3-brain
-    return qemu_egl_create_context(dgc, params, qemu_egl_rn_ctx);
-||||||| qemu-10.0.12
-    eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
-                   qemu_egl_rn_ctx);
-    return qemu_egl_create_context(dgc, params);
-=======
     if (spice_opengl == DISPLAY_GL_MODE_CORE) {
 #if defined(HAVE_SPICE_MAC_CGL)
         return spice_cgl_create_context(spice_gl_ctx);
@@ -1493,13 +1462,12 @@ static QEMUGLContext qemu_spice_gl_create_context(DisplayGLCtx *dgc,
 #endif
     } else {
 #if defined(CONFIG_GBM)
-        eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
-                       qemu_egl_rn_ctx);
+        return qemu_egl_create_context(dgc, params, qemu_egl_rn_ctx);
 #elif defined(CONFIG_EGL)
-        eglMakeCurrent(qemu_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
-                       spice_gl_ctx);
+        return qemu_egl_create_context(dgc, params, spice_gl_ctx);
+#else
+        return NULL;
 #endif
-        return qemu_egl_create_context(dgc, params);
     }
 }
 
@@ -1526,7 +1494,6 @@ static int qemu_spice_gl_make_context_current(DisplayGLCtx *dgc,
     } else {
         return qemu_egl_make_context_current(dgc, ctx);
     }
->>>>>>> qemu-10.0.12-utm
 }
 
 static void qemu_spice_gl_scanout_disable(DisplayChangeListener *dcl)
@@ -1578,26 +1545,24 @@ static void qemu_spice_gl_scanout_texture(DisplayChangeListener *dcl,
     int fd[DMABUF_MAX_PLANES], num_planes, i;
     uint64_t modifier;
 
-<<<<<<< qemu-11.0.3-brain
+    int single_fd = -1;
+
+#if defined(CONFIG_GBM)
     assert(tex_id);
     if (!egl_dmabuf_export_texture(tex_id, fd, offset, stride, &fourcc,
                                    &num_planes, &modifier)) {
         fprintf(stderr, "%s: failed to export dmabuf for texture\n", __func__);
-||||||| qemu-10.0.12
-    assert(tex_id);
-    fd = egl_get_fd_for_texture(tex_id, &stride, &fourcc, NULL);
-    if (fd < 0) {
-        fprintf(stderr, "%s: failed to get fd for texture\n", __func__);
-=======
-#if defined(CONFIG_GBM)
-    fd = egl_get_fd_for_texture(tex_id, &stride, &fourcc, NULL);
+        return;
+    }
 #elif defined(CONFIG_IOSURFACE)
-    if (spice_iosurface_resize(ssd, backing_width, backing_height)) {
+    num_planes = 1;
+    offset[0] = 0;
+    stride[0] = backing_width * 4;
+    modifier = DRM_FORMAT_MOD_LINEAR;
+    if (spice_iosurface_resize(ssd, backing_width, backing_height) >= 0) {
         ssd->tex_id = tex_id;
         ssd->y_0_top = y_0_top;
-        fd = spice_iosurface_create_fd(ssd, &fourcc);
-    } else {
-        fd = -1;
+        single_fd = spice_iosurface_create_fd(ssd, &fourcc);
     }
 #if defined(CONFIG_METAL)
     if (ssd->metal_context && native.type == SCANOUT_TEXTURE_NATIVE_TYPE_METAL) {
@@ -1608,15 +1573,14 @@ static void qemu_spice_gl_scanout_texture(DisplayChangeListener *dcl,
         qemu_spice_display_metal_scanout_disable(ssd->metal_context);
     }
 #endif
-#endif
-    if (fd < 0) {
-        fprintf(stderr, "%s: failed to get fd for texture\n", __func__);
->>>>>>> qemu-10.0.12-utm
+    if (single_fd < 0) {
+        fprintf(stderr, "%s: failed to create IOSurface fd\n", __func__);
         return;
     }
 
     trace_qemu_spice_gl_scanout_texture(ssd->qxl.id, w, h, fourcc);
 
+#if defined(CONFIG_GBM)
     if (spice_remote_client && modifier != DRM_FORMAT_MOD_LINEAR) {
         egl_fb_destroy(&ssd->guest_fb);
         egl_fb_setup_for_tex(&ssd->guest_fb,
@@ -1636,6 +1600,7 @@ static void qemu_spice_gl_scanout_texture(DisplayChangeListener *dcl,
                                 num_planes, fourcc, modifier, y_0_top);
         qemu_spice_gl_monitor_config(ssd, x, y, w, h);
     }
+#endif
 
     ssd->have_surface = false;
     ssd->have_scanout = true;
@@ -1752,29 +1717,13 @@ static void qemu_spice_gl_update(DisplayChangeListener *dcl,
                                  uint32_t x, uint32_t y, uint32_t w, uint32_t h)
 {
     SimpleSpiceDisplay *ssd = container_of(dcl, SimpleSpiceDisplay, dcl);
-<<<<<<< qemu-11.0.3-brain
     EGLint fourcc = 0;
-||||||| qemu-10.0.12
-    EGLint stride = 0, fourcc = 0;
-=======
-#ifdef CONFIG_GBM
-    EGLint stride = 0, fourcc = 0;
-    int fd;
->>>>>>> qemu-10.0.12-utm
     bool render_cursor = false;
     uint32_t texture;
 #endif
     bool y_0_top = false; /* FIXME */
-<<<<<<< qemu-11.0.3-brain
     bool ret;
     uint32_t width, height, texture;
-||||||| qemu-10.0.12
-    uint64_t cookie;
-    int fd;
-    uint32_t width, height, texture;
-=======
-    uint64_t cookie;
->>>>>>> qemu-10.0.12-utm
 
     if (!ssd->have_scanout) {
         return;
