@@ -131,11 +131,6 @@ static void tpm_tis_sysbus_realizefn(DeviceState *dev, Error **errp)
     }
 }
 
-<<<<<<< qemu-11.0.3-brain
-static void tpm_tis_sysbus_class_init(ObjectClass *klass, const void *data)
-||||||| qemu-10.0.12
-static void tpm_tis_sysbus_class_init(ObjectClass *klass, void *data)
-=======
 static void build_tpm_tis_sysbus_aml(AcpiDevAmlIf *adev, Aml *scope)
 {
     Aml *dev, *crs;
@@ -163,8 +158,7 @@ static void build_tpm_tis_sysbus_aml(AcpiDevAmlIf *adev, Aml *scope)
     aml_append(scope, dev);
 }
 
-static void tpm_tis_sysbus_class_init(ObjectClass *klass, void *data)
->>>>>>> qemu-10.0.12-utm
+static void tpm_tis_sysbus_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     TPMIfClass *tc = TPM_IF_CLASS(klass);

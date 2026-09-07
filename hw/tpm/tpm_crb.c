@@ -18,18 +18,9 @@
 
 #include "qemu/module.h"
 #include "qapi/error.h"
-<<<<<<< qemu-11.0.3-brain
 #include "system/address-spaces.h"
-#include "hw/core/qdev-properties.h"
-||||||| qemu-10.0.12
-#include "exec/address-spaces.h"
-#include "hw/qdev-properties.h"
-=======
-#include "exec/address-spaces.h"
 #include "hw/acpi/acpi_aml_interface.h"
-#include "hw/acpi/tpm.h"
-#include "hw/qdev-properties.h"
->>>>>>> qemu-10.0.12-utm
+#include "hw/core/qdev-properties.h"
 #include "hw/pci/pci_ids.h"
 #include "hw/acpi/tpm.h"
 #include "migration/vmstate.h"
@@ -156,19 +147,14 @@ static void tpm_crb_none_realize(DeviceState *dev, Error **errp)
     }
 }
 
-<<<<<<< qemu-11.0.3-brain
-static void tpm_crb_class_init(ObjectClass *klass, const void *data)
-||||||| qemu-10.0.12
-static void tpm_crb_class_init(ObjectClass *klass, void *data)
-=======
 static void build_tpm_crb_none_aml(AcpiDevAmlIf *adev, Aml *scope)
 {
     tpm_crb_build_aml(TPM_IF(adev), scope, TPM_CRB_ADDR_BASE, TPM_CRB_ADDR_SIZE,
                       true);
 }
 
-static void tpm_crb_none_class_init(ObjectClass *klass, void *data)
->>>>>>> qemu-10.0.12-utm
+
+static void tpm_crb_none_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     TPMIfClass *tc = TPM_IF_CLASS(klass);
@@ -191,16 +177,8 @@ static const TypeInfo tpm_crb_none_info = {
     /* could be TYPE_SYS_BUS_DEVICE (or LPC etc) */
     .parent = TYPE_DEVICE,
     .instance_size = sizeof(CRBState),
-<<<<<<< qemu-11.0.3-brain
-    .class_init  = tpm_crb_class_init,
-    .interfaces = (const InterfaceInfo[]) {
-||||||| qemu-10.0.12
-    .class_init  = tpm_crb_class_init,
-    .interfaces = (InterfaceInfo[]) {
-=======
     .class_init  = tpm_crb_none_class_init,
-    .interfaces = (InterfaceInfo[]) {
->>>>>>> qemu-10.0.12-utm
+    .interfaces = (const InterfaceInfo[]) {
         { TYPE_TPM_IF },
         { TYPE_ACPI_DEV_AML_IF },
         { }

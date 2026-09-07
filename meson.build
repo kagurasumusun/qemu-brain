@@ -53,20 +53,10 @@ genh = []
 qapi_trace_events = []
 
 bsd_oses = ['gnu/kfreebsd', 'freebsd', 'netbsd', 'openbsd', 'dragonfly', 'darwin']
-<<<<<<< qemu-11.0.3-brain
 supported_oses = ['windows', 'freebsd', 'netbsd', 'openbsd', 'darwin', 'sunos', 'linux', 'emscripten']
 supported_cpus = ['ppc64', 's390x', 'riscv64', 'x86_64',
   'aarch64', 'loongarch64', 'mips64', 'sparc64', 'wasm64']
-||||||| qemu-10.0.12
-supported_oses = ['windows', 'freebsd', 'netbsd', 'openbsd', 'darwin', 'sunos', 'linux']
-supported_cpus = ['ppc', 'ppc64', 's390x', 'riscv32', 'riscv64', 'x86', 'x86_64',
-  'arm', 'aarch64', 'loongarch64', 'mips', 'mips64', 'sparc64']
-=======
-supported_oses = ['windows', 'freebsd', 'netbsd', 'openbsd', 'darwin', 'sunos', 'linux']
-supported_cpus = ['ppc', 'ppc64', 's390x', 'riscv32', 'riscv64', 'x86', 'x86_64',
-  'arm', 'aarch64', 'loongarch64', 'mips', 'mips64', 'sparc64']
 tcti_supported_cpus = ['aarch64']
->>>>>>> qemu-10.0.12-utm
 
 cpu = host_machine.cpu_family()
 
@@ -968,13 +958,6 @@ if have_tcg
   endif
   if get_option('tcg_interpreter')
     tcg_arch = 'tci'
-<<<<<<< qemu-11.0.3-brain
-||||||| qemu-10.0.12
-  elif host_arch == 'x86_64'
-    tcg_arch = 'i386'
-  elif host_arch == 'ppc64'
-    tcg_arch = 'ppc'
-=======
   elif get_option('tcg_threaded_interpreter')
     if cpu not in tcti_supported_cpus
       error('Unsupported CPU @0@ for TCTI, try --enable-tcg-interpreter'.format(cpu))
@@ -982,11 +965,6 @@ if have_tcg
       warning('TCTI is extremely experimental and incomplete! Things might break!')
       tcg_arch = '@0@-tcti'.format(cpu)
     endif
-  elif host_arch == 'x86_64'
-    tcg_arch = 'i386'
-  elif host_arch == 'ppc64'
-    tcg_arch = 'ppc'
->>>>>>> qemu-10.0.12-utm
   endif
   add_project_arguments('-iquote', meson.current_source_dir() / 'tcg' / tcg_arch,
                         language: all_languages)
@@ -2607,16 +2585,12 @@ if virgl.found()
                                         prefix: '#include <virglrenderer.h>',
                                         dependencies: virgl))
   config_host_data.set('VIRGL_VERSION_MAJOR', virgl.version().split('.')[0])
-<<<<<<< qemu-11.0.3-brain
   config_host_data.set('VIRGL_VERSION_MINOR', virgl.version().split('.')[1])
   config_host_data.set('VIRGL_VERSION_MICRO', virgl.version().split('.')[2])
-||||||| qemu-10.0.12
-=======
   config_host_data.set('HAVE_VIRGL_RENDERER_NEPTUNE',
                         cc.has_header_symbol('virglrenderer.h',
                                             'VIRGL_RENDERER_NEPTUNE',
                                             dependencies: virgl))
->>>>>>> qemu-10.0.12-utm
 endif
 config_host_data.set('CONFIG_VIRTFS', have_virtfs)
 config_host_data.set('CONFIG_VTE', vte.found())
@@ -3875,21 +3849,8 @@ util_ss = util_ss.apply({})
 libqemuutil = static_library('qemuutil',
                              build_by_default: false,
                              sources: util_ss.sources() + stub_ss.sources() + genh,
-<<<<<<< qemu-11.0.3-brain
-                             dependencies: [util_ss.dependencies(), libm, threads, glib, socket, malloc, rt, pixman, opengl])
-||||||| qemu-10.0.12
-                             dependencies: [util_ss.dependencies(), libm, threads, glib, socket, malloc])
-qemuutil_deps = [event_loop_base]
-if host_os != 'windows'
-  qemuutil_deps += [rt]
-endif
-=======
-                             dependencies: [util_ss.dependencies(), libm, threads, glib, socket, malloc, ucontext])
-qemuutil_deps = [event_loop_base]
-if host_os != 'windows'
-  qemuutil_deps += [rt]
-endif
->>>>>>> qemu-10.0.12-utm
+                             dependencies: [util_ss.dependencies(), libm, threads, glib,
+                                            socket, malloc, rt, pixman, opengl, ucontext])
 qemuutil = declare_dependency(link_with: libqemuutil,
                               sources: genh + version_res,
                               dependencies: [event_loop_base])
@@ -4518,16 +4479,8 @@ foreach target : target_dirs
     execs = [{
       'name': 'qemu-system-' + target_name,
       'win_subsystem': 'console',
-<<<<<<< qemu-11.0.3-brain
       'sources': [main_rs, files('system/main.c')],
-      'dependencies': [sdl]
-||||||| qemu-10.0.12
-      'sources': files('system/main.c'),
-      'dependencies': [sdl]
-=======
-      'sources': files('system/main.c'),
       'dependencies': [sdl, coref]
->>>>>>> qemu-10.0.12-utm
     }]
     if host_os == 'windows' and (sdl.found() or gtk.found())
       execs += [{
@@ -4634,15 +4587,11 @@ if xkbcommon.found()
 endif
 
 if have_tools
-<<<<<<< qemu-11.0.3-brain
-  link_args = enable_modules ? ['@block.syms'] : []
-||||||| qemu-10.0.12
-=======
   if get_option('shared_lib')
     qemu_img_lib = shared_library('qemu-img', [files('qemu-img.c'), hxdep],
              dependencies: [authz, block, crypto, io, qom, qemuutil], install: true)
   endif
->>>>>>> qemu-10.0.12-utm
+  link_args = enable_modules ? ['@block.syms'] : []
   qemu_img = executable('qemu-img', [files('qemu-img.c'), hxdep],
              link_args: link_args, link_depends: block_syms,
              dependencies: [authz, block, crypto, io, qom, qemuutil], install: true)

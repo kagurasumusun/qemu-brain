@@ -3407,21 +3407,6 @@ static int virt_get_physical_address_range(MachineState *ms,
 {
     VirtMachineState *vms = VIRT_MACHINE(ms);
 
-<<<<<<< qemu-11.0.3-brain
-||||||| qemu-10.0.12
-    int default_ipa_size = hvf_arm_get_default_ipa_bit_size();
-    int max_ipa_size = hvf_arm_get_max_ipa_bit_size();
-
-=======
-    int default_ipa_size = hvf_arm_get_default_ipa_bit_size();
-    int max_ipa_size = hvf_arm_get_max_ipa_bit_size();
-
-    /* Unknown max ipa size, we'll let the caller figure it out */
-    if (max_ipa_size == 0) {
-        return 0;
-    }
-
->>>>>>> qemu-10.0.12-utm
     /* We freeze the memory map to compute the highest gpa */
     virt_set_memmap(vms, max_ipa_size);
 

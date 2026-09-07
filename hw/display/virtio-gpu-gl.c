@@ -169,14 +169,10 @@ static const Property virtio_gpu_gl_properties[] = {
                     VIRTIO_GPU_FLAG_STATS_ENABLED, false),
     DEFINE_PROP_BIT("venus", VirtIOGPU, parent_obj.conf.flags,
                     VIRTIO_GPU_FLAG_VENUS_ENABLED, false),
-<<<<<<< qemu-11.0.3-brain
     DEFINE_PROP_BIT("drm_native_context", VirtIOGPU, parent_obj.conf.flags,
                     VIRTIO_GPU_FLAG_DRM_ENABLED, false),
-||||||| qemu-10.0.12
-=======
     DEFINE_PROP_BIT("neptune", VirtIOGPU, parent_obj.conf.flags,
                     VIRTIO_GPU_FLAG_NEPTUNE_ENABLED, false),
->>>>>>> qemu-10.0.12-utm
 };
 
 static void virtio_gpu_gl_device_unrealize(DeviceState *qdev)

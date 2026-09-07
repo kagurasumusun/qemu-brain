@@ -34,12 +34,8 @@
 #include "hw/core/cpu.h"
 #include "hw/acpi/acpi-defs.h"
 #include "hw/acpi/acpi.h"
-<<<<<<< qemu-11.0.3-brain
 #include "hw/acpi/pcihp.h"
-||||||| qemu-10.0.12
-=======
 #include "hw/acpi/acpi_aml_interface.h"
->>>>>>> qemu-10.0.12-utm
 #include "hw/nvram/fw_cfg_acpi.h"
 #include "hw/acpi/bios-linker-loader.h"
 #include "hw/acpi/aml-build.h"
