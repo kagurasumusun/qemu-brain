@@ -63,6 +63,11 @@ void egl_dmabuf_create_fence(QemuDmaBuf *dmabuf);
 
 #endif
 
+#if defined(CONFIG_X11) || defined(CONFIG_GBM) || defined(WIN32)
+EGLDisplay qemu_egl_get_display(EGLNativeDisplayType native,
+                                EGLenum platform);
+#endif
+
 EGLSurface qemu_egl_init_surface(EGLContext ectx, EGLNativeWindowType win);
 EGLSurface qemu_egl_init_buffer_surface(EGLContext ectx, EGLenum buftype,
                                         EGLClientBuffer buffer, const EGLint *attrib_list);
