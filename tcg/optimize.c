@@ -3114,7 +3114,6 @@ void tcg_optimize(TCGContext *s)
             break;
 #if !defined(CONFIG_TCG_THREADED_INTERPRETER) /* FIXME: this breaks TCTI */
         case INDEX_op_ld:
-#endif
         case INDEX_op_ld_vec:
             done = fold_tcg_ld_memcopy(&ctx, op);
             break;
