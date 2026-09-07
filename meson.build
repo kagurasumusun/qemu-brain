@@ -959,11 +959,17 @@ if have_tcg
   if get_option('tcg_interpreter')
     tcg_arch = 'tci'
   elif get_option('tcg_threaded_interpreter')
+    # UTM's threaded-dispatch interpreter backend (tcg/aarch64-tcti) is written
+    # against the per-type TCG ops of QEMU 10.0 (INDEX_op_add_i32, ...).  QEMU
+    # 11.0 replaced them with the type-generic ones (INDEX_op_add, ...) and
+    # dropped several ops the backend emits, so it has to be ported before it
+    # can be built here.  Fall back to the (slower) upstream interpreter.
     if cpu not in tcti_supported_cpus
       error('Unsupported CPU @0@ for TCTI, try --enable-tcg-interpreter'.format(cpu))
     else
-      warning('TCTI is extremely experimental and incomplete! Things might break!')
-      tcg_arch = '@0@-tcti'.format(cpu)
+      warning('TCTI has not been ported to the QEMU 11 TCG yet: ' +
+              'falling back to --enable-tcg-interpreter')
+      tcg_arch = 'tci'
     endif
   endif
   add_project_arguments('-iquote', meson.current_source_dir() / 'tcg' / tcg_arch,
@@ -4909,7 +4915,7 @@ if config_all_accel.has_key('CONFIG_TCG')
   if get_option('tcg_interpreter')
     summary_info += {'TCG backend':   'TCI (TCG with bytecode interpreter, slow)'}
   elif get_option('tcg_threaded_interpreter')
-    summary_info += {'TCG backend':   'TCTI (TCG with threaded-dispatch bytecode interpreter, experimental and slow; but faster than TCI)'}
+    summary_info += {'TCG backend':   'interpreter (TCTI requested, not ported to QEMU 11 yet)'}
   else
     summary_info += {'TCG backend':   'native (@0@)'.format(cpu)}
   endif
