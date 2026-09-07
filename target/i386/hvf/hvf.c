@@ -228,7 +228,6 @@ int hvf_arch_init(void)
     return 0;
 }
 
-<<<<<<< qemu-11.0.3-brain
 /* 48-bit on all Intel Macs. Function currently unused. */
 uint32_t hvf_arch_get_default_ipa_bit_size(void)
 {
@@ -241,12 +240,6 @@ uint32_t hvf_arch_get_max_ipa_bit_size(void)
 }
 
 hv_return_t hvf_arch_vm_create(MachineState *ms, uint32_t pa_range)
-||||||| qemu-10.0.12
-hv_return_t hvf_arch_vm_create(MachineState *ms, uint32_t pa_range)
-=======
-hv_return_t hvf_arch_vm_create(MachineState *ms, uint32_t pa_range,
-                               uint32_t ipa_granule_size)
->>>>>>> qemu-10.0.12-utm
 {
     uint64_t page_size = qemu_real_host_page_size();
 

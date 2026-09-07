@@ -162,18 +162,9 @@ void hvf_arm_init_debug(void)
     hw_watchpoints =
         g_array_sized_new(true, true, sizeof(HWWatchpoint), max_hw_wps);
 
-<<<<<<< qemu-11.0.3-brain
     os_release(config);
 }
-||||||| qemu-10.0.12
-#define HVF_SYSREG(crn, crm, op0, op1, op2) \
-        ENCODE_AA64_CP_REG(CP_REG_ARM64_SYSREG_CP, crn, crm, op0, op1, op2)
-=======
 #endif
-
-#define HVF_SYSREG(crn, crm, op0, op1, op2) \
-        ENCODE_AA64_CP_REG(CP_REG_ARM64_SYSREG_CP, crn, crm, op0, op1, op2)
->>>>>>> qemu-10.0.12-utm
 
 #define SYSREG_OP0_SHIFT      20
 #define SYSREG_OP0_MASK       0x3
@@ -321,15 +312,9 @@ void hvf_arm_init_debug(void)
 #define TMR_CTL_IMASK   (1 << 1)
 #define TMR_CTL_ISTATUS (1 << 2)
 
-<<<<<<< qemu-11.0.3-brain
-static void hvf_wfi_timer_cb(void *opaque);
-||||||| qemu-10.0.12
-static void hvf_wfi(CPUState *cpu);
-=======
 static const bool windows_workaround_enabled = true;
 
-static void hvf_wfi(CPUState *cpu);
->>>>>>> qemu-10.0.12-utm
+static void hvf_wfi_timer_cb(void *opaque);
 
 static uint32_t chosen_ipa_bit_size;
 
@@ -1088,15 +1073,9 @@ static uint64_t hvf_get_reg(CPUState *cpu, int rt)
     return val;
 }
 
-<<<<<<< qemu-11.0.3-brain
-static void clamp_id_aa64mmfr0_parange_to_ipa_size(ARMISARegisters *isar)
-||||||| qemu-10.0.12
-static void clamp_id_aa64mmfr0_parange_to_ipa_size(uint64_t *id_aa64mmfr0)
-=======
 #if !defined(CONFIG_HVF_PRIVATE)
 
-static void clamp_id_aa64mmfr0_parange_to_ipa_size(uint64_t *id_aa64mmfr0)
->>>>>>> qemu-10.0.12-utm
+static void clamp_id_aa64mmfr0_parange_to_ipa_size(ARMISARegisters *isar)
 {
     uint32_t ipa_size = chosen_ipa_bit_size ?
             chosen_ipa_bit_size : hvf_arch_get_max_ipa_bit_size();
@@ -1165,17 +1144,7 @@ static bool hvf_arm_get_host_cpu_features(ARMHostCPUFeatures *ahcf)
         }
     }
 
-<<<<<<< qemu-11.0.3-brain
     os_release(config);
-||||||| qemu-10.0.12
-    clamp_id_aa64mmfr0_parange_to_ipa_size(&host_isar.id_aa64mmfr0);
-=======
-#if !defined(CONFIG_HVF_PRIVATE)
-    if (__builtin_available(macOS 13.0, *)) {
-        clamp_id_aa64mmfr0_parange_to_ipa_size(&host_isar.id_aa64mmfr0);
-    }
-#endif
->>>>>>> qemu-10.0.12-utm
 
     /*
      * Hardcode MIDR because Apple deliberately doesn't expose a divergent
@@ -1188,7 +1157,11 @@ static bool hvf_arm_get_host_cpu_features(ARMHostCPUFeatures *ahcf)
     t = FIELD_DP64(t, MIDR_EL1, REVISION, 0);
     ahcf->midr = t;
 
-    clamp_id_aa64mmfr0_parange_to_ipa_size(&host_isar);
+#if !defined(CONFIG_HVF_PRIVATE)
+    if (__builtin_available(macOS 13.0, *)) {
+        clamp_id_aa64mmfr0_parange_to_ipa_size(&host_isar);
+    }
+#endif
 
     ahcf->isar = host_isar;
 
@@ -1214,11 +1187,6 @@ static bool hvf_arm_get_host_cpu_features(ARMHostCPUFeatures *ahcf)
     return r == HV_SUCCESS;
 }
 
-<<<<<<< qemu-11.0.3-brain
-uint32_t hvf_arch_get_default_ipa_bit_size(void)
-||||||| qemu-10.0.12
-uint32_t hvf_arm_get_default_ipa_bit_size(void)
-=======
 static hv_return_t hvf_vcpu_get_actlr(hv_vcpu_t vcpu, uint64_t* value)
 {
 #if defined(CONFIG_HVF_PRIVATE)
@@ -1245,8 +1213,7 @@ static hv_return_t hvf_vcpu_set_actlr(hv_vcpu_t vcpu, uint64_t value)
 #endif
 }
 
-uint32_t hvf_arm_get_default_ipa_bit_size(void)
->>>>>>> qemu-10.0.12-utm
+uint32_t hvf_arch_get_default_ipa_bit_size(void)
 {
 #if TARGET_OS_OSX
     if (__builtin_available(macOS 13.0, *)) {
@@ -1398,9 +1365,11 @@ static hv_return_t hvf_set_ipa_size(hv_vm_config_t config, uint32_t pa_range)
     return HV_UNSUPPORTED;
 }
 
-hv_return_t hvf_arch_vm_create(MachineState *ms, uint32_t pa_range,
-                               uint32_t ipa_granule_size)
+hv_return_t hvf_arch_vm_create(MachineState *ms, uint32_t pa_range)
 {
+    /* set through the accelerator's ipa-granule-size property */
+    uint32_t ipa_granule_size = hvf_ipa_granule_size;
+
     hv_return_t ret;
     hv_vm_config_t config = hv_vm_config_create();
 
@@ -1533,22 +1502,11 @@ int hvf_arch_init_vcpu(CPUState *cpu)
                               &arm_cpu->isar.idregs[ID_AA64MMFR0_EL1_IDX]);
     assert_hvf_ok(ret);
 
-<<<<<<< qemu-11.0.3-brain
-    clamp_id_aa64mmfr0_parange_to_ipa_size(&arm_cpu->isar);
-    ret = hv_vcpu_set_sys_reg(cpu->accel->fd, HV_SYS_REG_ID_AA64MMFR0_EL1,
-                              arm_cpu->isar.idregs[ID_AA64MMFR0_EL1_IDX]);
-    assert_hvf_ok(ret);
-||||||| qemu-10.0.12
-    clamp_id_aa64mmfr0_parange_to_ipa_size(&arm_cpu->isar.id_aa64mmfr0);
-    ret = hv_vcpu_set_sys_reg(cpu->accel->fd, HV_SYS_REG_ID_AA64MMFR0_EL1,
-                              arm_cpu->isar.id_aa64mmfr0);
-    assert_hvf_ok(ret);
-=======
 #if !defined(CONFIG_HVF_PRIVATE)
     if (__builtin_available(macOS 13.0, *)) {
-        clamp_id_aa64mmfr0_parange_to_ipa_size(&arm_cpu->isar.id_aa64mmfr0);
+        clamp_id_aa64mmfr0_parange_to_ipa_size(&arm_cpu->isar);
         ret = hv_vcpu_set_sys_reg(cpu->accel->fd, HV_SYS_REG_ID_AA64MMFR0_EL1,
-                                arm_cpu->isar.id_aa64mmfr0);
+                                  arm_cpu->isar.idregs[ID_AA64MMFR0_EL1_IDX]);
         assert_hvf_ok(ret);
     }
 #endif
@@ -1562,7 +1520,7 @@ int hvf_arch_init_vcpu(CPUState *cpu)
         ret = hvf_vcpu_set_actlr(cpu->accel->fd, actlr);
         assert_hvf_ok(ret);
     }
->>>>>>> qemu-10.0.12-utm
+
 
     if (!hvf_irqchip_in_kernel()) {
         cpu->accel->wfi_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
@@ -2543,15 +2501,9 @@ static int hvf_handle_exception(CPUState *cpu, hv_vcpu_exit_exception_t *excp)
         break;
     case EC_AA64_SMC:
         cpu_synchronize_state(cpu);
-<<<<<<< qemu-11.0.3-brain
-        if (arm_cpu->psci_conduit == QEMU_PSCI_CONDUIT_SMC) {
-            /* Secure Monitor Call exception, we need to advance $pc */
-||||||| qemu-10.0.12
-        if (arm_cpu->psci_conduit == QEMU_PSCI_CONDUIT_SMC) {
-=======
         if (windows_workaround_enabled ||
             arm_cpu->psci_conduit == QEMU_PSCI_CONDUIT_SMC) {
->>>>>>> qemu-10.0.12-utm
+            /* Secure Monitor Call exception, we need to advance $pc */
             advance_pc = true;
 
             if (!hvf_handle_psci_call(cpu, &ret)) {

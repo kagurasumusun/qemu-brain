@@ -25,7 +25,6 @@
 #define VIRGL_RENDERER_UNSTABLE_APIS
 #include <virglrenderer.h>
 
-<<<<<<< qemu-11.0.3-brain
 /*
  * VIRGL_CHECK_VERSION available since libvirglrenderer 1.0.1 and was fixed
  * in 1.1.0. Undefine bugged version of the macro and provide our own.
@@ -46,11 +45,8 @@
 #define VIRGL_HAS_MAP_FIXED \
     (VIRGL_CHECK_VERSION(1, 3, 0) && !IS_ENABLED(CONFIG_WIN32))
 
-||||||| qemu-10.0.12
-=======
-#define NATIVE_HANDLE_SUPPORT_VERSION (1)
 
->>>>>>> qemu-10.0.12-utm
+#define NATIVE_HANDLE_SUPPORT_VERSION (1)
 struct virtio_gpu_virgl_resource {
     struct virtio_gpu_simple_resource base;
     MemoryRegion *mr;
@@ -1306,32 +1302,16 @@ void virtio_gpu_virgl_process_cmd(VirtIOGPU *g,
     trace_virtio_gpu_fence_ctrl(cmd->cmd_hdr.fence_id, cmd->cmd_hdr.type);
 #if VIRGL_VERSION_MAJOR >= 1
     if (cmd->cmd_hdr.flags & VIRTIO_GPU_FLAG_INFO_RING_IDX) {
-<<<<<<< qemu-11.0.3-brain
         const uint32_t flags = VIRGL_RENDERER_FENCE_FLAG_MERGEABLE;
 
-        ret = virgl_renderer_context_create_fence(cmd->cmd_hdr.ctx_id, flags,
+        int ret = virgl_renderer_context_create_fence(cmd->cmd_hdr.ctx_id, flags,
                                                   cmd->cmd_hdr.ring_idx,
                                                   cmd->cmd_hdr.fence_id);
-        if (ret) {
-            qemu_log_mask(LOG_GUEST_ERROR,
-                          "%s: virgl_renderer_context_create_fence error: %s",
-                          __func__, strerror(-ret));
-        }
-||||||| qemu-10.0.12
-        virgl_renderer_context_create_fence(cmd->cmd_hdr.ctx_id,
-                                            VIRGL_RENDERER_FENCE_FLAG_MERGEABLE,
-                                            cmd->cmd_hdr.ring_idx,
-                                            cmd->cmd_hdr.fence_id);
-=======
-        int ret = virgl_renderer_context_create_fence(cmd->cmd_hdr.ctx_id,
-                                            VIRGL_RENDERER_FENCE_FLAG_MERGEABLE,
-                                            cmd->cmd_hdr.ring_idx,
-                                            cmd->cmd_hdr.fence_id);
         if (ret) {
             /*
              * The renderer context is gone (e.g. its render-server
              * worker died mid-teardown): this fence can never retire
-             * through the timeline.  Complete it now — the cmd is not
+             * through the timeline.  Complete it now - the cmd is not
              * yet on fenceq, so responding here both signals the fence
              * to the guest and keeps it off the queue.  Leaving it
              * pending wedges the guest's GPU scheduler (VIDEO_TDR_
@@ -1344,7 +1324,6 @@ void virtio_gpu_virgl_process_cmd(VirtIOGPU *g,
                     (uint64_t)cmd->cmd_hdr.fence_id);
             virtio_gpu_ctrl_response_nodata(g, cmd, VIRTIO_GPU_RESP_OK_NODATA);
         }
->>>>>>> qemu-10.0.12-utm
         return;
     }
 #endif
@@ -1790,7 +1769,6 @@ GArray *virtio_gpu_virgl_get_capsets(VirtIOGPU *g)
         }
     }
 
-<<<<<<< qemu-11.0.3-brain
     if (virtio_gpu_drm_enabled(g->parent_obj.conf)) {
         virgl_renderer_get_cap_set(VIRTIO_GPU_CAPSET_DRM,
                                    &capset_max_ver,
@@ -1800,8 +1778,7 @@ GArray *virtio_gpu_virgl_get_capsets(VirtIOGPU *g)
         }
     }
 
-||||||| qemu-10.0.12
-=======
+
 #ifdef VIRGL_RENDERER_NEPTUNE
     if (virtio_gpu_neptune_enabled(g->parent_obj.conf)) {
         virgl_renderer_get_cap_set(VIRTIO_GPU_CAPSET_NEPTUNE,
@@ -1813,6 +1790,5 @@ GArray *virtio_gpu_virgl_get_capsets(VirtIOGPU *g)
     }
 #endif
 
->>>>>>> qemu-10.0.12-utm
     return capset_ids;
 }
