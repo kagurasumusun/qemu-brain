@@ -50,6 +50,10 @@ static int spice_migration_completed;
 static int spice_display_is_running;
 static int spice_have_target_host;
 
+#ifdef CONFIG_EGL
+extern EGLContext spice_gl_ctx;
+#endif
+
 struct SpiceTimer {
     QEMUTimer *timer;
 };
@@ -514,7 +518,7 @@ static QemuOptsList qemu_spice_opts = {
 #ifdef HAVE_SPICE_GL
         },{
             .name = "gl",
-            .type = QEMU_OPT_BOOL,
+            .type = QEMU_OPT_STRING,
         },{
             .name = "rendernode",
             .type = QEMU_OPT_STRING,
@@ -847,6 +851,7 @@ static void qemu_spice_init(void)
     g_free(x509_cacert_file);
     g_free(password);
 
+<<<<<<< qemu-11.0.3-brain
 #ifdef HAVE_SPICE_GL
     if (qemu_opt_get_bool(opts, "gl", 0)) {
         if ((port != 0) || (tls_port != 0)) {
@@ -875,6 +880,21 @@ static void qemu_spice_init(void)
         spice_opengl = 1;
     }
 #endif
+||||||| qemu-10.0.12
+#ifdef HAVE_SPICE_GL
+    if (qemu_opt_get_bool(opts, "gl", 0)) {
+        if ((port != 0) || (tls_port != 0)) {
+            error_report("SPICE GL support is local-only for now and "
+                         "incompatible with -spice port/tls-port");
+            exit(1);
+        }
+        egl_init(qemu_opt_get(opts, "rendernode"), DISPLAY_GL_MODE_ON, &error_fatal);
+        spice_opengl = 1;
+    }
+#endif
+=======
+    qemu_spice_display_early_init();
+>>>>>>> qemu-10.0.12-utm
 }
 
 static int qemu_spice_add_interface(SpiceBaseInstance *sin)

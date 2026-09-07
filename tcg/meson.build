@@ -23,9 +23,82 @@ if get_option('tcg_interpreter')
 endif
 
 tcg_ss.add(when: libdw, if_true: files('debuginfo.c'))
+
+if get_option('tcg_threaded_interpreter')
+  # Tell our compiler how to generate our TCTI gadgets.
+  gadget_generator = '@0@/tcti-gadget-gen.py'.format(tcg_arch)
+  tcti_sources = [
+      'tcti_gadgets.h',
+      'tcti_misc_gadgets.c',
+      'tcti_misc_gadgets.h',
+      'tcti_setcond_gadgets.c',
+      'tcti_setcond_gadgets.h',
+      'tcti_brcond_gadgets.c',
+      'tcti_brcond_gadgets.h',
+      'tcti_mov_gadgets.c',
+      'tcti_mov_gadgets.h',
+      'tcti_load_signed_gadgets.c',
+      'tcti_load_signed_gadgets.h',
+      'tcti_load_unsigned_gadgets.c',
+      'tcti_load_unsigned_gadgets.h',
+      'tcti_store_gadgets.c',
+      'tcti_store_gadgets.h',
+      'tcti_arithmetic_gadgets.c',
+      'tcti_arithmetic_gadgets.h',
+      'tcti_logical_gadgets.c',
+      'tcti_logical_gadgets.h',
+      'tcti_extension_gadgets.c',
+      'tcti_extension_gadgets.h',
+      'tcti_bitwise_gadgets.c',
+      'tcti_bitwise_gadgets.h',
+      'tcti_byteswap_gadgets.c',
+      'tcti_byteswap_gadgets.h',
+      'tcti_qemu_ld_aligned_signed_le_gadgets.c',
+      'tcti_qemu_ld_aligned_signed_le_gadgets.h',
+      'tcti_qemu_ld_unaligned_signed_le_gadgets.c',
+      'tcti_qemu_ld_unaligned_signed_le_gadgets.h',
+      'tcti_qemu_ld_slowpath_signed_le_gadgets.c',
+      'tcti_qemu_ld_slowpath_signed_le_gadgets.h',
+      'tcti_qemu_ld_aligned_unsigned_le_gadgets.c',
+      'tcti_qemu_ld_aligned_unsigned_le_gadgets.h',
+      'tcti_qemu_ld_unaligned_unsigned_le_gadgets.c',
+      'tcti_qemu_ld_unaligned_unsigned_le_gadgets.h',
+      'tcti_qemu_ld_slowpath_unsigned_le_gadgets.c',
+      'tcti_qemu_ld_slowpath_unsigned_le_gadgets.h',
+      'tcti_qemu_st_aligned_le_gadgets.c',
+      'tcti_qemu_st_aligned_le_gadgets.h',
+      'tcti_qemu_st_unaligned_le_gadgets.c',
+      'tcti_qemu_st_unaligned_le_gadgets.h',
+      'tcti_qemu_st_slowpath_le_gadgets.c',
+      'tcti_qemu_st_slowpath_le_gadgets.h',
+      'tcti_simd_base_gadgets.c',
+      'tcti_simd_base_gadgets.h',
+      'tcti_simd_arithmetic_gadgets.c',
+      'tcti_simd_arithmetic_gadgets.h',
+      'tcti_simd_logical_gadgets.c',
+      'tcti_simd_logical_gadgets.h',
+      'tcti_simd_immediate_gadgets.c',
+      'tcti_simd_immediate_gadgets.h',
+  ]
+  tcti_gadgets = custom_target('tcti-gadgets.h',
+                            output: tcti_sources,
+                            input: gadget_generator,
+                            command: [find_program(gadget_generator)],
+                            build_by_default: false,
+                            build_always_stale: false)
+  tcti_gadgets = declare_dependency(sources: tcti_gadgets)
+else
+  tcti_gadgets = []
+endif
+
 if host_os == 'linux'
   tcg_ss.add(files('perf.c'))
 endif
 
 user_ss.add_all(tcg_ss)
 system_ss.add_all(tcg_ss)
+
+if get_option('tcg_threaded_interpreter')
+  user_ss.add(tcti_gadgets)
+  system_ss.add(tcti_gadgets)
+endif

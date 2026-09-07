@@ -101,7 +101,12 @@ enum virtio_gpu_base_conf_flags {
     VIRTIO_GPU_FLAG_RUTABAGA_ENABLED,
     VIRTIO_GPU_FLAG_VENUS_ENABLED,
     VIRTIO_GPU_FLAG_RESOURCE_UUID_ENABLED,
+<<<<<<< qemu-11.0.3-brain
     VIRTIO_GPU_FLAG_DRM_ENABLED,
+||||||| qemu-10.0.12
+=======
+    VIRTIO_GPU_FLAG_NEPTUNE_ENABLED,
+>>>>>>> qemu-10.0.12-utm
 };
 
 #define virtio_gpu_virgl_enabled(_cfg) \
@@ -124,8 +129,14 @@ enum virtio_gpu_base_conf_flags {
     (_cfg.hostmem > 0)
 #define virtio_gpu_venus_enabled(_cfg) \
     (_cfg.flags & (1 << VIRTIO_GPU_FLAG_VENUS_ENABLED))
+<<<<<<< qemu-11.0.3-brain
 #define virtio_gpu_drm_enabled(_cfg) \
     (_cfg.flags & (1 << VIRTIO_GPU_FLAG_DRM_ENABLED))
+||||||| qemu-10.0.12
+=======
+#define virtio_gpu_neptune_enabled(_cfg) \
+    (_cfg.flags & (1 << VIRTIO_GPU_FLAG_NEPTUNE_ENABLED))
+>>>>>>> qemu-10.0.12-utm
 
 struct virtio_gpu_base_conf {
     uint32_t max_outputs;
@@ -142,6 +153,8 @@ struct virtio_gpu_ctrl_command {
     struct virtio_gpu_ctrl_hdr cmd_hdr;
     uint32_t error;
     bool finished;
+    /* Set if process_cmd deferred completion; keep at cmdq head for resume. */
+    bool suspended;
     QTAILQ_ENTRY(virtio_gpu_ctrl_command) next;
 };
 
@@ -182,6 +195,15 @@ struct VirtIOGPUBaseClass {
 typedef struct VGPUDMABuf {
     QemuDmaBuf *buf;
     uint32_t scanout_id;
+    /* Source identity of the scanout request that created this dmabuf, so a
+     * re-present of the SAME underlying buffer -- including a flip chain
+     * alternating between a small set of buffers -- can switch scanout
+     * without a costly EGL/GL re-import (which churns/hangs the display
+     * thread). */
+    int src_fd;
+    uint32_t src_res_id;
+    uint32_t src_w, src_h, src_x, src_y;
+    uint32_t fb_w, fb_h, fb_stride, fb_format;
     QTAILQ_ENTRY(VGPUDMABuf) next;
 } VGPUDMABuf;
 
@@ -359,6 +381,9 @@ void virtio_gpu_cleanup_mapping(VirtIOGPU *g,
 void virtio_gpu_process_cmdq(VirtIOGPU *g);
 void virtio_gpu_device_realize(DeviceState *qdev, Error **errp);
 void virtio_gpu_reset(VirtIODevice *vdev);
+void virtio_gpu_resource_destroy(VirtIOGPU *g,
+                                 struct virtio_gpu_simple_resource *res,
+                                 Error **errp);
 void virtio_gpu_simple_process_cmd(VirtIOGPU *g, struct virtio_gpu_ctrl_command *cmd);
 void virtio_gpu_update_cursor_data(VirtIOGPU *g,
                                    struct virtio_gpu_scanout *s,
@@ -402,6 +427,17 @@ void virtio_gpu_virgl_process_cmd(VirtIOGPU *g,
                                   struct virtio_gpu_ctrl_command *cmd);
 void virtio_gpu_virgl_fence_poll(VirtIOGPU *g);
 void virtio_gpu_virgl_reset_scanout(VirtIOGPU *g);
+<<<<<<< qemu-11.0.3-brain
+||||||| qemu-10.0.12
+void virtio_gpu_virgl_reset(VirtIOGPU *g);
+int virtio_gpu_virgl_init(VirtIOGPU *g);
+=======
+void virtio_gpu_virgl_reset(VirtIOGPU *g);
+void virtio_gpu_virgl_resource_destroy(VirtIOGPU *g,
+                                       struct virtio_gpu_simple_resource *res,
+                                       Error **errp);
+int virtio_gpu_virgl_init(VirtIOGPU *g);
+>>>>>>> qemu-10.0.12-utm
 GArray *virtio_gpu_virgl_get_capsets(VirtIOGPU *g);
 void virtio_gpu_virgl_reset_async_fences(VirtIOGPU *g);
 void virtio_gpu_virgl_resource_destroy(VirtIOGPU *g,

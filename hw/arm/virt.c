@@ -1965,7 +1965,11 @@ static void virt_set_memmap(VirtMachineState *vms, int pa_bits)
      * irrespective of the underlying capabilities of the HW.
      */
     if (!vms->highmem) {
+#ifdef CONFIG_DARWIN
+        pa_bits = 36;
+#else
         pa_bits = 32;
+#endif
     }
 
     /*
@@ -3271,6 +3275,13 @@ static void virt_machine_device_plug_cb(HotplugHandler *hotplug_dev,
         vms->virtio_iommu_bdf = pci_get_bdf(pdev);
         create_virtio_iommu_dt_bindings(vms);
     }
+
+#ifdef CONFIG_TPM
+    if (object_dynamic_cast(OBJECT(dev), TYPE_TPM_IF)) {
+        tpm_sysbus_plug(TPM_IF(dev), OBJECT(vms->platform_bus_dev),
+                        vms->memmap[VIRT_PLATFORM_BUS].base);
+    }
+#endif
 }
 
 static void virt_dimm_unplug_request(HotplugHandler *hotplug_dev,
@@ -3396,6 +3407,21 @@ static int virt_get_physical_address_range(MachineState *ms,
 {
     VirtMachineState *vms = VIRT_MACHINE(ms);
 
+<<<<<<< qemu-11.0.3-brain
+||||||| qemu-10.0.12
+    int default_ipa_size = hvf_arm_get_default_ipa_bit_size();
+    int max_ipa_size = hvf_arm_get_max_ipa_bit_size();
+
+=======
+    int default_ipa_size = hvf_arm_get_default_ipa_bit_size();
+    int max_ipa_size = hvf_arm_get_max_ipa_bit_size();
+
+    /* Unknown max ipa size, we'll let the caller figure it out */
+    if (max_ipa_size == 0) {
+        return 0;
+    }
+
+>>>>>>> qemu-10.0.12-utm
     /* We freeze the memory map to compute the highest gpa */
     virt_set_memmap(vms, max_ipa_size);
 
@@ -3475,6 +3501,7 @@ static void virt_machine_class_init(ObjectClass *oc, const void *data)
     machine_class_allow_dynamic_sysbus_dev(mc, TYPE_ARM_SMMUV3);
 #ifdef CONFIG_TPM
     machine_class_allow_dynamic_sysbus_dev(mc, TYPE_TPM_TIS_SYSBUS);
+    machine_class_allow_dynamic_sysbus_dev(mc, TYPE_TPM_CRB_SYSBUS);
 #endif
     mc->block_default_type = IF_VIRTIO;
     mc->no_cdrom = 1;

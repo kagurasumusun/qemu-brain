@@ -63,3 +63,9 @@ config SGTL5000
 config BU26154
     bool
     depends on I2C
+
+config MARVELL_88W8618
+    bool
+
+config SCREAMER
+    bool

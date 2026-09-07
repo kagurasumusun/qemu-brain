@@ -22,7 +22,7 @@
 #endif
 
 #include "ui/kbd-state.h"
-#ifdef CONFIG_OPENGL
+#if defined(CONFIG_OPENGL) && defined(CONFIG_EGL)
 # include "ui/egl-helpers.h"
 #endif
 
@@ -46,7 +46,7 @@ struct sdl2_console {
     SDL_GLContext winctx;
     QKbdState *kbd;
     bool has_dmabuf;
-#ifdef CONFIG_OPENGL
+#if defined(CONFIG_OPENGL) && defined(CONFIG_EGL)
     QemuGLShader *gls;
     egl_fb guest_fb;
     egl_fb win_fb;
@@ -94,7 +94,7 @@ void sdl2_gl_scanout_texture(DisplayChangeListener *dcl,
                              uint32_t backing_height,
                              uint32_t x, uint32_t y,
                              uint32_t w, uint32_t h,
-                             void *d3d_tex2d);
+                             ScanoutTextureNative native);
 void sdl2_gl_scanout_flush(DisplayChangeListener *dcl,
                            uint32_t x, uint32_t y, uint32_t w, uint32_t h);
 void sdl2_gl_scanout_dmabuf(DisplayChangeListener *dcl,

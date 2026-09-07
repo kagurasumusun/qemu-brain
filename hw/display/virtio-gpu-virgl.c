@@ -22,8 +22,10 @@
 
 #include "ui/egl-helpers.h"
 
+#define VIRGL_RENDERER_UNSTABLE_APIS
 #include <virglrenderer.h>
 
+<<<<<<< qemu-11.0.3-brain
 /*
  * VIRGL_CHECK_VERSION available since libvirglrenderer 1.0.1 and was fixed
  * in 1.1.0. Undefine bugged version of the macro and provide our own.
@@ -44,6 +46,11 @@
 #define VIRGL_HAS_MAP_FIXED \
     (VIRGL_CHECK_VERSION(1, 3, 0) && !IS_ENABLED(CONFIG_WIN32))
 
+||||||| qemu-10.0.12
+=======
+#define NATIVE_HANDLE_SUPPORT_VERSION (1)
+
+>>>>>>> qemu-10.0.12-utm
 struct virtio_gpu_virgl_resource {
     struct virtio_gpu_simple_resource base;
     MemoryRegion *mr;
@@ -307,7 +314,75 @@ virtio_gpu_virgl_unmap_resource_blob(VirtIOGPU *g,
 
     return 0;
 }
+
+static void
+virtio_gpu_virgl_destroy_hostmem_region(VirtIOGPU *g,
+                                        struct virtio_gpu_virgl_resource *res)
+{
+    struct virtio_gpu_virgl_hostmem_region *vmr = to_hostmem_region(res->mr);
+    VirtIOGPUBase *b = VIRTIO_GPU_BASE(g);
+
+    /*
+     * vmr is not QOM-owned, so object_finalize() does not free it; the unmap
+     * step 3 normally does. Reset can run here at any stage of an in-flight
+     * unmap, where step 3 may not run. This and the finalizer both hold the
+     * BQL, so free vmr or hand it to object_finalize() per the stage.
+     */
+    if (vmr->finish_unmapping) {
+        /* Finalizer ran and balanced renderer_blocked; just free vmr. */
+        res->mr = NULL;
+        g_free(vmr);
+        virgl_renderer_resource_unmap(res->base.resource_id);
+        return;
+    }
+
+    if (res->mr->container != &b->hostmem) {
+        /* Async unmap detached the subregion; let the finalizer free vmr. */
+        OBJECT(vmr)->free = g_free;
+        res->mr = NULL;
+        return;
+    }
+
+    /* No unmap in flight; tear down here and neutralize the finalizer. */
+    OBJECT(vmr)->free = g_free;
+    vmr->g = NULL;
+    memory_region_set_enabled(res->mr, false);
+    memory_region_del_subregion(&b->hostmem, res->mr);
+    object_unparent(OBJECT(vmr));
+    res->mr = NULL;
+
+    virgl_renderer_resource_unmap(res->base.resource_id);
+}
 #endif
+
+void virtio_gpu_virgl_resource_destroy(VirtIOGPU *g,
+                                       struct virtio_gpu_simple_resource *res,
+                                       Error **errp)
+{
+    struct virtio_gpu_virgl_resource *vres =
+        container_of(res, struct virtio_gpu_virgl_resource, base);
+    struct iovec *res_iovs = NULL;
+    int num_iovs = 0;
+
+#if VIRGL_VERSION_MAJOR >= 1
+    if (vres->mr) {
+        virtio_gpu_virgl_destroy_hostmem_region(g, vres);
+    }
+#endif
+
+    virgl_renderer_resource_detach_iov(res->resource_id, &res_iovs, &num_iovs);
+    if (res_iovs && num_iovs) {
+        virtio_gpu_cleanup_mapping_iov(g, res_iovs, num_iovs);
+    }
+    /* The detached iov is the same allocation virgl took at attach time;
+     * clear res->iov so the base destroy does not free it again. */
+    res->iov = NULL;
+    res->iov_cnt = 0;
+
+    virgl_renderer_resource_unref(res->resource_id);
+
+    virtio_gpu_resource_destroy(g, res, errp);
+}
 
 static void virgl_cmd_create_resource_2d(VirtIOGPU *g,
                                          struct virtio_gpu_ctrl_command *cmd)
@@ -562,15 +637,42 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
 
     if (ss.resource_id && ss.r.width && ss.r.height) {
         struct virgl_renderer_resource_info info;
-        void *d3d_tex2d = NULL;
+        ScanoutTextureNative native = NO_NATIVE_TEXTURE;
 
 #if VIRGL_VERSION_MAJOR >= 1
         struct virgl_renderer_resource_info_ext ext;
         memset(&ext, 0, sizeof(ext));
         ret = virgl_renderer_resource_get_info_ext(ss.resource_id, &ext);
         info = ext.base;
-        d3d_tex2d = ext.d3d_tex2d;
-#else
+        /* fallback to older version */
+        native = (ScanoutTextureNative){
+            .type = ext.d3d_tex2d ? SCANOUT_TEXTURE_NATIVE_TYPE_D3D :
+                                    SCANOUT_TEXTURE_NATIVE_TYPE_NONE,
+            .handle = ext.d3d_tex2d,
+        };
+#if VIRGL_RENDERER_RESOURCE_INFO_EXT_VERSION >= NATIVE_HANDLE_SUPPORT_VERSION
+        if (ext.version >= VIRGL_RENDERER_RESOURCE_INFO_EXT_VERSION) {
+            switch (ext.native_type) {
+#ifdef CONFIG_METAL
+            case VIRGL_NATIVE_HANDLE_METAL_TEXTURE: {
+                native.type = SCANOUT_TEXTURE_NATIVE_TYPE_METAL;
+                native.handle = ext.native_handle;
+                break;
+            }
+#endif
+            case VIRGL_NATIVE_HANDLE_NONE:
+            case VIRGL_NATIVE_HANDLE_D3D_TEX2D: {
+                /* already handled above */
+                break;
+            }
+            default: {
+                /* ignore unsupported hint texture type */
+                break;
+            }
+            }
+        }
+#endif
+#else /* VIRGL_VERSION_MAJOR < 1 */
         memset(&info, 0, sizeof(info));
         ret = virgl_renderer_resource_get_info(ss.resource_id, &info);
 #endif
@@ -589,7 +691,7 @@ static void virgl_cmd_set_scanout(VirtIOGPU *g,
             info.flags & VIRTIO_GPU_RESOURCE_FLAG_Y_0_TOP,
             info.width, info.height,
             ss.r.x, ss.r.y, ss.r.width, ss.r.height,
-            d3d_tex2d);
+            native, NULL);
     } else {
         dpy_gfx_replace_surface(
             g->parent_obj.scanout[ss.scanout_id].con, NULL);
@@ -963,6 +1065,59 @@ static void virgl_cmd_resource_unmap_blob(VirtIOGPU *g,
     }
 }
 
+#if defined(HAVE_VIRGL_RENDERER_NATIVE_SCANOUT)
+static void virgl_scanout_native_blob_cleanup(ScanoutTextureNative *native)
+{
+    assert(native->type == SCANOUT_TEXTURE_NATIVE_TYPE_METAL);
+    virgl_renderer_release_handle_for_scanout(VIRGL_NATIVE_HANDLE_METAL_TEXTURE,
+                                              native->handle);
+}
+
+static bool virgl_scanout_native_blob(VirtIOGPU *g,
+                                      struct virtio_gpu_set_scanout_blob *ss)
+{
+    struct virtio_gpu_scanout *scanout = &g->parent_obj.scanout[ss->scanout_id];
+    enum virgl_renderer_native_handle_type type;
+    virgl_renderer_native_handle handle;
+    ScanoutTextureNative native;
+
+    type = virgl_renderer_create_handle_for_scanout(ss->resource_id,
+                                                    ss->width,
+                                                    ss->height,
+                                                    ss->format,
+                                                    ss->padding,
+                                                    ss->strides[0],
+                                                    ss->offsets[0],
+                                                    &handle);
+#ifdef CONFIG_METAL
+    if (type == VIRGL_NATIVE_HANDLE_METAL_TEXTURE) {
+        native = (ScanoutTextureNative){
+            .type = SCANOUT_TEXTURE_NATIVE_TYPE_METAL,
+            .handle = handle,
+        };
+        qemu_console_resize(scanout->con,
+                            ss->r.width, ss->r.height);
+        dpy_gl_scanout_texture(
+            scanout->con, 0,
+            false,
+            ss->width, ss->height,
+            ss->r.x, ss->r.y, ss->r.width, ss->r.height,
+            native, virgl_scanout_native_blob_cleanup);
+        scanout->resource_id = ss->resource_id;
+
+        return true;
+    }
+#endif
+
+    /* don't leak memory if handle type is unknown */
+    if (type != VIRGL_NATIVE_HANDLE_NONE) {
+        virgl_renderer_release_handle_for_scanout(type, handle);
+    }
+
+    return false;
+}
+#endif
+
 static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
                                        struct virtio_gpu_ctrl_command *cmd)
 {
@@ -988,8 +1143,14 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
         return;
     }
 
+    /* The scanout rect sizes the displaysurface (virtio_gpu_update_dmabuf
+     * resizes the console to r.width x r.height, and a zero-area surface
+     * aborts in qemu_memfd_alloc), so bound the rect exactly like
+     * virtio_gpu_do_set_scanout does for non-blob scanouts. */
     if (ss.width < 16 ||
         ss.height < 16 ||
+        ss.r.width < 16 ||
+        ss.r.height < 16 ||
         ss.r.x + ss.r.width > ss.width ||
         ss.r.y + ss.r.height > ss.height) {
         qemu_log_mask(LOG_GUEST_ERROR, "%s: illegal scanout %d bounds for"
@@ -1000,6 +1161,12 @@ static void virgl_cmd_set_scanout_blob(VirtIOGPU *g,
         cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
         return;
     }
+
+#if defined(HAVE_VIRGL_RENDERER_NATIVE_SCANOUT)
+    if (virgl_scanout_native_blob(g, &ss)) {
+        return;
+    }
+#endif
 
     res = virtio_gpu_virgl_find_resource(g, ss.resource_id);
     if (!res) {
@@ -1120,6 +1287,8 @@ void virtio_gpu_virgl_process_cmd(VirtIOGPU *g,
         break;
     }
 
+    cmd->suspended = cmd_suspended;
+
     if (cmd_suspended || cmd->finished) {
         return;
     }
@@ -1137,6 +1306,7 @@ void virtio_gpu_virgl_process_cmd(VirtIOGPU *g,
     trace_virtio_gpu_fence_ctrl(cmd->cmd_hdr.fence_id, cmd->cmd_hdr.type);
 #if VIRGL_VERSION_MAJOR >= 1
     if (cmd->cmd_hdr.flags & VIRTIO_GPU_FLAG_INFO_RING_IDX) {
+<<<<<<< qemu-11.0.3-brain
         const uint32_t flags = VIRGL_RENDERER_FENCE_FLAG_MERGEABLE;
 
         ret = virgl_renderer_context_create_fence(cmd->cmd_hdr.ctx_id, flags,
@@ -1147,6 +1317,34 @@ void virtio_gpu_virgl_process_cmd(VirtIOGPU *g,
                           "%s: virgl_renderer_context_create_fence error: %s",
                           __func__, strerror(-ret));
         }
+||||||| qemu-10.0.12
+        virgl_renderer_context_create_fence(cmd->cmd_hdr.ctx_id,
+                                            VIRGL_RENDERER_FENCE_FLAG_MERGEABLE,
+                                            cmd->cmd_hdr.ring_idx,
+                                            cmd->cmd_hdr.fence_id);
+=======
+        int ret = virgl_renderer_context_create_fence(cmd->cmd_hdr.ctx_id,
+                                            VIRGL_RENDERER_FENCE_FLAG_MERGEABLE,
+                                            cmd->cmd_hdr.ring_idx,
+                                            cmd->cmd_hdr.fence_id);
+        if (ret) {
+            /*
+             * The renderer context is gone (e.g. its render-server
+             * worker died mid-teardown): this fence can never retire
+             * through the timeline.  Complete it now — the cmd is not
+             * yet on fenceq, so responding here both signals the fence
+             * to the guest and keeps it off the queue.  Leaving it
+             * pending wedges the guest's GPU scheduler (VIDEO_TDR_
+             * FAILURE bugcheck on Windows).
+             */
+            fprintf(stderr,
+                    "%s: create_fence failed (%d) for dead ctx %u; "
+                    "retiring fence %" PRIu64 " immediately\n",
+                    __func__, ret, cmd->cmd_hdr.ctx_id,
+                    (uint64_t)cmd->cmd_hdr.fence_id);
+            virtio_gpu_ctrl_response_nodata(g, cmd, VIRTIO_GPU_RESP_OK_NODATA);
+        }
+>>>>>>> qemu-10.0.12-utm
         return;
     }
 #endif
@@ -1393,7 +1591,17 @@ static void virtio_gpu_fence_poll(void *opaque)
     virgl_renderer_poll();
     virtio_gpu_process_cmdq(g);
     if (!QTAILQ_EMPTY(&g->cmdq) || !QTAILQ_EMPTY(&g->fenceq)) {
-        timer_mod(gl->fence_poll, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 10);
+        /*
+         * On the render-server path virgl_renderer_poll() is the only place a
+         * retired renderer fence is discovered: virgl_renderer_get_poll_fd()
+         * is vrend-only and VIRGL_RENDERER_ASYNC_FENCE_CB is not enabled, so
+         * nothing wakes QEMU when a fence signals.  This period is therefore a
+         * hard floor under every guest operation that blocks on a fence, so
+         * keep it at the millisecond-timer granularity.  The timer only
+         * re-arms while cmdq/fenceq are non-empty, so it costs nothing at
+         * idle.
+         */
+        timer_mod(gl->fence_poll, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + 1);
     }
 }
 
@@ -1453,14 +1661,23 @@ static int virtio_gpu_virgl_init(VirtIOGPU *g)
 #endif
     }
 #endif
-#ifdef VIRGL_RENDERER_D3D11_SHARE_TEXTURE
-    if (qemu_egl_angle_d3d) {
+    if (qemu_egl_angle_native_device) {
+#if defined(VIRGL_RENDERER_NATIVE_SHARE_TEXTURE)
+        flags |= VIRGL_RENDERER_NATIVE_SHARE_TEXTURE;
+#elif defined(VIRGL_RENDERER_D3D11_SHARE_TEXTURE) && defined(WIN32)
         flags |= VIRGL_RENDERER_D3D11_SHARE_TEXTURE;
-    }
 #endif
+    }
 #if VIRGL_VERSION_MAJOR >= 1
     if (virtio_gpu_venus_enabled(g->parent_obj.conf)) {
-        flags |= VIRGL_RENDERER_VENUS | VIRGL_RENDERER_RENDER_SERVER;
+        flags |= VIRGL_RENDERER_VENUS;
+        flags |= VIRGL_RENDERER_RENDER_SERVER;
+    }
+#endif
+#ifdef VIRGL_RENDERER_NEPTUNE
+    if (virtio_gpu_neptune_enabled(g->parent_obj.conf)) {
+        flags |= VIRGL_RENDERER_NEPTUNE;
+        flags |= VIRGL_RENDERER_RENDER_SERVER;
     }
     if (virtio_gpu_drm_enabled(g->parent_obj.conf)) {
         flags |= VIRGL_RENDERER_DRM;
@@ -1573,6 +1790,7 @@ GArray *virtio_gpu_virgl_get_capsets(VirtIOGPU *g)
         }
     }
 
+<<<<<<< qemu-11.0.3-brain
     if (virtio_gpu_drm_enabled(g->parent_obj.conf)) {
         virgl_renderer_get_cap_set(VIRTIO_GPU_CAPSET_DRM,
                                    &capset_max_ver,
@@ -1582,5 +1800,19 @@ GArray *virtio_gpu_virgl_get_capsets(VirtIOGPU *g)
         }
     }
 
+||||||| qemu-10.0.12
+=======
+#ifdef VIRGL_RENDERER_NEPTUNE
+    if (virtio_gpu_neptune_enabled(g->parent_obj.conf)) {
+        virgl_renderer_get_cap_set(VIRTIO_GPU_CAPSET_NEPTUNE,
+                                   &capset_max_ver,
+                                   &capset_max_size);
+        if (capset_max_size) {
+            virtio_gpu_virgl_add_capset(capset_ids, VIRTIO_GPU_CAPSET_NEPTUNE);
+        }
+    }
+#endif
+
+>>>>>>> qemu-10.0.12-utm
     return capset_ids;
 }

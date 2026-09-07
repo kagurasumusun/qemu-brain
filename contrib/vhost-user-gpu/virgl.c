@@ -341,7 +341,7 @@ virgl_get_resource_info_modifiers(uint32_t resource_id,
     *info = info_ext.base;
     *modifiers = info_ext.modifiers;
 #else
-    ret = virgl_renderer_resource_get_info(resource_id, info);
+    ret = virgl_renderer_borrow_texture_for_scanout(resource_id, info);
     if (ret) {
         return ret;
     }

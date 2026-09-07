@@ -19,6 +19,8 @@
 #include "tpm-tests.h"
 #include "hw/acpi/tpm.h"
 
+uint64_t tpm_device_base_addr = TPM_CRB_ADDR_BASE;
+
 typedef struct TestState {
     char *src_tpm_path;
     char *dst_tpm_path;

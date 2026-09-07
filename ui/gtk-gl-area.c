@@ -126,6 +126,10 @@ void gd_gl_area_draw(VirtualConsole *vc)
 #ifdef CONFIG_GBM
         if (dmabuf) {
             int fence_fd;
+            /* a still-pending previous fence must be cancelled before
+             * egl_dmabuf_create_fence overwrites fence_fd, or its fd
+             * handler leaks (permanent main-loop spin) */
+            gd_dmabuf_cancel_fence(vc, dmabuf);
             egl_dmabuf_create_fence(dmabuf);
             fence_fd = qemu_dmabuf_get_fence_fd(dmabuf);
             if (fence_fd >= 0) {
@@ -291,7 +295,7 @@ void gd_gl_area_scanout_texture(DisplayChangeListener *dcl,
                                 uint32_t backing_height,
                                 uint32_t x, uint32_t y,
                                 uint32_t w, uint32_t h,
-                                void *d3d_tex2d)
+                                ScanoutTextureNative native)
 {
     VirtualConsole *vc = container_of(dcl, VirtualConsole, gfx.dcl);
 
@@ -358,7 +362,7 @@ void gd_gl_area_scanout_dmabuf(DisplayChangeListener *dcl,
 
     gd_gl_area_scanout_texture(dcl, texture, y0_top,
                                backing_width, backing_height,
-                               x, y, width, height, NULL);
+                               x, y, width, height, NO_NATIVE_TEXTURE);
 
     if (qemu_dmabuf_get_allow_fences(dmabuf)) {
         vc->gfx.guest_fb.dmabuf = dmabuf;

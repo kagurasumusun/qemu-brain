@@ -22,6 +22,7 @@ void hvf_arm_init_debug(void);
 
 void hvf_arm_set_cpu_features_from_host(ARMCPU *cpu);
 
+<<<<<<< qemu-11.0.3-brain
 /*
  * We need access to types from macOS SDK >=15.2, so expose stubs if the
  * headers are not available until we raise our minimum macOS version.
@@ -29,6 +30,31 @@ void hvf_arm_set_cpu_features_from_host(ARMCPU *cpu);
 #ifdef __MAC_OS_X_VERSION_MAX_ALLOWED
   #if (__MAC_OS_X_VERSION_MAX_ALLOWED >= 150200) && defined(__aarch64__)
     #include "system/hvf_int.h"
+||||||| qemu-10.0.12
+#ifdef CONFIG_HVF
+
+uint32_t hvf_arm_get_default_ipa_bit_size(void);
+uint32_t hvf_arm_get_max_ipa_bit_size(void);
+
+#else
+
+static inline uint32_t hvf_arm_get_default_ipa_bit_size(void)
+{
+    return 0;
+}
+=======
+#if defined(CONFIG_HVF)
+
+uint32_t hvf_arm_get_default_ipa_bit_size(void);
+uint32_t hvf_arm_get_max_ipa_bit_size(void);
+
+#else
+
+static inline uint32_t hvf_arm_get_default_ipa_bit_size(void)
+{
+    return 0;
+}
+>>>>>>> qemu-10.0.12-utm
 
     static inline bool hvf_arm_sme2_supported(void)
     {

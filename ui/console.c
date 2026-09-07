@@ -166,7 +166,32 @@ void qemu_console_co_wait_update(QemuConsole *con)
 
 static void graphic_hw_gl_unblock_timer(void *opaque)
 {
-    warn_report("console: no gl-unblock within one second");
+    QemuConsole *con = opaque;
+
+    /*
+     * The display's GL render did not release the block within the timeout
+     * (e.g. the gtk window is occluded, the host compositor throttled the
+     * frame callback, or the host GPU stalled). The device's command queue is
+     * gated on this block (virtio-gpu: renderer_blocked), so a stuck display
+     * stalls the guest GPU scheduler into a TDR (dxgmms1 0x7E) ~2 s later.
+     * Force the unblock so guest command/fence processing resumes well before
+     * the guest's TdrDelay; the worst case is one stale/torn displayed frame,
+     * never a guest crash. A late real release is absorbed in
+     * graphic_hw_gl_block() (con->gl_block already 0 -> no-op).
+     */
+    /* Rate-limited: this can fire repeatedly when the display fence is
+     * persistently slow; an occasional line is enough to know it's active. */
+    static unsigned _ub;
+    if ((_ub++ % 60u) == 0u) {
+        warn_report("console: gl-unblock fallback firing (display GL fence slow); "
+                    "forcing unblock to keep the guest cmdq moving");
+    }
+    if (con->gl_block > 0) {
+        con->gl_block = 0;
+        if (con->hw_ops->gl_block) {
+            con->hw_ops->gl_block(con->hw, false);
+        }
+    }
 }
 
 void graphic_hw_gl_block(QemuConsole *con, bool block)
@@ -177,6 +202,13 @@ void graphic_hw_gl_block(QemuConsole *con, bool block)
     if (block) {
         con->gl_block++;
     } else {
+        /*
+         * A late release after graphic_hw_gl_unblock_timer() force-cleared the
+         * block (con->gl_block already 0) must be a safe no-op, not underflow.
+         */
+        if (con->gl_block == 0) {
+            return;
+        }
         con->gl_block--;
     }
     assert(con->gl_block >= 0);
@@ -190,7 +222,16 @@ void graphic_hw_gl_block(QemuConsole *con, bool block)
 
     if (block) {
         timeout = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
-        timeout += 1000; /* one sec */
+        /* Safety net only.  The display samples (blits + fences) the guest
+         * buffer directly at flush time, so the block lifetime is the GPU
+         * fence latency -- not the host compositor's frame clock -- and
+         * releasing the guest early TEARS: it re-renders into the buffer
+         * while the queued blit still reads it (scaled/shifted frame
+         * artifacts under present storms).  500ms is correct backpressure
+         * for a slow (shared, possibly saturated) GPU while still
+         * recovering a genuinely stuck fence well inside the guest's ~2s
+         * TDR budget. */
+        timeout += 500;
         timer_mod(con->gl_unblock_timer, timeout);
     } else {
         timer_del(con->gl_unblock_timer);
@@ -295,7 +336,7 @@ static void displaychangelistener_display_console(DisplayChangeListener *dcl,
                                          con->scanout.texture.y,
                                          con->scanout.texture.width,
                                          con->scanout.texture.height,
-                                         con->scanout.texture.d3d_tex2d);
+                                         con->scanout.texture.native);
     }
 }
 
@@ -808,6 +849,41 @@ void dpy_gfx_update_full(QemuConsole *con)
     dpy_gfx_update(con, 0, 0, w, h);
 }
 
+typedef struct ScanoutChange {
+    ScanoutTextureNative native;
+    ScanoutTextureCleanup cb_cleanup;
+} ScanoutChange;
+
+#define SCANOUT_CHANGE_NONE ((ScanoutChange){ NO_NATIVE_TEXTURE })
+
+static ScanoutChange dpy_change_scanout_kind(DisplayScanout *scanout,
+                                                     enum display_scanout kind)
+{
+    ScanoutChange change = SCANOUT_CHANGE_NONE;
+
+    /**
+     * We cannot cleanup until the resource is no longer in use, so we record it
+     * You MUST call dpy_complete_scanout_change after all listeners are updated
+     */
+    if (scanout->kind == SCANOUT_TEXTURE && scanout->texture.cb_cleanup) {
+        change.native = scanout->texture.native;
+        change.cb_cleanup = scanout->texture.cb_cleanup;
+    }
+    scanout->kind = kind;
+
+    return change;
+}
+
+static void dpy_complete_scanout_change(ScanoutChange *change)
+{
+    /**
+     * If we previously have a texture and cleanup is required, we call it now
+     */
+    if (change->native.type != SCANOUT_TEXTURE_NATIVE_TYPE_NONE && change->cb_cleanup) {
+        change->cb_cleanup(&change->native);
+    }
+}
+
 void dpy_gfx_replace_surface(QemuConsole *con,
                              DisplaySurface *surface)
 {
@@ -818,6 +894,7 @@ void dpy_gfx_replace_surface(QemuConsole *con,
     DisplayChangeListener *dcl;
     int width;
     int height;
+    ScanoutChange change = SCANOUT_CHANGE_NONE;
 
     if (!surface) {
         if (old_surface) {
@@ -833,7 +910,7 @@ void dpy_gfx_replace_surface(QemuConsole *con,
 
     assert(old_surface != new_surface);
 
-    con->scanout.kind = SCANOUT_SURFACE;
+    change = dpy_change_scanout_kind(&con->scanout, SCANOUT_SURFACE);
     con->surface = new_surface;
     dpy_gfx_create_texture(con, new_surface);
     QLIST_FOREACH(dcl, &s->listeners, next) {
@@ -844,6 +921,7 @@ void dpy_gfx_replace_surface(QemuConsole *con,
     }
     dpy_gfx_destroy_texture(con, old_surface);
     qemu_free_displaysurface(old_surface);
+    dpy_complete_scanout_change(&change);
 }
 
 bool dpy_gfx_check_format(QemuConsole *con,
@@ -1002,9 +1080,10 @@ void dpy_gl_scanout_disable(QemuConsole *con)
 {
     DisplayState *s = con->ds;
     DisplayChangeListener *dcl;
+    ScanoutChange change = SCANOUT_CHANGE_NONE;
 
     if (con->scanout.kind != SCANOUT_SURFACE) {
-        con->scanout.kind = SCANOUT_NONE;
+        change = dpy_change_scanout_kind(&con->scanout, SCANOUT_NONE);
     }
     QLIST_FOREACH(dcl, &s->listeners, next) {
         if (con != dcl->con) {
@@ -1014,6 +1093,7 @@ void dpy_gl_scanout_disable(QemuConsole *con)
             dcl->ops->dpy_gl_scanout_disable(dcl);
         }
     }
+    dpy_complete_scanout_change(&change);
 }
 
 void dpy_gl_scanout_texture(QemuConsole *con,
@@ -1023,15 +1103,17 @@ void dpy_gl_scanout_texture(QemuConsole *con,
                             uint32_t backing_height,
                             uint32_t x, uint32_t y,
                             uint32_t width, uint32_t height,
-                            void *d3d_tex2d)
+                            ScanoutTextureNative native,
+                            ScanoutTextureCleanup cb_cleanup)
 {
     DisplayState *s = con->ds;
     DisplayChangeListener *dcl;
+    ScanoutChange change = SCANOUT_CHANGE_NONE;
 
-    con->scanout.kind = SCANOUT_TEXTURE;
+    change = dpy_change_scanout_kind(&con->scanout, SCANOUT_TEXTURE);
     con->scanout.texture = (ScanoutTexture) {
         backing_id, backing_y_0_top, backing_width, backing_height,
-        x, y, width, height, d3d_tex2d,
+        x, y, width, height, native, cb_cleanup
     };
     QLIST_FOREACH(dcl, &s->listeners, next) {
         if (con != dcl->con) {
@@ -1042,9 +1124,10 @@ void dpy_gl_scanout_texture(QemuConsole *con,
                                              backing_y_0_top,
                                              backing_width, backing_height,
                                              x, y, width, height,
-                                             d3d_tex2d);
+                                             native);
         }
     }
+    dpy_complete_scanout_change(&change);
 }
 
 void dpy_gl_scanout_dmabuf(QemuConsole *con,
@@ -1052,8 +1135,9 @@ void dpy_gl_scanout_dmabuf(QemuConsole *con,
 {
     DisplayState *s = con->ds;
     DisplayChangeListener *dcl;
+    ScanoutChange change = SCANOUT_CHANGE_NONE;
 
-    con->scanout.kind = SCANOUT_DMABUF;
+    change = dpy_change_scanout_kind(&con->scanout, SCANOUT_DMABUF);
     con->scanout.dmabuf = dmabuf;
     QLIST_FOREACH(dcl, &s->listeners, next) {
         if (con != dcl->con) {
@@ -1063,6 +1147,7 @@ void dpy_gl_scanout_dmabuf(QemuConsole *con,
             dcl->ops->dpy_gl_scanout_dmabuf(dcl, dmabuf);
         }
     }
+    dpy_complete_scanout_change(&change);
 }
 
 void dpy_gl_cursor_dmabuf(QemuConsole *con, QemuDmaBuf *dmabuf,
@@ -1487,12 +1572,7 @@ void qemu_console_resize(QemuConsole *s, int width, int height)
 
 DisplaySurface *qemu_console_surface(QemuConsole *console)
 {
-    switch (console->scanout.kind) {
-    case SCANOUT_SURFACE:
-        return console->surface;
-    default:
-        return NULL;
-    }
+    return console->surface;
 }
 
 PixelFormat qemu_default_pixelformat(int bpp)

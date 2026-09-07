@@ -12,6 +12,9 @@
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
 #include "qemu/log.h"
+#include <dlfcn.h>
+#include <AvailabilityMacros.h>
+#include <TargetConditionals.h>
 
 #include "system/runstate.h"
 #include "system/hvf.h"
@@ -22,6 +25,7 @@
 #include "cpu-sysregs.h"
 
 #include <mach/mach_time.h>
+#include <sys/sysctl.h>
 
 #include "system/address-spaces.h"
 #include "system/memory.h"
@@ -45,6 +49,7 @@
 
 #define MDSCR_EL1_SS_SHIFT  0
 #define MDSCR_EL1_MDE_SHIFT 15
+#define HV_VM_DEFAULT NULL
 
 static const uint16_t dbgbcr_regs[] = {
     HV_SYS_REG_DBGBCR0_EL1,
@@ -122,6 +127,8 @@ static const uint16_t dbgwvr_regs[] = {
     HV_SYS_REG_DBGWVR15_EL1,
 };
 
+#if !defined(CONFIG_HVF_PRIVATE)
+
 static inline int hvf_arm_num_brps(hv_vcpu_config_t config)
 {
     uint64_t val;
@@ -155,8 +162,18 @@ void hvf_arm_init_debug(void)
     hw_watchpoints =
         g_array_sized_new(true, true, sizeof(HWWatchpoint), max_hw_wps);
 
+<<<<<<< qemu-11.0.3-brain
     os_release(config);
 }
+||||||| qemu-10.0.12
+#define HVF_SYSREG(crn, crm, op0, op1, op2) \
+        ENCODE_AA64_CP_REG(CP_REG_ARM64_SYSREG_CP, crn, crm, op0, op1, op2)
+=======
+#endif
+
+#define HVF_SYSREG(crn, crm, op0, op1, op2) \
+        ENCODE_AA64_CP_REG(CP_REG_ARM64_SYSREG_CP, crn, crm, op0, op1, op2)
+>>>>>>> qemu-10.0.12-utm
 
 #define SYSREG_OP0_SHIFT      20
 #define SYSREG_OP0_MASK       0x3
@@ -304,7 +321,15 @@ void hvf_arm_init_debug(void)
 #define TMR_CTL_IMASK   (1 << 1)
 #define TMR_CTL_ISTATUS (1 << 2)
 
+<<<<<<< qemu-11.0.3-brain
 static void hvf_wfi_timer_cb(void *opaque);
+||||||| qemu-10.0.12
+static void hvf_wfi(CPUState *cpu);
+=======
+static const bool windows_workaround_enabled = true;
+
+static void hvf_wfi(CPUState *cpu);
+>>>>>>> qemu-10.0.12-utm
 
 static uint32_t chosen_ipa_bit_size;
 
@@ -1063,7 +1088,15 @@ static uint64_t hvf_get_reg(CPUState *cpu, int rt)
     return val;
 }
 
+<<<<<<< qemu-11.0.3-brain
 static void clamp_id_aa64mmfr0_parange_to_ipa_size(ARMISARegisters *isar)
+||||||| qemu-10.0.12
+static void clamp_id_aa64mmfr0_parange_to_ipa_size(uint64_t *id_aa64mmfr0)
+=======
+#if !defined(CONFIG_HVF_PRIVATE)
+
+static void clamp_id_aa64mmfr0_parange_to_ipa_size(uint64_t *id_aa64mmfr0)
+>>>>>>> qemu-10.0.12-utm
 {
     uint32_t ipa_size = chosen_ipa_bit_size ?
             chosen_ipa_bit_size : hvf_arch_get_max_ipa_bit_size();
@@ -1075,6 +1108,8 @@ static void clamp_id_aa64mmfr0_parange_to_ipa_size(ARMISARegisters *isar)
     id_aa64mmfr0 = (id_aa64mmfr0 & ~R_ID_AA64MMFR0_PARANGE_MASK) | index;
     SET_IDREG(isar, ID_AA64MMFR0, id_aa64mmfr0);
 }
+
+#endif
 
 static bool hvf_arm_get_host_cpu_features(ARMHostCPUFeatures *ahcf)
 {
@@ -1130,7 +1165,17 @@ static bool hvf_arm_get_host_cpu_features(ARMHostCPUFeatures *ahcf)
         }
     }
 
+<<<<<<< qemu-11.0.3-brain
     os_release(config);
+||||||| qemu-10.0.12
+    clamp_id_aa64mmfr0_parange_to_ipa_size(&host_isar.id_aa64mmfr0);
+=======
+#if !defined(CONFIG_HVF_PRIVATE)
+    if (__builtin_available(macOS 13.0, *)) {
+        clamp_id_aa64mmfr0_parange_to_ipa_size(&host_isar.id_aa64mmfr0);
+    }
+#endif
+>>>>>>> qemu-10.0.12-utm
 
     /*
      * Hardcode MIDR because Apple deliberately doesn't expose a divergent
@@ -1169,26 +1214,82 @@ static bool hvf_arm_get_host_cpu_features(ARMHostCPUFeatures *ahcf)
     return r == HV_SUCCESS;
 }
 
+<<<<<<< qemu-11.0.3-brain
 uint32_t hvf_arch_get_default_ipa_bit_size(void)
+||||||| qemu-10.0.12
+uint32_t hvf_arm_get_default_ipa_bit_size(void)
+=======
+static hv_return_t hvf_vcpu_get_actlr(hv_vcpu_t vcpu, uint64_t* value)
 {
-    uint32_t default_ipa_size;
-    hv_return_t ret = hv_vm_config_get_default_ipa_size(&default_ipa_size);
-    assert_hvf_ok(ret);
+#if defined(CONFIG_HVF_PRIVATE)
+    return _hv_vcpu_get_actlr(vcpu, value);
+#else
+    if (__builtin_available(macOS 15, *)) {
+        return hv_vcpu_get_sys_reg(vcpu, HV_SYS_REG_ACTLR_EL1, value);
+    } else {
+        return HV_UNSUPPORTED;
+    }
+#endif
+}
 
-    return default_ipa_size;
+static hv_return_t hvf_vcpu_set_actlr(hv_vcpu_t vcpu, uint64_t value)
+{
+#if defined(CONFIG_HVF_PRIVATE)
+    return _hv_vcpu_set_actlr(vcpu, value);
+#else
+    if (__builtin_available(macOS 15, *)) {
+        return hv_vcpu_set_sys_reg(vcpu, HV_SYS_REG_ACTLR_EL1, value);
+    } else {
+        return HV_UNSUPPORTED;
+    }
+#endif
+}
+
+uint32_t hvf_arm_get_default_ipa_bit_size(void)
+>>>>>>> qemu-10.0.12-utm
+{
+#if TARGET_OS_OSX
+    if (__builtin_available(macOS 13.0, *)) {
+        uint32_t default_ipa_size;
+        hv_return_t ret = hv_vm_config_get_default_ipa_size(&default_ipa_size);
+        assert_hvf_ok(ret);
+
+        return default_ipa_size;
+    }
+#endif
+    return 0;
 }
 
 uint32_t hvf_arch_get_max_ipa_bit_size(void)
 {
-    uint32_t max_ipa_size;
-    hv_return_t ret = hv_vm_config_get_max_ipa_size(&max_ipa_size);
-    assert_hvf_ok(ret);
+    uint64_t ipa_size_4k, ipa_size_16k;
+    size_t length;
+    uint32_t max_ipa_size = 0;
+
+#if TARGET_OS_OSX
+    if (__builtin_available(macOS 13.0, *)) {
+        hv_return_t ret = hv_vm_config_get_max_ipa_size(&max_ipa_size);
+        assert_hvf_ok(ret);
+    }
+#endif
+
+    if (!max_ipa_size) {
+        length = sizeof(uint64_t);
+        if (sysctlbyname("kern.hv.ipa_size_16k", &ipa_size_16k, &length, NULL, 0)) {
+            ipa_size_16k = 0;
+        }
+        length = sizeof(uint64_t);
+        if (sysctlbyname("kern.hv.ipa_size_4k", &ipa_size_4k, &length, NULL, 0)) {
+            ipa_size_4k = 0;
+        }
+        max_ipa_size = MIN(ctz64(ipa_size_16k), ctz64(ipa_size_4k));
+    }
 
     /*
      * We clamp any IPA size we want to back the VM with to a valid PARange
-     * value so the guest doesn't try and map memory outside of the valid range.
-     * This logic just clamps the passed in IPA bit size to the first valid
-     * PARange value <= to it.
+     * value so the guest doesn't try and map memory outside of the valid
+     * range. This logic just clamps the passed in IPA bit size to the first
+     * valid PARange value <= to it.
      */
     return round_down_to_parange_bit_size(max_ipa_size);
 }
@@ -1228,16 +1329,98 @@ void hvf_arch_vcpu_destroy(CPUState *cpu)
     assert_hvf_ok(ret);
 }
 
-hv_return_t hvf_arch_vm_create(MachineState *ms, uint32_t pa_range)
+static hv_return_t hvf_set_ipa_granule(hv_vm_config_t config,
+                                uint32_t ipa_granule_size)
+{
+    static hv_return_t (*set_ipa_granule)(hv_vm_config_t, uint32_t);
+    uint64_t page_size = qemu_real_host_page_size();
+
+    /* macOS 26 introduces a public API for setting granule size */
+#if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && defined(__MAC_26_0) && \
+    __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_26_0
+    if (__builtin_available(macOS 26, *)) {
+        hv_ipa_granule_t granule = HV_IPA_GRANULE_16KB;
+
+        if (ipa_granule_size == 4096) {
+            granule = HV_IPA_GRANULE_4KB;
+        } else if (ipa_granule_size != 16384) {
+            error_report("Unsupported granule size: 0x%x", ipa_granule_size);
+            return HV_UNSUPPORTED;
+        }
+
+        return hv_vm_config_set_ipa_granule(config, granule);
+    }
+#endif
+
+    /* older macOS need to use a private API */
+    if (!set_ipa_granule) {
+        set_ipa_granule = dlsym(RTLD_NEXT, "_hv_vm_config_set_ipa_granule");
+    }
+    if (set_ipa_granule) {
+        return set_ipa_granule(config, ipa_granule_size);
+    } else if (ipa_granule_size != page_size) {
+        error_report("Failed to find _hv_vm_config_set_ipa_granule");
+        return HV_UNSUPPORTED;
+    }
+
+    return HV_SUCCESS;
+}
+
+static hv_return_t hvf_set_ipa_size(hv_vm_config_t config, uint32_t pa_range)
+{
+    static hv_return_t (*set_ipa_size)(hv_vm_config_t, uint64_t);
+    hv_return_t ret;
+
+#if TARGET_OS_OSX
+    if (__builtin_available(macOS 13.0, *)) {
+        ret = hv_vm_config_set_ipa_size(config, pa_range);
+        if (ret == HV_SUCCESS) {
+            chosen_ipa_bit_size = pa_range;
+        }
+        return ret;
+    }
+#endif
+
+    /* older macOS need to use a private API */
+    if (!set_ipa_size) {
+        set_ipa_size = dlsym(RTLD_NEXT, "_hv_vm_config_set_ipa_size");
+    }
+    if (set_ipa_size) {
+        ret = set_ipa_size(config, 1ULL << pa_range);
+        if (ret == HV_SUCCESS) {
+            chosen_ipa_bit_size = pa_range;
+        }
+        return ret;
+    } else if (!pa_range) {
+        return HV_SUCCESS;
+    }
+
+    return HV_UNSUPPORTED;
+}
+
+hv_return_t hvf_arch_vm_create(MachineState *ms, uint32_t pa_range,
+                               uint32_t ipa_granule_size)
 {
     hv_return_t ret;
     hv_vm_config_t config = hv_vm_config_create();
 
-    ret = hv_vm_config_set_ipa_size(config, pa_range);
+#if defined(CONFIG_HVF_PRIVATE)
+    if (hvf_tso_mode) {
+        _hv_vm_config_set_isa(config, HV_VM_CONFIG_ISA_PRIVATE);
+    }
+#endif
+    
+    ret = hvf_set_ipa_size(config, pa_range);
     if (ret != HV_SUCCESS) {
         goto cleanup;
     }
-    chosen_ipa_bit_size = pa_range;
+
+    if (ipa_granule_size) {
+        ret = hvf_set_ipa_granule(config, ipa_granule_size);
+        if (ret != HV_SUCCESS) {
+            goto cleanup;
+        }
+    }
 
     ret = hv_vm_create(config);
 
@@ -1350,10 +1533,36 @@ int hvf_arch_init_vcpu(CPUState *cpu)
                               &arm_cpu->isar.idregs[ID_AA64MMFR0_EL1_IDX]);
     assert_hvf_ok(ret);
 
+<<<<<<< qemu-11.0.3-brain
     clamp_id_aa64mmfr0_parange_to_ipa_size(&arm_cpu->isar);
     ret = hv_vcpu_set_sys_reg(cpu->accel->fd, HV_SYS_REG_ID_AA64MMFR0_EL1,
                               arm_cpu->isar.idregs[ID_AA64MMFR0_EL1_IDX]);
     assert_hvf_ok(ret);
+||||||| qemu-10.0.12
+    clamp_id_aa64mmfr0_parange_to_ipa_size(&arm_cpu->isar.id_aa64mmfr0);
+    ret = hv_vcpu_set_sys_reg(cpu->accel->fd, HV_SYS_REG_ID_AA64MMFR0_EL1,
+                              arm_cpu->isar.id_aa64mmfr0);
+    assert_hvf_ok(ret);
+=======
+#if !defined(CONFIG_HVF_PRIVATE)
+    if (__builtin_available(macOS 13.0, *)) {
+        clamp_id_aa64mmfr0_parange_to_ipa_size(&arm_cpu->isar.id_aa64mmfr0);
+        ret = hv_vcpu_set_sys_reg(cpu->accel->fd, HV_SYS_REG_ID_AA64MMFR0_EL1,
+                                arm_cpu->isar.id_aa64mmfr0);
+        assert_hvf_ok(ret);
+    }
+#endif
+
+    /* enable TSO mode */
+    if (hvf_tso_mode) {
+        uint64_t actlr;
+        ret = hvf_vcpu_get_actlr(cpu->accel->fd, &actlr);
+        assert_hvf_ok(ret);
+        actlr |= ACTLR_EL1_TSO_ENABLE_MASK;
+        ret = hvf_vcpu_set_actlr(cpu->accel->fd, actlr);
+        assert_hvf_ok(ret);
+    }
+>>>>>>> qemu-10.0.12-utm
 
     if (!hvf_irqchip_in_kernel()) {
         cpu->accel->wfi_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL,
@@ -2334,8 +2543,15 @@ static int hvf_handle_exception(CPUState *cpu, hv_vcpu_exit_exception_t *excp)
         break;
     case EC_AA64_SMC:
         cpu_synchronize_state(cpu);
+<<<<<<< qemu-11.0.3-brain
         if (arm_cpu->psci_conduit == QEMU_PSCI_CONDUIT_SMC) {
             /* Secure Monitor Call exception, we need to advance $pc */
+||||||| qemu-10.0.12
+        if (arm_cpu->psci_conduit == QEMU_PSCI_CONDUIT_SMC) {
+=======
+        if (windows_workaround_enabled ||
+            arm_cpu->psci_conduit == QEMU_PSCI_CONDUIT_SMC) {
+>>>>>>> qemu-10.0.12-utm
             advance_pc = true;
 
             if (!hvf_handle_psci_call(cpu, &ret)) {
@@ -2526,10 +2742,14 @@ int hvf_arch_init(void)
     vmstate_register(NULL, 0, &vmstate_hvf_vtimer, &vtimer);
     qemu_add_vm_change_state_handler(hvf_vm_state_change, &vtimer);
 
+#if !defined(CONFIG_HVF_PRIVATE)
     hvf_arm_init_debug();
+#endif
 
     return 0;
 }
+
+#if !defined(CONFIG_HVF_PRIVATE)
 
 static const uint32_t brk_insn = 0xd4200000;
 
@@ -2733,3 +2953,40 @@ bool hvf_arch_supports_guest_debug(void)
 {
     return true;
 }
+
+#else
+
+int hvf_arch_insert_sw_breakpoint(CPUState *cpu, struct hvf_sw_breakpoint *bp)
+{
+    return -ENOSYS;
+}
+
+int hvf_arch_remove_sw_breakpoint(CPUState *cpu, struct hvf_sw_breakpoint *bp)
+{
+    return -ENOSYS;
+}
+
+int hvf_arch_insert_hw_breakpoint(vaddr addr, vaddr len, int type)
+{
+    return -ENOSYS;
+}
+
+int hvf_arch_remove_hw_breakpoint(vaddr addr, vaddr len, int type)
+{
+    return -ENOSYS;
+}
+
+void hvf_arch_remove_all_hw_breakpoints(void)
+{
+}
+
+void hvf_arch_update_guest_debug(CPUState *cpu)
+{
+}
+
+bool hvf_arch_supports_guest_debug(void)
+{
+    return false;
+}
+
+#endif

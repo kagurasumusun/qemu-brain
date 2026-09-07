@@ -53,9 +53,20 @@ genh = []
 qapi_trace_events = []
 
 bsd_oses = ['gnu/kfreebsd', 'freebsd', 'netbsd', 'openbsd', 'dragonfly', 'darwin']
+<<<<<<< qemu-11.0.3-brain
 supported_oses = ['windows', 'freebsd', 'netbsd', 'openbsd', 'darwin', 'sunos', 'linux', 'emscripten']
 supported_cpus = ['ppc64', 's390x', 'riscv64', 'x86_64',
   'aarch64', 'loongarch64', 'mips64', 'sparc64', 'wasm64']
+||||||| qemu-10.0.12
+supported_oses = ['windows', 'freebsd', 'netbsd', 'openbsd', 'darwin', 'sunos', 'linux']
+supported_cpus = ['ppc', 'ppc64', 's390x', 'riscv32', 'riscv64', 'x86', 'x86_64',
+  'arm', 'aarch64', 'loongarch64', 'mips', 'mips64', 'sparc64']
+=======
+supported_oses = ['windows', 'freebsd', 'netbsd', 'openbsd', 'darwin', 'sunos', 'linux']
+supported_cpus = ['ppc', 'ppc64', 's390x', 'riscv32', 'riscv64', 'x86', 'x86_64',
+  'arm', 'aarch64', 'loongarch64', 'mips', 'mips64', 'sparc64']
+tcti_supported_cpus = ['aarch64']
+>>>>>>> qemu-10.0.12-utm
 
 cpu = host_machine.cpu_family()
 
@@ -500,6 +511,12 @@ ucontext_probe = '''
 # For POSIX prefer ucontext, but it's not always possible. The fallback
 # is sigcontext.
 supported_backends = []
+
+ucontext = dependency('libucontext', required : false)
+if ucontext.found() or get_option('ucontext').enabled()
+  supported_backends += ['libucontext']
+endif
+
 if host_os == 'windows'
   supported_backends += ['windows']
 elif host_os == 'emscripten'
@@ -516,6 +533,10 @@ if coroutine_backend == 'auto'
 elif coroutine_backend not in supported_backends
   error('"@0@" backend requested but not available.  Available backends: @1@' \
         .format(coroutine_backend, ', '.join(supported_backends)))
+endif
+
+if coroutine_backend == 'libucontext'
+  coroutine_backend = 'ucontext'
 endif
 
 # Compiles if SafeStack *not* enabled
@@ -820,7 +841,10 @@ socket = []
 version_res = []
 coref = []
 iokit = []
+iosurface = not_found
 pvg = not_found
+metal = not_found
+quartzcore = not_found
 emulator_link_args = []
 midl = not_found
 widl = not_found
@@ -845,9 +869,12 @@ if host_os == 'windows'
 elif host_os == 'darwin'
   coref = dependency('appleframeworks', modules: 'CoreFoundation')
   iokit = dependency('appleframeworks', modules: 'IOKit', required: false)
+  iosurface = dependency('appleframeworks', modules: 'IOSurface', required: false)
   host_dsosuf = '.dylib'
   pvg = dependency('appleframeworks', modules: ['ParavirtualizedGraphics', 'Metal'],
                    required: get_option('pvg'))
+  metal = dependency('appleframeworks', modules: 'Metal', required: false)
+  quartzcore = dependency('appleframeworks', modules: ['OpenGL', 'QuartzCore'], required: false)
 elif host_os == 'sunos'
   socket = [cc.find_library('socket'),
             cc.find_library('nsl'),
@@ -861,6 +888,13 @@ elif host_os == 'openbsd'
     # Disable OpenBSD W^X if available
     emulator_link_args = cc.get_supported_link_arguments('-Wl,-z,wxneeded')
   endif
+endif
+
+if not ucontext.found() and get_option('ucontext').enabled()
+  libucontext_proj = subproject('libucontext',
+                                default_options: ['default_library=static',
+                                                  'freestanding=true'])
+  ucontext = libucontext_proj.get_variable('libucontext_dep')
 endif
 
 ###############################################
@@ -934,6 +968,25 @@ if have_tcg
   endif
   if get_option('tcg_interpreter')
     tcg_arch = 'tci'
+<<<<<<< qemu-11.0.3-brain
+||||||| qemu-10.0.12
+  elif host_arch == 'x86_64'
+    tcg_arch = 'i386'
+  elif host_arch == 'ppc64'
+    tcg_arch = 'ppc'
+=======
+  elif get_option('tcg_threaded_interpreter')
+    if cpu not in tcti_supported_cpus
+      error('Unsupported CPU @0@ for TCTI, try --enable-tcg-interpreter'.format(cpu))
+    else
+      warning('TCTI is extremely experimental and incomplete! Things might break!')
+      tcg_arch = '@0@-tcti'.format(cpu)
+    endif
+  elif host_arch == 'x86_64'
+    tcg_arch = 'i386'
+  elif host_arch == 'ppc64'
+    tcg_arch = 'ppc'
+>>>>>>> qemu-10.0.12-utm
   endif
   add_project_arguments('-iquote', meson.current_source_dir() / 'tcg' / tcg_arch,
                         language: all_languages)
@@ -1213,7 +1266,7 @@ if get_option('attr').allowed()
 endif
 
 cocoa = dependency('appleframeworks',
-                   modules: ['Cocoa', 'CoreVideo', 'QuartzCore'],
+                   modules: ['Cocoa', 'CoreVideo', 'OpenGL', 'QuartzCore'],
                    required: get_option('cocoa'))
 
 vmnet = dependency('appleframeworks', modules: 'vmnet', required: get_option('vmnet'))
@@ -1797,14 +1850,13 @@ if not get_option('coreaudio').auto() or (host_os == 'darwin' and have_system)
                          required: get_option('coreaudio'))
 endif
 
+egl = not_found
 opengl = not_found
 if not get_option('opengl').auto() or have_system or have_vhost_user_gpu
-  epoxy = dependency('epoxy', method: 'pkg-config',
+  opengl = dependency('epoxy', method: 'pkg-config',
                       required: get_option('opengl'))
-  if cc.has_header('epoxy/egl.h', dependencies: epoxy)
-    opengl = epoxy
-  elif get_option('opengl').enabled()
-    error('epoxy/egl.h not found')
+  if cc.has_header('epoxy/egl.h', dependencies: opengl)
+    egl = opengl
   endif
 endif
 gbm = not_found
@@ -2437,6 +2489,10 @@ if get_option('kvm').allowed() and host_os == 'linux'
 endif
 config_host_data.set('CONFIG_KVM_TARGETS', kvm_targets_c)
 
+if get_option('hvf').allowed() and hvf.found()
+  config_host_data.set('CONFIG_HVF_PRIVATE', get_option('hvf_private'))
+endif
+
 if get_option('module_upgrades') and not enable_modules
   error('Cannot enable module-upgrades as modules are not enabled')
 endif
@@ -2501,6 +2557,7 @@ if numa.found()
                        cc.has_function('numa_has_preferred_many',
                                        dependencies: numa))
 endif
+config_host_data.set('CONFIG_EGL', egl.found())
 config_host_data.set('CONFIG_OPENGL', opengl.found())
 config_host_data.set('CONFIG_PLUGIN', get_option('plugins'))
 config_host_data.set('CONFIG_RBD', rbd.found())
@@ -2516,11 +2573,13 @@ endif
 config_host_data.set('CONFIG_PIXMAN', pixman.found())
 config_host_data.set('CONFIG_PASST', enable_passt)
 config_host_data.set('CONFIG_SLIRP', slirp.found())
+config_host_data.set('CONFIG_LIBUCONTEXT', ucontext.found())
 config_host_data.set('CONFIG_SNAPPY', snappy.found())
 config_host_data.set('CONFIG_SOLARIS', host_os == 'sunos')
 if have_tcg
   config_host_data.set('CONFIG_TCG', 1)
   config_host_data.set('CONFIG_TCG_INTERPRETER', tcg_arch == 'tci')
+  config_host_data.set('CONFIG_TCG_THREADED_INTERPRETER', tcg_arch.endswith('tcti'))
 endif
 config_host_data.set('CONFIG_TPM', have_tpm)
 config_host_data.set('CONFIG_TSAN', get_option('tsan'))
@@ -2542,9 +2601,22 @@ config_host_data.set('CONFIG_VNC', vnc.found())
 config_host_data.set('CONFIG_VNC_JPEG', jpeg.found())
 config_host_data.set('CONFIG_VNC_SASL', sasl.found())
 if virgl.found()
+  config_host_data.set('HAVE_VIRGL_RENDERER_NATIVE_SCANOUT',
+                        cc.has_function('virgl_renderer_create_handle_for_scanout',
+                                        args: '-DVIRGL_RENDERER_UNSTABLE_APIS',
+                                        prefix: '#include <virglrenderer.h>',
+                                        dependencies: virgl))
   config_host_data.set('VIRGL_VERSION_MAJOR', virgl.version().split('.')[0])
+<<<<<<< qemu-11.0.3-brain
   config_host_data.set('VIRGL_VERSION_MINOR', virgl.version().split('.')[1])
   config_host_data.set('VIRGL_VERSION_MICRO', virgl.version().split('.')[2])
+||||||| qemu-10.0.12
+=======
+  config_host_data.set('HAVE_VIRGL_RENDERER_NEPTUNE',
+                        cc.has_header_symbol('virglrenderer.h',
+                                            'VIRGL_RENDERER_NEPTUNE',
+                                            dependencies: virgl))
+>>>>>>> qemu-10.0.12-utm
 endif
 config_host_data.set('CONFIG_VIRTFS', have_virtfs)
 config_host_data.set('CONFIG_VTE', vte.found())
@@ -2576,6 +2648,7 @@ config_host_data.set('CONFIG_SPICE', spice.found())
 config_host_data.set('CONFIG_X11', x11.found())
 config_host_data.set('CONFIG_DBUS_DISPLAY', dbus_display)
 config_host_data.set('CONFIG_CFI', get_option('cfi'))
+config_host_data.set('CONFIG_IOSURFACE', iosurface.found())
 config_host_data.set('CONFIG_SELINUX', selinux.found())
 config_host_data.set('CONFIG_XEN_BACKEND', xen.found())
 config_host_data.set('CONFIG_LIBDW', libdw.found())
@@ -2588,10 +2661,12 @@ if xen.found()
     ('0' + xen_version[2]).substring(-2)
   config_host_data.set('CONFIG_XEN_CTRL_INTERFACE_VERSION', xen_ctrl_version)
 endif
+config_host_data.set('CONFIG_METAL', metal.found())
 config_host_data.set('QEMU_VERSION', '"@0@"'.format(meson.project_version()))
 config_host_data.set('QEMU_VERSION_MAJOR', meson.project_version().split('.')[0])
 config_host_data.set('QEMU_VERSION_MINOR', meson.project_version().split('.')[1])
 config_host_data.set('QEMU_VERSION_MICRO', meson.project_version().split('.')[2])
+config_host_data.set('CONFIG_SHARED_LIBRARY_BUILD', get_option('shared_lib'))
 
 config_host_data.set_quoted('CONFIG_HOST_DSOSUF', host_dsosuf)
 config_host_data.set('HAVE_HOST_BLOCK_DEVICE', have_host_block_device)
@@ -2664,7 +2739,7 @@ config_host_data.set('HAVE_COPY_FILE_RANGE', cc.has_function('copy_file_range'))
 config_host_data.set('HAVE_GETIFADDRS', cc.has_function('getifaddrs'))
 config_host_data.set('HAVE_GLIB_WITH_SLICE_ALLOCATOR', glib_has_gslice)
 config_host_data.set('HAVE_OPENPTY', cc.has_function('openpty', dependencies: util))
-config_host_data.set('HAVE_STRCHRNUL', cc.has_function('strchrnul', prefix: osdep_prefix))
+config_host_data.set('HAVE_STRCHRNUL', cc.has_function('strchrnul') and host_os != 'darwin')
 config_host_data.set('HAVE_SYSTEM_FUNCTION', cc.has_function('system', prefix: '#include <stdlib.h>'))
 if rbd.found()
   config_host_data.set('HAVE_RBD_NAMESPACE_EXISTS',
@@ -3800,7 +3875,21 @@ util_ss = util_ss.apply({})
 libqemuutil = static_library('qemuutil',
                              build_by_default: false,
                              sources: util_ss.sources() + stub_ss.sources() + genh,
+<<<<<<< qemu-11.0.3-brain
                              dependencies: [util_ss.dependencies(), libm, threads, glib, socket, malloc, rt, pixman, opengl])
+||||||| qemu-10.0.12
+                             dependencies: [util_ss.dependencies(), libm, threads, glib, socket, malloc])
+qemuutil_deps = [event_loop_base]
+if host_os != 'windows'
+  qemuutil_deps += [rt]
+endif
+=======
+                             dependencies: [util_ss.dependencies(), libm, threads, glib, socket, malloc, ucontext])
+qemuutil_deps = [event_loop_base]
+if host_os != 'windows'
+  qemuutil_deps += [rt]
+endif
+>>>>>>> qemu-10.0.12-utm
 qemuutil = declare_dependency(link_with: libqemuutil,
                               sources: genh + version_res,
                               dependencies: [event_loop_base])
@@ -4400,20 +4489,45 @@ foreach target : target_dirs
     lib_deps += dep.partial_dependency(compile_args: true, includes: true)
   endforeach
 
-  lib = static_library('qemu-' + target,
+  if get_option('shared_lib')
+    build_lib_args = {
+      'target_type': 'shared_library',
+      'install': true,
+      'dependencies': arch_deps,
+      'link_depends': [block_syms, qemu_syms],
+      'link_args': link_args,
+      'gnu_symbol_visibility': 'default'
+    }
+  else
+    build_lib_args = {
+      'target_type': 'static_library',
+      'install': false,
+      'dependencies': lib_deps
+    }
+  endif
+
+  lib = build_target('qemu-' + target,
                  sources: arch_srcs + genh,
-                 dependencies: lib_deps,
                  objects: objects,
                  include_directories: target_inc,
                  c_args: c_args,
-                 build_by_default: false)
+                 build_by_default: false,
+                 kwargs: build_lib_args)
 
   if target.endswith('-softmmu')
     execs = [{
       'name': 'qemu-system-' + target_name,
       'win_subsystem': 'console',
+<<<<<<< qemu-11.0.3-brain
       'sources': [main_rs, files('system/main.c')],
       'dependencies': [sdl]
+||||||| qemu-10.0.12
+      'sources': files('system/main.c'),
+      'dependencies': [sdl]
+=======
+      'sources': files('system/main.c'),
+      'dependencies': [sdl, coref]
+>>>>>>> qemu-10.0.12-utm
     }]
     if host_os == 'windows' and (sdl.found() or gtk.found())
       execs += [{
@@ -4446,11 +4560,19 @@ foreach target : target_dirs
       exe_name += '-unsigned'
     endif
 
+    if get_option('shared_lib')
+      exe_deps = [declare_dependency(link_with: lib)]
+      exe_objs = []
+    else
+      exe_deps = arch_deps
+      exe_objs = lib.extract_all_objects(recursive: true)
+    endif
+
     emulator = executable(exe_name, exe['sources'],
                install: true,
                c_args: c_args,
-               dependencies: arch_deps + exe['dependencies'],
-               objects: lib.extract_all_objects(recursive: true),
+               dependencies: exe_deps + exe['dependencies'],
+               objects: exe_objs,
                link_depends: [block_syms, qemu_syms],
                link_args: link_args,
                win_subsystem: exe['win_subsystem'])
@@ -4512,7 +4634,15 @@ if xkbcommon.found()
 endif
 
 if have_tools
+<<<<<<< qemu-11.0.3-brain
   link_args = enable_modules ? ['@block.syms'] : []
+||||||| qemu-10.0.12
+=======
+  if get_option('shared_lib')
+    qemu_img_lib = shared_library('qemu-img', [files('qemu-img.c'), hxdep],
+             dependencies: [authz, block, crypto, io, qom, qemuutil], install: true)
+  endif
+>>>>>>> qemu-10.0.12-utm
   qemu_img = executable('qemu-img', [files('qemu-img.c'), hxdep],
              link_args: link_args, link_depends: block_syms,
              dependencies: [authz, block, crypto, io, qom, qemuutil], install: true)
@@ -4672,6 +4802,7 @@ summary(summary_info, bool_yn: true, section: 'Directories')
 
 # Host binaries
 summary_info = {}
+summary_info += {'build shared lib':  get_option('shared_lib')}
 summary_info += {'python':            '@0@ (version: @1@)'.format(python.full_path(), python.language_version())}
 summary_info += {'sphinx-build':      sphinx_build}
 
@@ -4828,6 +4959,8 @@ summary_info += {'TCG support':       config_all_accel.has_key('CONFIG_TCG')}
 if config_all_accel.has_key('CONFIG_TCG')
   if get_option('tcg_interpreter')
     summary_info += {'TCG backend':   'TCI (TCG with bytecode interpreter, slow)'}
+  elif get_option('tcg_threaded_interpreter')
+    summary_info += {'TCG backend':   'TCTI (TCG with threaded-dispatch bytecode interpreter, experimental and slow; but faster than TCI)'}
   else
     summary_info += {'TCG backend':   'native (@0@)'.format(cpu)}
   endif
@@ -4847,6 +4980,7 @@ summary(summary_info, bool_yn: true, section: 'Targets and accelerators')
 
 # Block layer
 summary_info = {}
+summary_info += {'libucontext support': ucontext.found()}
 summary_info += {'coroutine backend': coroutine_backend}
 summary_info += {'coroutine pool':    have_coroutine_pool}
 if have_block

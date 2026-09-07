@@ -57,7 +57,7 @@ void gd_egl_init(VirtualConsole *vc)
     }
 
     vc->gfx.ectx = qemu_egl_init_ctx();
-    vc->gfx.esurface = qemu_egl_init_surface_x11
+    vc->gfx.esurface = qemu_egl_init_surface
         (vc->gfx.ectx, (EGLNativeWindowType)x11_window);
 
     assert(vc->gfx.esurface);
@@ -103,6 +103,10 @@ void gd_egl_draw(VirtualConsole *vc)
         glFlush();
 #ifdef CONFIG_GBM
         if (dmabuf) {
+            /* a still-pending previous fence must be cancelled before
+             * egl_dmabuf_create_fence overwrites fence_fd, or its fd
+             * handler leaks (permanent main-loop spin) */
+            gd_dmabuf_cancel_fence(vc, dmabuf);
             egl_dmabuf_create_fence(dmabuf);
             fence_fd = qemu_dmabuf_get_fence_fd(dmabuf);
             if (fence_fd >= 0) {
@@ -237,7 +241,7 @@ void gd_egl_scanout_texture(DisplayChangeListener *dcl,
                             uint32_t backing_width, uint32_t backing_height,
                             uint32_t x, uint32_t y,
                             uint32_t w, uint32_t h,
-                            void *d3d_tex2d)
+                            ScanoutTextureNative native)
 {
     VirtualConsole *vc = container_of(dcl, VirtualConsole, gfx.dcl);
 
@@ -288,7 +292,7 @@ void gd_egl_scanout_dmabuf(DisplayChangeListener *dcl,
     y0_top = qemu_dmabuf_get_y0_top(dmabuf);
 
     gd_egl_scanout_texture(dcl, texture, y0_top, backing_width, backing_height,
-                           x, y, width, height, NULL);
+                           x, y, width, height, NO_NATIVE_TEXTURE);
 
     if (qemu_dmabuf_get_allow_fences(dmabuf)) {
         vc->gfx.guest_fb.dmabuf = dmabuf;

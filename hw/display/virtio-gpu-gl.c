@@ -79,6 +79,7 @@ static void virtio_gpu_gl_handle_ctrl(VirtIODevice *vdev, VirtQueue *vq)
         cmd->vq = vq;
         cmd->error = 0;
         cmd->finished = false;
+        cmd->suspended = false;
         QTAILQ_INSERT_TAIL(&g->cmdq, cmd, next);
         cmd = virtqueue_pop(vq, sizeof(struct virtio_gpu_ctrl_command));
     }
@@ -168,8 +169,14 @@ static const Property virtio_gpu_gl_properties[] = {
                     VIRTIO_GPU_FLAG_STATS_ENABLED, false),
     DEFINE_PROP_BIT("venus", VirtIOGPU, parent_obj.conf.flags,
                     VIRTIO_GPU_FLAG_VENUS_ENABLED, false),
+<<<<<<< qemu-11.0.3-brain
     DEFINE_PROP_BIT("drm_native_context", VirtIOGPU, parent_obj.conf.flags,
                     VIRTIO_GPU_FLAG_DRM_ENABLED, false),
+||||||| qemu-10.0.12
+=======
+    DEFINE_PROP_BIT("neptune", VirtIOGPU, parent_obj.conf.flags,
+                    VIRTIO_GPU_FLAG_NEPTUNE_ENABLED, false),
+>>>>>>> qemu-10.0.12-utm
 };
 
 static void virtio_gpu_gl_device_unrealize(DeviceState *qdev)
@@ -220,6 +227,7 @@ static void virtio_gpu_gl_class_init(ObjectClass *klass, const void *data)
     vgc->handle_ctrl = virtio_gpu_gl_handle_ctrl;
     vgc->process_cmd = virtio_gpu_virgl_process_cmd;
     vgc->update_cursor_data = virtio_gpu_gl_update_cursor_data;
+    vgc->resource_destroy = virtio_gpu_virgl_resource_destroy;
 
     vgc->resource_destroy = virtio_gpu_virgl_resource_destroy;
     vdc->realize = virtio_gpu_gl_device_realize;

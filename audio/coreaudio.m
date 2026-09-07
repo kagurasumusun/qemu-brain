@@ -361,7 +361,16 @@ static OSStatus init_out_device(CoreaudioVoiceOut *core)
     AudioDeviceIOProcID ioprocid;
     AudioValueRange value_range;
     OSStatus status;
+<<<<<<< qemu-11.0.3-brain
     UInt32 device_frame_size;
+||||||| qemu-10.0.12
+    AudioValueRange frameRange;
+=======
+    AudioDeviceID deviceID;
+    AudioValueRange frameRange;
+    UInt32 audioDevicePropertyBufferFrameSize;
+    AudioDeviceIOProcID ioprocid;
+>>>>>>> qemu-10.0.12-utm
 
     AudioStreamBasicDescription stream_basic_description = {
         .mBitsPerChannel = audio_format_bits(core->hw.info.af),
@@ -374,20 +383,41 @@ static OSStatus init_out_device(CoreaudioVoiceOut *core)
         .mSampleRate = core->hw.info.freq
     };
 
+<<<<<<< qemu-11.0.3-brain
     status = coreaudio_get_voice_out(&device_id);
+||||||| qemu-10.0.12
+    status = coreaudio_get_voice(&core->outputDeviceID);
+=======
+    status = coreaudio_get_voice(&deviceID);
+>>>>>>> qemu-10.0.12-utm
     if (status != kAudioHardwareNoError) {
         coreaudio_playback_logerr(status,
                                   "Could not get default output device");
         return status;
     }
+<<<<<<< qemu-11.0.3-brain
     if (device_id == kAudioDeviceUnknown) {
         error_report("coreaudio: Could not initialize playback: "
                      "Unknown audio device");
+||||||| qemu-10.0.12
+    if (core->outputDeviceID == kAudioDeviceUnknown) {
+        dolog ("Could not initialize playback - Unknown Audiodevice\n");
+=======
+    if (deviceID == kAudioDeviceUnknown) {
+        dolog ("Could not initialize playback - Unknown Audiodevice\n");
+>>>>>>> qemu-10.0.12-utm
         return status;
     }
 
     /* get minimum and maximum buffer frame sizes */
+<<<<<<< qemu-11.0.3-brain
     status = coreaudio_get_out_framesizerange(device_id, &value_range);
+||||||| qemu-10.0.12
+    status = coreaudio_get_framesizerange(core->outputDeviceID,
+                                          &frameRange);
+=======
+    status = coreaudio_get_framesizerange(deviceID, &frameRange);
+>>>>>>> qemu-10.0.12-utm
     if (status == kAudioHardwareBadObjectError) {
         return 0;
     }
@@ -397,6 +427,7 @@ static OSStatus init_out_device(CoreaudioVoiceOut *core)
         return status;
     }
 
+<<<<<<< qemu-11.0.3-brain
     if (value_range.mMinimum > core->frame_size_setting) {
         device_frame_size = value_range.mMinimum;
         warn_report("coreaudio: Upsizing buffer frames to %f",
@@ -405,24 +436,71 @@ static OSStatus init_out_device(CoreaudioVoiceOut *core)
         device_frame_size = value_range.mMaximum;
         warn_report("coreaudio: Downsizing buffer frames to %f",
                     value_range.mMaximum);
+||||||| qemu-10.0.12
+    if (frameRange.mMinimum > core->frameSizeSetting) {
+        core->audioDevicePropertyBufferFrameSize = (UInt32) frameRange.mMinimum;
+        dolog ("warning: Upsizing Buffer Frames to %f\n", frameRange.mMinimum);
+    } else if (frameRange.mMaximum < core->frameSizeSetting) {
+        core->audioDevicePropertyBufferFrameSize = (UInt32) frameRange.mMaximum;
+        dolog ("warning: Downsizing Buffer Frames to %f\n", frameRange.mMaximum);
+=======
+    if (frameRange.mMinimum > core->frameSizeSetting) {
+        audioDevicePropertyBufferFrameSize = (UInt32) frameRange.mMinimum;
+        dolog ("warning: Upsizing Buffer Frames to %f\n", frameRange.mMinimum);
+    } else if (frameRange.mMaximum < core->frameSizeSetting) {
+        audioDevicePropertyBufferFrameSize = (UInt32) frameRange.mMaximum;
+        dolog ("warning: Downsizing Buffer Frames to %f\n", frameRange.mMaximum);
+>>>>>>> qemu-10.0.12-utm
     } else {
+<<<<<<< qemu-11.0.3-brain
         device_frame_size = core->frame_size_setting;
+||||||| qemu-10.0.12
+        core->audioDevicePropertyBufferFrameSize = core->frameSizeSetting;
+=======
+        audioDevicePropertyBufferFrameSize = core->frameSizeSetting;
+>>>>>>> qemu-10.0.12-utm
     }
 
     /* set Buffer Frame Size */
+<<<<<<< qemu-11.0.3-brain
     status = coreaudio_set_out_framesize(device_id, &device_frame_size);
+||||||| qemu-10.0.12
+    status = coreaudio_set_framesize(core->outputDeviceID,
+                                     &core->audioDevicePropertyBufferFrameSize);
+=======
+    status = coreaudio_set_framesize(deviceID,
+                                     &audioDevicePropertyBufferFrameSize);
+>>>>>>> qemu-10.0.12-utm
     if (status == kAudioHardwareBadObjectError) {
         return 0;
     }
     if (status != kAudioHardwareNoError) {
+<<<<<<< qemu-11.0.3-brain
         coreaudio_playback_logerr(status,
                                   "Could not set device buffer frame size %" PRIu32,
                                   (uint32_t)device_frame_size);
+||||||| qemu-10.0.12
+        coreaudio_playback_logerr (status,
+                                    "Could not set device buffer frame size %" PRIu32 "\n",
+                                    (uint32_t)core->audioDevicePropertyBufferFrameSize);
+=======
+        coreaudio_playback_logerr (status,
+                                    "Could not set device buffer frame size %" PRIu32 "\n",
+                                    (uint32_t)audioDevicePropertyBufferFrameSize);
+>>>>>>> qemu-10.0.12-utm
         return status;
     }
 
     /* get Buffer Frame Size */
+<<<<<<< qemu-11.0.3-brain
     status = coreaudio_get_out_framesize(device_id, &device_frame_size);
+||||||| qemu-10.0.12
+    status = coreaudio_get_framesize(core->outputDeviceID,
+                                     &core->audioDevicePropertyBufferFrameSize);
+=======
+    status = coreaudio_get_framesize(deviceID,
+                                     &audioDevicePropertyBufferFrameSize);
+>>>>>>> qemu-10.0.12-utm
     if (status == kAudioHardwareBadObjectError) {
         return 0;
     }
@@ -433,15 +511,33 @@ static OSStatus init_out_device(CoreaudioVoiceOut *core)
     }
 
     /* set Samplerate */
+<<<<<<< qemu-11.0.3-brain
     status = coreaudio_set_out_streamformat(device_id,
                                             &stream_basic_description);
+||||||| qemu-10.0.12
+    status = coreaudio_set_streamformat(core->outputDeviceID,
+                                        &streamBasicDescription);
+=======
+    status = coreaudio_set_streamformat(deviceID, &streamBasicDescription);
+>>>>>>> qemu-10.0.12-utm
     if (status == kAudioHardwareBadObjectError) {
         return 0;
     }
     if (status != kAudioHardwareNoError) {
+<<<<<<< qemu-11.0.3-brain
         coreaudio_playback_logerr(status,
                                   "Could not set samplerate %lf",
                                   stream_basic_description.mSampleRate);
+||||||| qemu-10.0.12
+        coreaudio_playback_logerr (status,
+                                   "Could not set samplerate %lf\n",
+                                   streamBasicDescription.mSampleRate);
+        core->outputDeviceID = kAudioDeviceUnknown;
+=======
+        coreaudio_playback_logerr (status,
+                                   "Could not set samplerate %lf\n",
+                                   streamBasicDescription.mSampleRate);
+>>>>>>> qemu-10.0.12-utm
         return status;
     }
 
@@ -455,25 +551,54 @@ static OSStatus init_out_device(CoreaudioVoiceOut *core)
      * Therefore, the specified callback must be designed to avoid a deadlock
      * with the callers of AudioObjectGetPropertyData.
      */
+<<<<<<< qemu-11.0.3-brain
     ioprocid = NULL;
     status = AudioDeviceCreateIOProcID(device_id,
                                        out_device_ioproc,
+||||||| qemu-10.0.12
+    core->ioprocid = NULL;
+    status = AudioDeviceCreateIOProcID(core->outputDeviceID,
+                                       audioDeviceIOProc,
+=======
+    ioprocid = NULL;
+    status = AudioDeviceCreateIOProcID(deviceID,
+                                       audioDeviceIOProc,
+>>>>>>> qemu-10.0.12-utm
                                        &core->hw,
                                        &ioprocid);
     if (status == kAudioHardwareBadDeviceError) {
         return 0;
     }
+<<<<<<< qemu-11.0.3-brain
     if (status != kAudioHardwareNoError || ioprocid == NULL) {
         coreaudio_playback_logerr(status, "Could not set IOProc");
+||||||| qemu-10.0.12
+    if (status != kAudioHardwareNoError || core->ioprocid == NULL) {
+        coreaudio_playback_logerr (status, "Could not set IOProc\n");
+        core->outputDeviceID = kAudioDeviceUnknown;
+=======
+    if (status != kAudioHardwareNoError || ioprocid == NULL) {
+        coreaudio_playback_logerr (status, "Could not set IOProc\n");
+>>>>>>> qemu-10.0.12-utm
         return status;
     }
 
+<<<<<<< qemu-11.0.3-brain
     core->device_id = device_id;
     core->device_frame_size = device_frame_size;
     core->hw.samples = core->buffer_count * core->device_frame_size;
     audio_generic_initialize_buffer_out(&core->hw);
     core->ioprocid = ioprocid;
 
+||||||| qemu-10.0.12
+=======
+    core->outputDeviceID = deviceID;
+    core->audioDevicePropertyBufferFrameSize = audioDevicePropertyBufferFrameSize;
+    core->hw.samples = core->bufferCount * core->audioDevicePropertyBufferFrameSize;
+    audio_generic_initialize_buffer_out(&core->hw);
+    core->ioprocid = ioprocid;
+
+>>>>>>> qemu-10.0.12-utm
     return 0;
 }
 
@@ -557,10 +682,20 @@ static OSStatus handle_voice_out_change(
         fini_out_device(core);
     }
 
+<<<<<<< qemu-11.0.3-brain
     init_out_device(core);
 
     if (core->device_id) {
         update_out_device_playback_state(core);
+||||||| qemu-10.0.12
+    if (!init_out_device(core)) {
+        update_device_playback_state(core);
+=======
+    init_out_device(core);
+
+    if (core->outputDeviceID) {
+        update_device_playback_state(core);
+>>>>>>> qemu-10.0.12-utm
     }
 
     bql_unlock();

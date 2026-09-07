@@ -34,7 +34,7 @@ option('fuzzing_engine', type : 'string', value : '',
 option('trace_file', type: 'string', value: 'trace',
        description: 'Trace file prefix for simple backend')
 option('coroutine_backend', type: 'combo',
-       choices: ['ucontext', 'sigaltstack', 'windows', 'wasm', 'auto'],
+       choices: ['libucontext', 'ucontext', 'sigaltstack', 'windows', 'wasm', 'auto'],
        value: 'auto', description: 'coroutine backend to use')
 option('gdb', type: 'string', value: '',
        description: 'Path to GDB')
@@ -65,6 +65,8 @@ option('tools', type : 'feature', value : 'auto',
        description: 'build support utilities that come with QEMU')
 option('qga_vss', type : 'feature', value: 'auto',
        description: 'build QGA VSS support (broken with MinGW)')
+option('shared_lib', type: 'boolean', value: false,
+       description: 'Build QEMU as a shared library')
 
 option('malloc_trim', type : 'feature', value : 'auto',
        description: 'enable libc malloc_trim() for memory optimization')
@@ -81,6 +83,8 @@ option('hvf', type: 'feature', value: 'auto',
        description: 'HVF acceleration support')
 option('nitro', type: 'feature', value: 'auto',
        description: 'Nitro acceleration support')
+option('hvf_private', type: 'boolean', value: 'false',
+       description: 'HVF private features (entitlements required)')
 option('nvmm', type: 'feature', value: 'auto',
        description: 'NVMM acceleration support')
 option('xen', type: 'feature', value: 'auto',
@@ -97,6 +101,8 @@ option('debug_remap', type: 'boolean', value: false,
        description: 'syscall buffer debugging support')
 option('tcg_interpreter', type: 'boolean', value: false,
        description: 'TCG with bytecode interpreter (slow)')
+option('tcg_threaded_interpreter', type: 'boolean', value: false,
+       description: 'TCG with threaded-dispatch bytecode interpreter (experimental and slow, but less slow than TCI)')
 option('safe_stack', type: 'boolean', value: false,
        description: 'SafeStack Stack Smash Protection (requires clang/llvm and coroutine backend ucontext)')
 option('asan', type: 'boolean', value: false,
@@ -283,6 +289,8 @@ option('fuse', type: 'feature', value: 'auto',
        description: 'FUSE block device export')
 option('fuse_lseek', type : 'feature', value : 'auto',
        description: 'SEEK_HOLE/SEEK_DATA support for FUSE exports')
+option('ucontext', type : 'feature', value : 'disabled',
+       description: 'libucontext support')
 
 option('trace_backends', type: 'array', value: ['log'],
        choices: ['dtrace', 'ftrace', 'log', 'nop', 'simple', 'syslog', 'ust'],

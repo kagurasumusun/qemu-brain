@@ -24,6 +24,58 @@ typedef hv_vcpu_t hvf_vcpuid;
 typedef hv_vcpuid_t hvf_vcpuid;
 #endif
 
+<<<<<<< qemu-11.0.3-brain
+||||||| qemu-10.0.12
+/* hvf_slot flags */
+#define HVF_SLOT_LOG (1 << 0)
+
+typedef struct hvf_slot {
+    uint64_t start;
+    uint64_t size;
+    uint8_t *mem;
+    int slot_id;
+    uint32_t flags;
+    MemoryRegion *region;
+} hvf_slot;
+
+=======
+#if defined(CONFIG_HVF_PRIVATE)
+extern hv_return_t _hv_vm_config_set_isa(hv_vm_config_t config, uint32_t isa);
+extern hv_return_t _hv_vcpu_get_actlr(hv_vcpu_t vcpu, uint64_t* value);
+extern hv_return_t _hv_vcpu_set_actlr(hv_vcpu_t vcpu, uint64_t value);
+#endif
+
+#if defined(__aarch64__)
+#if defined(CONFIG_HVF_PRIVATE)
+#define HV_VM_CONFIG_ISA_PRIVATE (3)
+#define ACTLR_EL1_TSO_ENABLE_MASK ((1 << 1) | (1 << 9))
+#else
+#define ACTLR_EL1_TSO_ENABLE_MASK ((1 << 1))
+#endif
+#endif
+
+/* hvf_slot flags */
+#define HVF_SLOT_LOG (1 << 0)
+
+/* Represent memory logically mapped by QEMU */
+typedef struct hvf_slot {
+    uint64_t start;
+    uint64_t size;
+    uint8_t *mem;
+    int slot_id;
+    uint32_t flags;
+    MemoryRegion *region;
+} hvf_slot;
+
+/* Represent memory currently mapped in HVF */
+typedef struct hvf_mac_slot {
+    int present;
+    uint64_t size;
+    uint64_t gpa_start;
+    uint64_t gva;
+} hvf_mac_slot;
+
+>>>>>>> qemu-10.0.12-utm
 typedef struct hvf_vcpu_caps {
     uint64_t vmx_cap_pinbased;
     uint64_t vmx_cap_procbased;
@@ -34,13 +86,26 @@ typedef struct hvf_vcpu_caps {
 } hvf_vcpu_caps;
 
 struct HVFState {
+<<<<<<< qemu-11.0.3-brain
     AccelState parent_obj;
+||||||| qemu-10.0.12
+    AccelState parent;
+    hvf_slot slots[32];
+    int num_slots;
+=======
+    AccelState parent;
+    hvf_slot *slots;
+    hvf_mac_slot *mac_slots;
+    int num_slots;
+>>>>>>> qemu-10.0.12-utm
 
     hvf_vcpu_caps *hvf_caps;
     uint64_t vtimer_offset;
     QTAILQ_HEAD(, hvf_sw_breakpoint) hvf_sw_breakpoints;
 };
 extern HVFState *hvf_state;
+extern bool hvf_tso_mode;
+extern uint32_t hvf_ipa_granule_size;
 
 struct AccelCPUState {
     hvf_vcpuid fd;
@@ -57,12 +122,19 @@ void assert_hvf_ok_impl(hv_return_t ret, const char *file, unsigned int line,
 #define assert_hvf_ok(EX) assert_hvf_ok_impl((EX), __FILE__, __LINE__, #EX)
 const char *hvf_return_string(hv_return_t ret);
 int hvf_arch_init(void);
+<<<<<<< qemu-11.0.3-brain
 hv_return_t hvf_arch_vm_create(MachineState *ms, uint32_t pa_range);
 uint32_t hvf_arch_get_default_ipa_bit_size(void);
 uint32_t hvf_arch_get_max_ipa_bit_size(void);
 void hvf_kick_vcpu_thread(CPUState *cpu);
 
 /* Must be called by the owning thread */
+||||||| qemu-10.0.12
+hv_return_t hvf_arch_vm_create(MachineState *ms, uint32_t pa_range);
+=======
+hv_return_t hvf_arch_vm_create(MachineState *ms, uint32_t pa_range,
+                               uint32_t ipa_granule_size);
+>>>>>>> qemu-10.0.12-utm
 int hvf_arch_init_vcpu(CPUState *cpu);
 /* Must be called by the owning thread */
 void hvf_arch_vcpu_destroy(CPUState *cpu);
