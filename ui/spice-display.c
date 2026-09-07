@@ -1256,6 +1256,7 @@ static void spice_gl_update(DisplayChangeListener *dcl,
     ssd->gl_updates++;
 }
 
+#if defined(CONFIG_GBM)
 static bool spice_gl_replace_fd_texture(SimpleSpiceDisplay *ssd,
                                         int *fds, uint64_t *modifier,
                                         int *num_planes)
@@ -1337,6 +1338,8 @@ static bool spice_gl_replace_fd_texture(SimpleSpiceDisplay *ssd,
     }
     return ret;
 }
+
+#endif /* CONFIG_GBM */
 
 static void spice_server_gl_scanout(QXLInstance *qxl,
                                     const int *fd,
