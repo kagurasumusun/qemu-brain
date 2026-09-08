@@ -721,6 +721,36 @@ static void brain_kbd_touchkey_scan(void *opaque)
     bool fresh;
 
     if (!s->touchkey_scan_busy) {
+        /*
+         * A scan that would sample the level the report already carries has
+         * nothing to post, so it must not post: rewriting the word replaces
+         * it with the model's idea of "idle" and silently discards whatever
+         * the guest had put there.
+         *
+         * +0x404 is a word in the shared mailbox page, not a device
+         * register, and the guest writes it too.  The boot code stores its
+         * own 0xffffffff marker there (observed at guest PC 0x800713b8 and
+         * read back at 0x8006deb8) long before the kernel starts.  While the
+         * scan re-posted every cycle, the model overwrote that marker with
+         * 0xf7e inside one scan period, the boot code read back the wrong
+         * word, and EBOOT died in InitSpecifiedEthDevice with "Failed to
+         * initialize USB RNDIS Ethernet controller" / OEMReportError
+         * 0xFFFFFFFA -- the boot never reached the NK.  Measured: with the
+         * report word left alone the same image boots to "Windows CE Kernel
+         * for ARM ... Built on May 7 2012"; with it re-posted, 88 serial
+         * lines and a spin at PC 0x8007f780.
+         *
+         * Skipping the cycle is also the faithful behaviour: a scanner that
+         * samples an unchanged level would write back the same value, which
+         * is unobservable, so the conversion -- and with it the "scan in
+         * progress" bit -- only exists on a cycle that can change the
+         * report.  A press or a release still reaches the guest within one
+         * scan period, exactly as before.
+         */
+        if (s->touchkey_want == s->touchkey_pub) {
+            timer_mod(s->touchkey_scan_timer, now + BRAIN_KBD_TOUCHKEY_SCAN_NS);
+            return;
+        }
         s->touchkey_scan_busy = true;
         brain_kbd_touchkey_publish(s, "scan start");
         timer_mod(s->touchkey_scan_timer, now + BRAIN_KBD_TOUCHKEY_BUSY_NS);
