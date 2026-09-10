@@ -239,8 +239,12 @@ static void mxs_pinctrl_write(void *opaque, hwaddr offset, uint64_t value,
     }
 
     val = mxs_bank_apply(s->regs[idx], offset, value, size);
-    if (idx == PIN_CTRL_IDX && (val & (1u << 31))) {
-        val |= (1u << 30);
+    if (idx == PIN_CTRL_IDX) {
+        /* SFTRST asserts CLKGATE in hardware, but CLKGATE must stay
+         * software-writable afterwards: the guest clears it while SFTRST
+         * is still held (mxs_bank.h).  Pinning it here would deadlock the
+         * reset release sequence. */
+        val = mxs_bank_sftrst(s->regs[idx], val);
     }
     s->regs[idx] = val;
 

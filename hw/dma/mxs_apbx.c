@@ -250,10 +250,9 @@ static void mxs_apbx_write(void *opaque, hwaddr offset, uint64_t value,
 
     switch (idx) {
     case APBX_CTRL0:
-        s->ctrl0 = mxs_bank_apply(s->ctrl0, offset, value, size);
-        if (s->ctrl0 & (1u << 31)) {
-            s->ctrl0 |= (1u << 30);
-        }
+        s->ctrl0 = mxs_bank_sftrst(s->ctrl0,
+                                   mxs_bank_apply(s->ctrl0, offset,
+                                                  value, size));
         break;
     case APBX_CTRL1:
         s->ctrl1 = mxs_bank_apply(s->ctrl1, offset, value, size);

@@ -172,6 +172,12 @@ static void mxs_i2c_kick(MXSI2CState *s)
                 return;
             }
             for (unsigned i = 0; i < count; i++) {
+                /* The master NACKs the final byte of a read transaction;
+                 * QEMU applies the pending ACK/NACK on the following
+                 * i2c_recv(), so arm it *before* the last receive. */
+                if (i == count - 1) {
+                    i2c_nack(s->bus);
+                }
                 s->regs[0xa0 >> 4] = i2c_recv(s->bus);
                 if (brain_i2c_debug()) {
                     fprintf(stderr, "[i2c-debug] %s RECV[%u] 0x%02x "
@@ -179,8 +185,6 @@ static void mxs_i2c_kick(MXSI2CState *s)
                             (uint8_t)s->regs[0xa0 >> 4],
                             (unsigned)mxs_trace_guest_pc());
                 }
-                if (i == count - 1) i2c_nack(s->bus);
-                else i2c_ack(s->bus);
             }
             if (stop) i2c_end_transfer(s->bus);
             mxs_i2c_finish(s, CTRL1_DATA_ENGINE_CMPLT);
@@ -202,9 +206,10 @@ static void mxs_i2c_kick(MXSI2CState *s)
      * the BSP flow. */
     if (is_read) {
         for (unsigned i = 0; i < count; i++) {
+            if (i == count - 1) {
+                i2c_nack(s->bus);
+            }
             s->regs[0xa0 >> 4] = i2c_recv(s->bus);
-            if (i == count - 1) i2c_nack(s->bus);
-            else i2c_ack(s->bus);
         }
         if (stop) i2c_end_transfer(s->bus);
     }

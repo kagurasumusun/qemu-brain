@@ -261,7 +261,9 @@ static uint32_t mxs_syscon_reg_read(MXSSysconState *s, unsigned idx)
                   qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / NANOSECONDS_PER_SECOND;
             break;
         case RTC_MILLISECONDS:
-            val = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
+            /* sub-second fraction: the 1 kHz counter rolls 0..999 each
+             * second, it is not the full millisecond uptime */
+            val = (uint32_t)(qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) % 1000);
             break;
         default:
             break;

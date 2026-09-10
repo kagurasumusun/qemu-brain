@@ -169,13 +169,17 @@ static void mxs_auart_write(void *opaque, hwaddr offset, uint64_t value,
 
     if (idx == AUART_DATA) {
         uint8_t ch[4];
-        int n = size >= 4 ? 1 : size;   /* 32 bit write pushes one char */
+        int n;
 
-        ch[0] = value & 0xff;
-        if (size < 4) {
-            n = size;
+        if (size >= 4) {
+            /* a 32-bit write pushes a single character */
+            n = 1;
             ch[0] = value & 0xff;
-            ch[1] = (value >> 8) & 0xff;
+        } else {
+            n = size;
+            for (int i = 0; i < n; i++) {
+                ch[i] = (value >> (8 * i)) & 0xff;
+            }
         }
         qemu_chr_fe_write_all(&s->chr, ch, n);
         mxs_auart_update_irq(s);
