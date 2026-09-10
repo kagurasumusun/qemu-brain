@@ -67,20 +67,16 @@
  *   17..16  ACTIVE_STATE    (HI_Z, 0, 1)
  *   15..0   PERIOD     period count
  *
- * The SHARP Brain (PW-SH6) board wires PWM channels 4 and 6 to
- * the LCD backlight driver, channel 0 to the audio amplifier
- * and channel 2 to the touch-panel beeper.  The WinCE BSP - which
- * the SHARP Brain firmware is built on top of the Freescale
- * i.MX28 EVK BSP - was written for the EVK board, where the
- * PRESENT bits reported in HW_PWM_CTRL are PWM4 | PWM6 (i.e.
- * bits 26, 28).  `PWMGetChannelPresentMask()` shifts those down
- * 22 places, leaving `0x50` in the low byte.  If we were to OR
- * in CTRL_PWM0_PRESENT or CTRL_PWM2_PRESENT too (because the
- * SHARP Brain does wire those channels to pads), the mask would
- * come out as something other than `0x50` and `PwmInitialize`
- * would compare it to `0x50`, fail, and return FALSE.  We
- * therefore follow the EVK convention and only mark PWM4 and
- * PWM6 as present.
+ * The SHARP Brain (PW-SH6) board wires PWM channel 0 to the audio
+ * amplifier, channel 2 to the touch-panel beeper and channels 4 and 6
+ * to the LCD backlight driver.  The WinCE BSP - which the SHARP Brain
+ * firmware is built on top of the Freescale i.MX28 EVK BSP - was
+ * compiled with BSP_PRESENT_CH_MASK = 0xFF, i.e. it expects every
+ * PRESENT bit in HW_PWM_CTRL to read as set.  `PwmInitialize()`
+ * compares `PWMGetChannelPresentMask()` (the PRESENT bits shifted down
+ * into the low byte of CTRL) against that mask, so we report all eight
+ * channels as present rather than only the four the board actually
+ * wires to pads.  See BRAIN_PRESENT_MASK below.
  *
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
  */
@@ -247,7 +243,7 @@ static uint64_t mxs_pwm_read(void *opaque, hwaddr offset, unsigned size)
 
     if (idx == 0) {
         val = mxs_pwm_ctrl_value(s);
-    } else if (idx == (MXS_PWM_VERSION_OFF >> 2)) {
+    } else if (idx == (MXS_PWM_VERSION_OFF >> 4)) {
         val = 0x03010000;
     } else {
         int is_active;

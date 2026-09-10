@@ -79,3 +79,19 @@ etm / reserved / rob / lcdif / lradc / pl011）を追加監査し、以下 6 件
   安全。C99 の for 初期化子宣言は QEMU（gnu99）で許容。
 - 完全ビルドは前回同様サンドボックスのネットワーク制約（deb.debian.org 到達不能、
   glib/pixman dev ヘッダ導入不可）により未実施。静的確認のみ。
+
+## 5. 追加修正（第2弾）
+
+| # | 対象 | 不具合 | 修正 |
+|---|---|---|---|
+| 7 | `hw/misc/mxs_pwm.c` | `HW_PWM_VERSION`（バイトオフセット 0x110）の読み出し判定が `MXS_PWM_VERSION_OFF >> 2`（=0x44）になっており、VERSION が誤ったオフセット 0x440 で返り、本来の 0x110 は `regs[0x11]`（ゼロ）を返していた。他ブロックは全て `VERSION_OFF >> 4`（`MXS_BANK_INDEX` と同基軸） | `>> 2` を `>> 4` に修正 |
+| 8 | `hw/misc/mxs_pwm.c` | ファイル冒頭コメントが「PRESENT は PWM4\|PWM6 のみ（0x50 期待）」と説明する一方、コードは `BRAIN_PRESENT_MASK` で全 8 チャネル（0xFF）を報告しており、記述が実装と矛盾 | 冒頭コメントを実装（`BSP_PRESENT_CH_MASK = 0xFF` 期待）に合わせて書き直し |
+| 9 | `hw/misc/mxs_saif.c` | `saif_dma_xfer()` の書き込み方向ループが `for (i = 0; i + 3 < len + 3; i += 4)`（実質 `i < len`）で、`len` が 4 の倍数でないとき最終反復が `buf[i+1..i+3]` をバッファ末尾越えで読む（OOB read）。読み出し方向は `i + 3 < len` で正しくガード済み（`dcp_swap_buf` も同形式） | ループ境界を `i + 3 < len` に修正（4 バイト整ワードのみ処理） |
+
+### 追加の見送り
+
+- **`hw/misc/mxs_gpmi.c` の default 書き込みパスがバイトレーンを無視**
+  （`s->regs[off >> 2] = (uint32_t)value`。read は `mxs_bank_extract` でバイトレーン対応）:
+  GPMI レジスタは 4 バイト境界に 32 ビットストアされるのが BSP の実使用であり、
+  GPMI_DATA（コマンド/ステータスバイト経路）へのバイト書き込みも lane 0 のみで
+  現状の実装で成立する。DFLPT と同種の read/write 非対称として記録に留める。

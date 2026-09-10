@@ -410,7 +410,10 @@ static int saif_dma_xfer(void *opaque, uint8_t *buf, int len, bool is_write)
     MXSSAIFState *s = opaque;
     int i;
 
-    for (i = 0; i + 3 < len + 3; i += 4) {
+    /* i + 3 < len: only process complete 4-byte sample words; the old
+     * bound (i + 3 < len + 3, i.e. i < len) let the final iteration read
+     * up to three bytes past the end of buf for non-word-aligned len. */
+    for (i = 0; i + 3 < len; i += 4) {
         if (is_write) {
             /* memory -> SAIF FIFO */
             if (s->fifo_len < SAIF_FIFO_LEN) {
