@@ -96,7 +96,14 @@ static int mxs_fat_parse_bpb(MxsFAT *f, const uint8_t *sec)
     f->total_clusters = data_secs / csize;
     f->is_fat32 = f->total_clusters >= 65525;
     if (!f->is_fat32) {
-        f->root_clus = 0;   /* FAT12/16: root is contiguous */
+        if (f->total_clusters < 4085) {
+            /* FAT12: 12-bit cluster entries.  This minimal reader only
+             * implements FAT16/32 (the Brainux SD image is one of
+             * those); refuse the volume instead of walking its FAT with
+             * the wrong entry width. */
+            return -1;
+        }
+        f->root_clus = 0;   /* FAT16: root is contiguous */
     }
 
     f->fat_start_lba  = f->part_lba + f->rsvd_sec;
@@ -164,35 +171,29 @@ static uint32_t mxs_fat_get_entry(MxsFAT *f, uint32_t cluster)
     uint8_t sec[512];
     uint32_t lba;
     uint32_t offset;
-    uint32_t fat32_mask = 0x0fffffffu;
 
     if (f->is_fat32) {
+        /* 4 bytes per cluster entry, low 28 bits used */
         lba = f->fat_start_lba + (cluster * 4) / 512;
         offset = (cluster * 4) & 511;
-    } else {
-        lba = f->fat_start_lba + (cluster * 3) / (512 * 2);
-        offset = (cluster * 3) & 1023;
+        if (mxs_fat_read_sector(f->blk, lba, sec, sizeof(sec)) < 0) {
+            return 0;
+        }
+        return ldl_le_p(sec + offset) & 0x0fffffffu;
     }
+
+    /*
+     * FAT16: two bytes per cluster entry.  (The previous code used the
+     * FAT12 one-and-a-half byte stride here -- (cluster * 3) / 1024 --
+     * while reading a two byte entry, so every FAT16 chain walk started
+     * at the wrong byte; FAT12 volumes are rejected at open time.)
+     */
+    lba = f->fat_start_lba + (cluster * 2) / 512;
+    offset = (cluster * 2) & 511;
     if (mxs_fat_read_sector(f->blk, lba, sec, sizeof(sec)) < 0) {
         return 0;
     }
-
-    if (f->is_fat32) {
-        return ldl_le_p(sec + offset) & fat32_mask;
-    } else {
-        if (offset == 510) {
-            uint16_t lo = lduw_le_p(sec + 510);
-            uint16_t hi;
-            uint8_t next[512];
-
-            if (mxs_fat_read_sector(f->blk, lba + 1, next, sizeof(next)) < 0) {
-                return 0;
-            }
-            hi = lduw_le_p(next);
-            return ((hi << 16) | lo) & 0x0fffffffu;
-        }
-        return lduw_le_p(sec + offset);
-    }
+    return lduw_le_p(sec + offset);
 }
 
 static int mxs_fat_read_cluster(MxsFAT *f, uint32_t cluster, uint8_t *buf,

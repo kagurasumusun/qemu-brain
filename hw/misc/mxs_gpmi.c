@@ -106,8 +106,10 @@
 #define GPMI_CTL_ECC_STATUS_CLR (1u << 5)
 #define GPMI_CTL_BUS_WIDTH_4  (1u << 8)
 #define GPMI_CTL_ECC_MODE_BCH (1u << 9)
-#define GPMI_CTL_ECC_STEP     0x3u
-#define GPMI_CTL_ECC_POS      0x3u
+/* bits[11:10] ECC_STEP and bits[15:14] ECC_POS: the shifted field masks,
+ * not plain 0x3 (which aliases the RUN/READ bits in the write mask). */
+#define GPMI_CTL_ECC_STEP     (0x3u << 10)
+#define GPMI_CTL_ECC_POS      (0x3u << 14)
 
 /* GPMI_CONFIG */
 #define GPMI_CONFIG_BCH_ECC   (1u << 0)

@@ -95,3 +95,35 @@ etm / reserved / rob / lcdif / lradc / pl011）を追加監査し、以下 6 件
   GPMI レジスタは 4 バイト境界に 32 ビットストアされるのが BSP の実使用であり、
   GPMI_DATA（コマンド/ステータスバイト経路）へのバイト書き込みも lane 0 のみで
   現状の実装で成立する。DFLPT と同種の read/write 非対称として記録に留める。
+
+## 6. 追加修正（第3弾）
+
+| # | 対象 | 不具合 | 修正 |
+|---|---|---|---|
+| 10 | `hw/arm/mxs_fat.c` | `mxs_fat_get_entry()` の非 FAT32 経路が **FAT12 の 1.5 バイト歩幅**（`(cluster*3)/1024`、`(cluster*3)&1023`）で位置を計算しながら **2 バイト（FAT16 幅）** のエントリを読んでいた。FAT16 ボリュームでは全クラスタチェーンが 1 バイトずれて歩かれ、全ファイル読み出しが誤る | 非 FAT32 経路を正しい FAT16（2 バイト/エントリ）に修正。FAT12（総クラスタ < 4085）は本リーダーの文書化済み対象外（FAT16/32 のみ）なので open 時に明示的に拒否 |
+| 11 | `hw/misc/mxs_dcp.c` | SEMA 書き込みの実行ループが **フル 32 ビット書き込み値 `v`** を発行パケット数として使っていた（SEMA は 8 ビットカウンタで、加算するのは `v & 0xff` のみ）。上位ビットが立った書き込みで最大 2^32 個の幻パケットが発行され得た | `added = v & 0xff` をループ境界に使用 |
+| 12 | `hw/misc/mxs_gpmi.c` | `GPMI_CTL_ECC_STEP`/`GPMI_CTL_ECC_POS` が **シフトされていない `0x3`** で、ファイル冒頭コメントの「bits[11:10] / bits[15:14]」と矛盾。書き込みマスクが RUN/READ ビットにエイリアスし、ECC_STEP/ECC_POS フィールドは書き込み時に常に 0 に落ちていた | `(0x3u << 10)` / `(0x3u << 14)` に修正 |
+
+### 追加で確認し「正常」と判断した箇所（第3弾）
+
+- `hw/arm/mxs.c` の機器配線（ICOLL/APBH/APBX/SSP/LRADC/LCDIF/AUART/SAIF/
+  I2C0 コーデック/EDNA2 mailbox/タッチキー）を全文確認。IRQ 番号（ICOLL 33 =
+  EDNA2 attention、59/58 = SAIF0/1、41 = GPMI/BCH、13 = HSADC 等）は i.MX28
+  割り込み表と一致。EDNA2 mailbox の doorbell(+0x3C)/command(+0xE8)/done/
+  touchkey(+0x404) の段階モデルもコメント含め整合。
+- `hw/input/brain_kbd.c`（キーマトリクス・MRSensor・タッチキー・EDNA2 attention
+  パルス）は全 1005 行を確認。行列デコード・W1C タイミング・スキャン周期モデルに
+  不整合なし。vmstate v5（touchkey_want/pub を v5 フィールド化、min v4）も正しい
+  後方互換パターン。
+- `hw/display/mxs_pxp.c` はブリッターとしてサーフェスサイズを PXP_MAX_SURFACE
+  (16 MiB) で上限付けしており、`pxp_fetch` が NULL を返した場合の早期復帰も実装
+  済み。回転/反転/スケールの座標マップも整合。
+- `hw/misc/mxs_saif.c`（FIFO レベル判定・codec 配線・W1C STAT 処理）、
+  `hw/misc/mxs_gpmi.c`（コマンド別 busy タイミング・2 相プログラム・BCH エンコード
+  レイアウト）、`hw/misc/mxs_dcp.c`（AES/SHA/CRC パケット処理・キー RAM・割り込み
+  ルーティング）に追加の不整合なし。
+- `accel/tcg/brain_stats.c` / `include/brain_stats.h` のイベントリング
+  （BRAIN_EVENT_RING=256、2 の冪）とダンプ処理（`start = pos - n`、n<=total なので
+  アンダーフローなし）は正常。
+- `hw/char/pl011.c` は標準 PL011 + BRAIN_SERTRACE デバッグ補助のみで、brain 固有の
+  変更は最小限（`mxs_trace_guest_pc()` の外部参照とゲスト PC 表示）。

@@ -623,12 +623,19 @@ static void mxs_dcp_write(void *opaque, hwaddr offset, uint64_t val,
              * The semaphore is a counting register: a write *adds* to
              * the count and each addition arms one packet.  That is the
              * behaviour both the manual and the Linux driver rely on.
+             * Only the low byte is the count that gets added (the manual
+             * defines SEMA as an 8-bit counter), so arm exactly that many
+             * packets -- the previous code bounded the loop with the full
+             * 32-bit write value, so a write with any high bit set armed
+             * up to 2^32 phantom packets.
              */
-            dcp_ch_set_reg(s, ch, DCP_CH_SEMA, prev + (v & 0xff));
+            uint32_t added = v & 0xff;
+
+            dcp_ch_set_reg(s, ch, DCP_CH_SEMA, prev + added);
             if (!dcp_channel_enabled(s, ch)) {
                 return;
             }
-            while (dcp_ch_reg(s, ch, DCP_CH_SEMA) && v) {
+            while (dcp_ch_reg(s, ch, DCP_CH_SEMA) && added) {
                 uint32_t cmd = dcp_ch_reg(s, ch, DCP_CH_CMDPTR);
 
                 /* one packet per semaphore increment just added */
@@ -636,7 +643,7 @@ static void mxs_dcp_write(void *opaque, hwaddr offset, uint64_t val,
                 if (dcp_ch_reg(s, ch, DCP_CH_STAT)) {
                     break;      /* stop on the first error */
                 }
-                v--;
+                added--;
             }
             return;
         } else if (rel < 0x30) {
