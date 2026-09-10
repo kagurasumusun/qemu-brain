@@ -50,6 +50,10 @@
 #define CTRL1_SLAVE_STOP_IRQ    (1u << 1)
 #define CTRL1_SLAVE_IRQ         (1u << 0)
 
+/* Interrupt status flags: bits[7:0] (plus CLR_GOT_A_NAK in bit 28) are
+ * set by the data engine and cleared by the guest writing 1 to them. */
+#define CTRL1_W1C_MASK          (0x100000ffu)
+
 #define STAT_BUS_BUSY           (1u << 11)
 #define STAT_CLK_GEN_BUSY       (1u << 10)
 #define STAT_DATA_ENGINE_BUSY   (1u << 9)
@@ -67,6 +71,12 @@ typedef struct MXSI2CState {
     bool trace;
     qemu_irq irq;
     I2CBus *bus;
+
+    /* State of an in-flight PIO write: bytes still to be pushed through
+     * DATA after the address byte, and whether the address was already
+     * consumed. */
+    uint32_t xfer_left;
+    bool xfer_started;
 
     /* Optional board codec attached at a single address (SGTL5000). */
     char *codec_type;
@@ -105,9 +115,9 @@ static void mxs_ack_class_init(ObjectClass *oc, const void *d)
 
 static void mxs_i2c_update_irq(MXSI2CState *s)
 {
-    /* CTRL1 low bits: even bits = enable, following odd bit = w1c status.
-     * For the bits the BSP uses (DATA_ENGINE_CMPLT at 0x40), status sits at
-     * bit 6 and enable also at bit 6 (the BSP writes 0x78 / 0x40 directly). */
+    /* CTRL1 bit 6 (DATA_ENGINE_CMPLT) doubles as the model's IRQ status:
+     * set by the engine on completion, cleared by the guest's W1C write of
+     * 0x40/0x78.  No separate enable bits are modelled. */
     uint32_t c = s->regs[0x40 >> 4];
     qemu_set_irq(s->irq, (c & CTRL1_DATA_ENGINE_CMPLT) != 0);
 }
@@ -116,6 +126,8 @@ static void mxs_i2c_finish(MXSI2CState *s, uint32_t status)
 {
     s->regs[0] &= ~CTRL0_RUN;
     s->regs[0x40 >> 4] |= status;
+    s->xfer_left = 0;
+    s->xfer_started = false;
     mxs_i2c_update_irq(s);
 }
 
@@ -255,21 +267,22 @@ static void mxs_i2c_write(void *opaque, hwaddr off, uint64_t value, unsigned siz
         break;
     }
     case 0xa0 >> 4: { /* DATA (PIO byte) */
+        bool run   = s->regs[0] & CTRL0_RUN;
+        bool start = s->regs[0] & CTRL0_PRE_SEND_START;
+        bool dir   = s->regs[0] & CTRL0_DIRECTION;
+
         if (brain_i2c_debug()) {
             fprintf(stderr, "[i2c-debug] %s DATA W 0x%02x (run=%d start=%d "
-                    "dir=%d count=%u pc=0x%08x)\n", s->name,
-                    (uint8_t)val, !!(s->regs[0] & CTRL0_RUN),
-                    !!(s->regs[0] & CTRL0_PRE_SEND_START),
-                    !!(s->regs[0] & CTRL0_DIRECTION),
-                    s->regs[0] & CTRL0_XFER_COUNT_MASK,
+                    "dir=%d count=%u left=%u pc=0x%08x)\n", s->name,
+                    (uint8_t)val, !!run, !!start, !!dir,
+                    s->regs[0] & CTRL0_XFER_COUNT_MASK, s->xfer_left,
                     (unsigned)mxs_trace_guest_pc());
         }
-        if ((s->regs[0] & CTRL0_RUN) &&
-            (s->regs[0] & CTRL0_PRE_SEND_START) &&
-            !(s->regs[0] & CTRL0_DIRECTION)) {
-            /* DATA is a 32-bit register; stale upper bytes must not
-             * leak into the 7-bit address (observed: probe byte 0x34
-             * with 0x100 leftover produced addr 0x9a). */
+        if (run && start && !dir && !s->xfer_started) {
+            /* First DATA byte of a master write: the 7-bit slave address
+             * left-shifted with the R/W bit.  DATA is a 32-bit register;
+             * stale upper bytes must not leak into the address (observed:
+             * probe byte 0x34 with 0x100 leftover produced addr 0x9a). */
             uint8_t addr = ((uint8_t)val) >> 1;
             if (brain_i2c_debug()) {
                 fprintf(stderr, "[i2c-debug] %s START_SEND addr=0x%02x "
@@ -280,27 +293,29 @@ static void mxs_i2c_write(void *opaque, hwaddr off, uint64_t value, unsigned siz
                 mxs_i2c_finish(s, CTRL1_NO_SLAVE_ACK);
                 break;
             }
-            /* first byte is address; remaining bytes are written via
-             * subsequent DATA writes in a RETAIN-clock xfer -- but the
-             * BSP address probe is a single-byte xfer, so finish now. */
+            /* XFER_COUNT includes the address byte: a count of 1 is an
+             * address-only probe; larger counts leave (count - 1) payload
+             * bytes to be pushed through further DATA writes. */
             unsigned count = s->regs[0] & CTRL0_XFER_COUNT_MASK;
+            s->xfer_started = true;
+            s->xfer_left = count > 1 ? count - 1 : 0;
             if (count <= 1) {
                 if (s->regs[0] & CTRL0_POST_SEND_STOP)
                     i2c_end_transfer(s->bus);
                 mxs_i2c_finish(s, CTRL1_DATA_ENGINE_CMPLT);
-            } else {
-                /* multi-byte PIO write: wait for more DATA writes */
             }
-        } else if (s->regs[0] & CTRL0_RUN) {
-            /* continuation byte of a write xfer */
+        } else if (run && s->xfer_started && s->xfer_left > 0) {
+            /* Payload byte of a multi-byte write.  Count down against the
+             * XFER_COUNT latched at start time -- the guest never rewrites
+             * CTRL0 between DATA writes, so re-reading its count here (as
+             * the old code did) could never reach zero. */
             if (brain_i2c_debug()) {
                 fprintf(stderr, "[i2c-debug] %s SEND 0x%02x pc=0x%08x\n",
                         s->name, (uint8_t)val,
                         (unsigned)mxs_trace_guest_pc());
             }
             i2c_send(s->bus, (uint8_t)val);
-            unsigned count = s->regs[0] & CTRL0_XFER_COUNT_MASK;
-            if (count <= 1) {
+            if (--s->xfer_left == 0) {
                 if (s->regs[0] & CTRL0_POST_SEND_STOP)
                     i2c_end_transfer(s->bus);
                 mxs_i2c_finish(s, CTRL1_DATA_ENGINE_CMPLT);
@@ -308,8 +323,17 @@ static void mxs_i2c_write(void *opaque, hwaddr off, uint64_t value, unsigned siz
         }
         break;
     }
-    case 0x48 >> 4:  /* CTRL1_CLR */
-        s->regs[0x40 >> 4] &= ~val;
+    case 0x40 >> 4:  /* CTRL1 (plus its +0x4 SET / +0x8 CLR / +0xc TOG) */
+        if (MXS_BANK_OP(off) == MXS_OP_WRITE) {
+            /* The interrupt flags in bits[7:0] (and CLR_GOT_A_NAK in bit
+             * 28) are write-1-to-clear; the WinCE BSP acknowledges by
+             * writing 0x78 / 0x40 straight at CTRL1.  Keep the bits it
+             * wrote as 0 and clear the ones it wrote as 1, while the
+             * SET/CLR/TOG aliases keep the value mxs_bank_apply()
+             * already computed. */
+            s->regs[idx] = (val & ~CTRL1_W1C_MASK) |
+                           (old & ~val & CTRL1_W1C_MASK);
+        }
         mxs_i2c_update_irq(s);
         break;
     }
@@ -327,6 +351,8 @@ static void mxs_i2c_reset(DeviceState *dev)
 {
     MXSI2CState *s = MXS_I2C_REAL(dev);
     memset(s->regs, 0, sizeof(s->regs));
+    s->xfer_left = 0;
+    s->xfer_started = false;
 }
 
 static void mxs_i2c_realize(DeviceState *dev, Error **errp)

@@ -127,3 +127,16 @@ etm / reserved / rob / lcdif / lradc / pl011）を追加監査し、以下 6 件
   アンダーフローなし）は正常。
 - `hw/char/pl011.c` は標準 PL011 + BRAIN_SERTRACE デバッグ補助のみで、brain 固有の
   変更は最小限（`mxs_trace_guest_pc()` の外部参照とゲスト PC 表示）。
+
+## 7. 追加修正（第4弾）: mxs_i2c
+
+| # | 不具合 | 修正 |
+|---|---|---|
+| 13 | 複数バイト PIO 送信（書き込み）が完了できない。DATA 書き込みハンドラは送信先アドレス判定に CTRL0 の PRE_SEND_START を使うが、このビットはゲストが消さないため全 DATA バイトが「アドレス」扱いで再 START され、継続バイト経路（`else if (RUN)`）は到達不能。さらに完了判定が「書き換えられない CTRL0.XFER_COUNT を毎回読み直す」ため永遠に 0 にならず、`count<=1` でしか完了しなかった | 送信状態 `xfer_started` / 残りバイト数 `xfer_left` を追加。先頭 DATA = アドレス（`i2c_start_send`）、XFER_COUNT はアドレス含みなので `xfer_left = count-1`。以降の DATA は `xfer_left` を減算し、0 で STOP + `DATA_ENGINE_CMPLT` 完了。`finish()` / `reset()` で状態を初期化 |
+| 14 | CTRL1（+0x40）書き込みの扱いが破綻。スイッチは `case 0x48>>4`（idx 4）で、+0x40 直書き込み・+0x44 SET・+0x48 CLR・+0x4c TOG を区別せず、`regs[4]=val` の直後に `regs[4] &= ~val` を実行するため **CTRL1 ワード全体が常に 0 に潰れた**（SET エイリアスで enable を立てても即消滅。直書き込みは status ビットのみの場合に偶然クリアできただけ）。IRQ 更新も SET/CLR/TOG では意味をなさなかった | `MXS_BANK_OP(off)` でエイリアスを区別。+0x40 直書き込みは status ビット [7:0] と CLR_GOT_A_NAK(bit28) を **W1C**（書いた 1 のビットをクリア）として `(val & ~W1C) | (old & ~val & W1C)` にし、SET/CLR/TOG は `mxs_bank_apply()` の結果をそのまま維持。いずれも `mxs_i2c_update_irq()` を呼ぶ |
+
+- CTRL1 のレイアウトは Linux `drivers/i2c/busses/i2c-mxs.c` と一致することを確認
+  （`MXS_I2C_CTRL1_CLR = 0x48`、`DATA_ENGINE_CMPLT_IRQ=0x40`、`NO_SLAVE_ACK_IRQ=0x20`、
+  各 *_IRQ ビットは write-1-to-clear）。BSP が直接 0x78 / 0x40 を書くのは ack（クリア）。
+- vmstate は regs[] のみ（`xfer_left`/`xfer_started` は一時状態のため他 mxs 機器と同じ
+  慣例で含めない）。
