@@ -723,10 +723,13 @@ static void bu26154_in_cb(void *opaque, int avail_b)
         if (!got) {
             break;
         }
+        /* Each captured byte must land in its own ring slot.  The old
+         * code computed the write pointer from in_len inside the loop
+         * without advancing it, so a whole chunk collapsed onto a single
+         * slot while in_len still grew by @got -- the ring then read
+         * back one real byte followed by (got - 1) stale ones. */
         for (size_t i = 0; i < got; i++) {
-            unsigned wp = (s->in_start + s->in_len) % BU_RING;
-
-            s->inbuf[wp] = tmp[i];
+            s->inbuf[(s->in_start + s->in_len + i) % BU_RING] = tmp[i];
         }
         s->in_len += got;
         s->stats.adc_in_bytes += got;

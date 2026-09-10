@@ -215,8 +215,7 @@ static void sgtl5000_in_cb(void *opaque, int avail_b)
             break;
         }
         for (size_t i = 0; i < got; i++) {
-            unsigned wp = (s->in_start + s->in_len) % SGTL_RING;
-            s->inbuf[wp] = tmp[i];
+            s->inbuf[(s->in_start + s->in_len + i) % SGTL_RING] = tmp[i];
         }
         s->in_len += got;
         s->stats.adc_in_bytes += got;

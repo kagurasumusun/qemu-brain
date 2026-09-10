@@ -175,3 +175,48 @@ etm / reserved / rob / lcdif / lradc / pl011）を追加監査し、以下 6 件
   edge/level 両対応、PIN2IRQ クリア時の IRQ 再評価。BSP 逆アセンブル由来のコメントと整合。
 - `hw/audio/sgtl5000.c` — 偶数アドレス 16 ビットレジスタ（`regs[reg >> 1]`）、
   `reg > SGTL_MAX_REG` ガード、defaults テーブルは全エントリ 0x013a 未満。不整合なし。
+
+## 9. 追加修正（第6弾）: 音声 codec（brain 実機 = BU26154）
+
+ユーザー指摘の確認: brain マシンの実機 codec は **LAPIS/ROHM BU26154MUV**（CE レジストリ
+WaveDev = `wavedev2_BU26154.dll`、I2C0 @ 0x1a）。SGTL5000（0x0a）は Linux/Brainux DTS 用の
+別構成で、マシンの既定 wiring は既に `bu26154`（`brain_codec_select()` のデフォルト）。
+前回の audit で SGTL5000 側だけ読んでいたのを是正し、今回は実機側の `bu26154.c` 全文
+（1330 行）を audit した。
+
+| # | 対象 | 不具合 | 修正 |
+|---|---|---|---|
+| 17 | `hw/audio/bu26154.c` `bu26154_in_cb()` | ホスト音声バックエンドからの ADC 取り込みループが、**書き込みポインタをループ内で進めずに `in_len` から毎回同じスロットを計算**していた（`wp = (in_start + in_len) % BU_RING` がループ中不変）。1 回の `audio_be_read()` で得たチャンク全体が **1 スロットに潰れて**書き込まれ、`in_len` だけ `got` 分増えるため、再生側には「実データ 1 バイト + (got-1) バイトのゴミ」が流れた | ループ変数 `i` を使って `(in_start + in_len + i) % BU_RING` に各バイトを書き込む |
+| 18 | `hw/audio/sgtl5000.c` `sgtl5000_in_cb()` | 上記と**同一のバグ**（同じ実装を流用）。SGTL5000 は `-machine … codec=sgtl5000` で選択可能なため残存する構成であり、同様に修正 | 同修正 |
+
+### 追加: SGTL5000 への陳腐化した参照の是正（brain 実機は BU26154）
+
+- `hw/arm/mxs.c` — `BrainMachineState.sgtl5000` フィールド名が誤解を招くため
+  `codec_dev` に改名（中身は `brain_codec_select()` が選んだ codec。既定 BU26154）。
+  `hmp_brain_i2c`/`brain_micfill`/`brain_sgtl` と `brain_init()` の参照も追随。
+- `hw/misc/mxs_i2c.c` — struct と realize のコメントが「board codec = SGTL5000 @ 0x0a」
+  と誤記していたのを「BU26154 @ 0x1a（Brain）／ SGTL5000 @ 0x0a（Linux-DTS 構成）」に是正。
+- `include/hw/arm/mxs.h` — `mxs_i2c_codec_device()` のコメントを「BU26154 on the Brain,
+  or SGTL5000 for the Linux-DTS wiring」に是正。
+- `include/hw/arm/mxs_saif.h` — 「Link a SAIF to the board's SGTL5000 codec」という
+  コメントを、実機 BU26154 既定・型によるディスパッチ（`mxs_saif.c` の
+  `object_dynamic_cast(TYPE_BU26154/TYPE_SGTL5000)`）の説明に是正。
+
+### bu26154.c を全文 audit して「正常」と判断した箇所
+
+- I2C プロトコル: 8bit レジスタインデックス、even=read / odd=write アドレス、
+  連続転送でインデックス +2、START/FINISH での `want_idx` 管理 — データシート記述と一致。
+- MAPCON（0x1c/0x1d）グローバル選択、0x3 禁止（p.48）を拒否。SOFTRST（0x11 bit0）は
+  CPU インターフェース＋自レジスタのみリセットでレジスタファイルは維持（p.46）。
+- OSRSEL 0x3 禁止、RECPLAY の「stop を経由しない状態遷移禁止」と MCTIME 充電窓
+  （40/fs + 128/fs/step）— いずれも実装済み。
+- ゲイン則: PDATT/RDVOL/Effect 共通 0.5dB 減衰則（0x00..0x6E 禁止→mute、0x6F mute、
+  0x70..0xFF −71.5..0dB）、AVVOL[5:0]（0x00 mute, 0x01..0x09 −28..−2dB, 0x0a 0dB,
+  0x0b..0x19 +2..+18dB, 0x1a.. 未定義→+18dB クランプ）、PGAATT 0/−9dB、MINVOL 6..27dB。
+- 電源/クロックゲート: VMIDCON、DACPW(DACREN|DACLEN)、AINPW(ADCEN/PGAEN/PGAATT)、
+  AREFPW(MICBEN)、CLKEN/CLKIO の PLLOE+PLLEN/MCLKEN 規則、MCTIME 窓、SPPW b02 ハード固定。
+- データ経路: DAC は mono（L+R 平均）→ PDATT→Effect→AVVOL の Q15 ゲイン連鎖を適用して
+  stereo S16LE フレームでステージング、SAIF 側へ 48 kHz でプッシュ。ADC は host 入力→
+  PGA→MICVOL→RDVOL のゲイン連鎖、mic bias/amp 停止時・DVMUTE 時は無音。整合。
+- vmstate は regs/map/cur_idx/want_idx/リング状態を保持、post_load で dac_on/adc_on を
+  レジスタファイルから再計算。正しいパターン。

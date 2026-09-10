@@ -191,8 +191,9 @@ typedef struct BrainMachineState {
     /* Board codec on I2C0: LAPIS/ROHM BU26154MUV (real CE wave device,
      * wavedev2_BU26154.dll) at address 0x1a, wired to SAIF0 (playback
      * DAC) and SAIF1 (capture ADC).  The pre-S97 SGTL5000 wiring came
-     * from the Linux DTS, which is not what the WinCE image drives. */
-    DeviceState *sgtl5000;
+     * from the Linux DTS, which is not what the WinCE image drives.
+     * Holds whichever codec the machine property selects. */
+    DeviceState *codec_dev;
     char *codec;                 /* 'bu26154' | 'sgtl5000' | 'none' */
     DeviceState *saif0_dev;
     DeviceState *saif1_dev;
@@ -697,11 +698,11 @@ void hmp_brain_i2c(Monitor *mon, const QDict *qdict)
         return;
     }
     bms = BRAIN_MACHINE(current_machine);
-    if (!bms->sgtl5000) {
+    if (!bms->codec_dev) {
         monitor_printf(mon, "brain_i2c: no board codec attached\n");
         return;
     }
-    cd = bms->sgtl5000;
+    cd = bms->codec_dev;
     bus = I2C_BUS(qdev_get_parent_bus(cd));
     addr = I2C_SLAVE(cd)->address;
     reg = (uint16_t)qdict_get_int(qdict, "reg") & 0xffff;
@@ -790,7 +791,7 @@ void hmp_brain_micfill(Monitor *mon, const QDict *qdict)
         return;
     }
     bms = BRAIN_MACHINE(current_machine);
-    cd = bms->sgtl5000;
+    cd = bms->codec_dev;
     if (!cd) {
         monitor_printf(mon, "brain_micfill: no board codec attached\n");
         return;
@@ -905,7 +906,7 @@ void hmp_brain_sgtl(Monitor *mon, const QDict *qdict)
         return;
     }
     bms = BRAIN_MACHINE(current_machine);
-    cd = bms->sgtl5000;
+    cd = bms->codec_dev;
     if (!cd) {
         monitor_printf(mon, "brain_sgtl: no board codec attached\n");
         return;
@@ -2770,10 +2771,10 @@ static void brain_init(MachineState *machine)
     sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, MXS_I2C0_BASE);
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,
                        qdev_get_gpio_in(icoll, MXS_IRQ_I2C0));
-    bms->sgtl5000 = mxs_i2c_codec_device(dev);
-    if (bms->sgtl5000) {
-        mxs_saif_set_codec(saif0, bms->sgtl5000, true);
-        mxs_saif_set_codec(saif1, bms->sgtl5000, false);
+    bms->codec_dev = mxs_i2c_codec_device(dev);
+    if (bms->codec_dev) {
+        mxs_saif_set_codec(saif0, bms->codec_dev, true);
+        mxs_saif_set_codec(saif1, bms->codec_dev, false);
     }
     mxs_create_named_irq(TYPE_MXS_I2C_REAL, "i2c1", MXS_I2C1_BASE, 0x2000,
                          icoll, MXS_IRQ_I2C1);

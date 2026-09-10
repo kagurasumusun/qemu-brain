@@ -4,7 +4,10 @@
 #define TYPE_MXS_SAIF "mxs-saif"
 
 /*
- * Link a SAIF to the board's SGTL5000 codec (hw/audio/sgtl5000.c).
+ * Link a SAIF to the board codec: the Brain's LAPIS/ROHM BU26154
+ * (hw/audio/bu26154.c) by default, or an SGTL5000 (hw/audio/sgtl5000.c)
+ * for the Linux-DTS configuration.  The dispatch in mxs_saif.c is by
+ * device type, so either codec can be wired.
  *
  * playback = true  : the SAIF's transmit FIFO drains into the codec DAC
  *                    (i.MX28 reference wiring: SAIF0 is the I2S master

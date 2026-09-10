@@ -78,7 +78,9 @@ typedef struct MXSI2CState {
     uint32_t xfer_left;
     bool xfer_started;
 
-    /* Optional board codec attached at a single address (SGTL5000). */
+    /* Optional board codec attached at a single address.  On the Brain
+     * this is the LAPIS/ROHM BU26154MUV @ 0x1a; the machine can also
+     * select an SGTL5000 @ 0x0a (Linux DTS wiring) or none. */
     char *codec_type;
     uint8_t codec_addr;
     char *codec_audiodev;
@@ -366,8 +368,9 @@ static void mxs_i2c_realize(DeviceState *dev, Error **errp)
     sysbus_init_irq(sbd, &s->irq);
     s->bus = i2c_init_bus(dev, "i2c-bus");
     /*
-     * A real board codec (SGTL5000 @ 0x0a) occupies its address: create
-     * it first so the ack-all sweep below does not shadow it.  The codec
+     * The real board codec (BU26154 @ 0x1a on the Brain; SGTL5000 @ 0x0a
+     * for the Linux-DTS configuration) occupies its address: create it
+     * first so the ack-all sweep below does not shadow it.  The codec
      * carries its own "audiodev" property (standard QEMU device audio);
      * when the machine has one we pass it through.
      */

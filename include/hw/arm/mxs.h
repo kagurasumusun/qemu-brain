@@ -230,7 +230,8 @@ const MXSDmaOps *mxs_ssp_get_dma_ops(void);
 /* keyboard: needs to know which pinctrl it is wired to */
 void brain_kbd_set_pinctrl(DeviceState *kbd, DeviceState *pinctrl);
 
-/* mxs-i2c-real: board codec (SGTL5000) attached at realize time, or NULL */
+/* mxs-i2c-real: board codec (BU26154 on the Brain, or SGTL5000 for the
+ * Linux-DTS wiring) attached at realize time, or NULL when none. */
 DeviceState *mxs_i2c_codec_device(DeviceState *dev);
 
 #endif /* HW_ARM_MXS_H */
