@@ -140,3 +140,38 @@ etm / reserved / rob / lcdif / lradc / pl011）を追加監査し、以下 6 件
   各 *_IRQ ビットは write-1-to-clear）。BSP が直接 0x78 / 0x40 を書くのは ack（クリア）。
 - vmstate は regs[] のみ（`xfer_left`/`xfer_started` は一時状態のため他 mxs 機器と同じ
   慣例で含めない）。
+
+## 8. 追加修正（第5弾）: 定義・コメントの不整合
+
+| # | 対象 | 不整合 | 修正 |
+|---|---|---|---|
+| 15 | `hw/misc/mxs_gpmi.c` | ファイル冒頭コメントは `GPMI_CONFIG` の BCH_BYTES を「bits[2:1]」としているが、マクロは **シフトされていない `0x3u`**（bits[1:0]）で矛盾（ECC_STEP と同じクラス。現状未使用マクロだが後続修正の誤誘導源） | `(0x3u << 1)` に修正 |
+| 16 | `hw/misc/mxs_syscon.c` | HW_DIGCTL_MPTEn_LOC のコメントが「DIGCTL base + 0x500 + **4*n**」と誤記。実際は **0x10 間隔**（0x500/0x510/.../0x5f0、u-boot `regs-digctl.h` の構造体配置と一致。実装 `DIG_MPTE0 + n` も 0x10 間隔で、コードは正しい） | コメントを「0x10*n」に修正 |
+
+### 第5弾で全文確認し「正常」と判断した箇所
+
+- `hw/intc/mxs_icoll.c` — 割り込み優先度・in-service レベル・RSE モードの VECTOR 読み取り
+  ack・LEVELACK・SFTRST 時の intr 全クリア、autorelease（発信源消滅時の in-service 解放）。
+  不整合なし。
+- `hw/timer/mxs_timrot.c` — レジスタ配置（ROTCTRL 0x00 / TIMCTRLn 0x20+0x40n / VERSION
+  0x120）を u-boot `regs-timrot.h`（mxs_reg_32 展開で各レジスタ 0x10）と照合し一致。
+  SELECT/PRESCALE デコード（0xb=32k,0xc=8k,0xd=4k,0xe=1k,0xf=24M）も一致。TIMCTRLn.IRQ の
+  W1C 処理は実装済み。MATCH モードの fired_match による再発火抑止も正しい。
+- `hw/dma/mxs_apbh.c` / `hw/dma/mxs_apbx.c` — CCW チェーン歩行・PIO ワード・SEMA（低 8 ビット
+  加算＋SEMAPHORE フラグで減算）・CHAIN/IRQONCMPLT・RESET_CHANNEL 自己クリア、両者一致。
+  不整合なし（vmstate 未登録は WinCE 用途では実害なし、と判断）。
+- `hw/sd/mxs_ssp.c` — CTRL1 の IRQ ペア（奇数=status, 偶数=enable）走査・BLOCK_COUNT/
+  BLOCK_LOG2 デコード・複数ブロック STOP_TRANSMISSION 合成・FIFO ストリーミング・
+  END_CMD の「新コマンド開始でクリア」を確認。不整合なし。
+- `hw/misc/mxs_perfmon.c` — SNAP/CLR 自己クリア、SFTRST 復帰、統計 shadow レジスタ、
+  24 MHz 換算の ACTIVE_CYCLE 積算。不整合なし。
+- `hw/misc/mxs_dflpt.c` / DIGCTL MPTE — SPAN(26:24)/LOC(11:0)/DIS(31) のデコードと
+  syscon 側の説明が一致。DFLPT の fixed PTE 2048（0x80000C12、AP/DOMAIN/B のみ書き込み可）も
+  RM 記述と整合。
+- `hw/misc/mxs_etm.c` / `hw/misc/mxs_rob.c` / `hw/misc/mxs_reserved.c` — リセット値配列の
+  サイズと `.nwords` が一致（hsadc 12, spdif 7, dram 190, can 608, enet 418, swi 8192,
+  audioout 1）。RO マスク・word/bank 両スタイルの使い分けも正しい。
+- `hw/gpio/mxs_pinctrl.c` — IRQSTAT/IRQEN/PIN2IRQ の三重 AND でバンク割り込みを駆動、
+  edge/level 両対応、PIN2IRQ クリア時の IRQ 再評価。BSP 逆アセンブル由来のコメントと整合。
+- `hw/audio/sgtl5000.c` — 偶数アドレス 16 ビットレジスタ（`regs[reg >> 1]`）、
+  `reg > SGTL_MAX_REG` ガード、defaults テーブルは全エントリ 0x013a 未満。不整合なし。

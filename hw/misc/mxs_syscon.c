@@ -153,7 +153,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(MXSSysconState, MXS_SYSCON)
 /*
  * Default First-Level Page Table Movable PTE Locator registers
  * (HW_DIGCTL_MPTE0_LOC .. HW_DIGCTL_MPTE15_LOC, DIGCTL base + 0x500 +
- * 4*n, RM 19.4.50-65).  Each holds DIS(31) | RSVD1(30:27) |
+ * 0x10*n, RM 19.4.50-65).  Each holds DIS(31) | RSVD1(30:27) |
  * SPAN(26:24) | RSVD0(23:12) | LOC(11:0).  Reset value is n.
  */
 #define DIG_MPTE0           0x50

@@ -113,8 +113,8 @@
 
 /* GPMI_CONFIG */
 #define GPMI_CONFIG_BCH_ECC   (1u << 0)
-#define GPMI_CONFIG_BCH_BYTES 0x3u
-#define GPMI_CONFIG_PAGE_SIZE 0x3u
+#define GPMI_CONFIG_BCH_BYTES (0x3u << 1)   /* bits[2:1] */
+#define GPMI_CONFIG_PAGE_SIZE 0x3u          /* bits[29:28], see ..._SH below */
 #define GPMI_CONFIG_PAGE_SIZE_SH 28
 
 /* GPMI_INT / GPMI_INT_EN */
