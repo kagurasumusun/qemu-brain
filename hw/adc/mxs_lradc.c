@@ -79,42 +79,55 @@
 /*
  * Plate counts the PW-SH6 resistive digitiser presents to the LRADC.
  *
- * These are hardware constants of the panel, measured off the unit's own
- * factory calibration record, which the boot registry carries as
- * HARDWARE\DEVICEMAP\TOUCH "CalibrationData":
+ * These are hardware constants of the panel, derived from the driver's own
+ * live calibration, which is the authoritative source: it is what consumes
+ * the counts.  The boot registry (HARDWARE\DEVICEMAP\TOUCH "CalibrationData")
+ * records the raw counts at five inset targets:
  *
  *   "1931,1961  889,2993  888,906  2961,920  2958,3039"
  *    centre      top-left    bottom-left  bottom-right  top-right
  *
- * (order established below, not assumed: it is the only reading under which
- * the four corner records are mutually consistent, see the note there).  A
- * 5-point calibration taps inset targets, so these raws are *not* the counts
- * at the glass edges, they are the counts at the targets, and the panel's law
- * is the straight line through them:
+ * (order established below, not assumed: it is the only assignment under
+ * which the four corner records are mutually consistent).  A 5-point
+ * calibration taps inset targets, so those raws are the counts at the
+ * *targets*, not at the glass edges, and are not usable as plate endpoints
+ * directly.  The panel's law is instead the inverse of the WinCE TPDriver's
+ * affine transform, whose live coefficient block sits at BootArgs PA
+ * 0x47f9007c as {633, 2811, -36, 320, -2502, 507}:
  *
- *   X: raw 888.5 (left pair) and 2959.5 (right pair); the driver's transform
- *      x' = (raw*633 - 36*2811... /2811 puts those at logical x = 164 and
- *      631, i.e. the classic ~20% inset, so raw = 160 + 4.4347 * x'.
- *   Y: raw 3016 (upper pair, y' = 119..124) and 913 (lower pair, y' =
- *      389..391) -> raw = 3968 - 7.83 * y'.  The Y plate count therefore
- *      *decreases* as the finger moves down: the axis is inverted at the
- *      panel level, which is what the driver's negative Y coefficient
- *      compensates for.
+ *   x' = (633 * rawX - 36 * 2811) / 2811
+ *   y' = (320 * rawY + 507 * -2502) / -2502
+ *      = (1268514 - 320 * rawY) / 2502
  *
- * Two independent checks agree with that line, which is why it is trusted:
- * the driver's own acceptance rectangle is  x' - 0x50 > 0x2cf  (rejects
- * x' < 80 and x' > 799, i.e. it expects a calibrated 0..799 logical range),
- * and its live BootArgs coefficient block at PA 0x47f9007c is
- * {633, 2811, -36, 320, -2502, 507} -- the exact inverse of the fit above,
- * mapping raw 160..3704 onto 0..799 and raw 3960..219 onto 0..479.
+ * Both formulas are checked against the registry record: the five targets
+ * decode to logical (399,256), (164,124), (164,391), (631,389), (630,118),
+ * i.e. the classic ~20% inset target ring, and the driver's acceptance
+ * rectangle is x' - 0x50 > 0x2cf (it rejects x' < 80 and x' > 799, so it
+ * expects a calibrated 0..799 logical range).  Inverting the transform gives
+ * the plate law in the finger's frame -- the guest's picture -- where fx is
+ * picture columns from the left edge of the driven picture and fy rows from
+ * its top row:
  *
- * so the counts at the *edges of the glass* -- what the plates show when a
- * finger is on the outermost row or column of the panel -- are the four
- * constants below.  They are stated in the frame the finger arrives in, which
- * is the guest's picture: fx is picture pixels from the left edge of the driven
- * picture, fy from its top row.  The span is the calibrated area, 800 pixels
- * across and 480 down, i.e. 3552 counts over 800 (4.44/pixel) and 3753 counts
- * over 480 (7.82/pixel).
+ *   rawX = 2811 * (fx + 36) / 633        -> 160 at fx = 0, 3708 at fx = 799
+ *   rawY = (1268514 - 2502 * fy) / 320   -> 3964 at fy = 0,  219 at fy = 479
+ *
+ * The calibrated span is 800 columns by 480 rows, so the glass is 3552 X
+ * counts (4.44 per pixel) and 3753 Y counts (7.81875 per pixel).  The Y plate
+ * count *decreases* as the finger moves down: the axis is inverted at the
+ * panel level, which is what the driver's negative Y coefficient compensates
+ * for, and the constants below therefore carry that inversion
+ * (BRAIN_PLATE_Y_AT_PIC0 > BRAIN_PLATE_Y_AT_PIC480).
+ *
+ * The four constants are stated "one pixel past" the edge (fx = 800,
+ * fy = 480) so the interpolation in mxs_lradc_plate_count() spans the whole
+ * calibrated area without an off-by-one: the last column still interpolates
+ * to 3708 and the last row to 219.  Both stay inside the converter's 0..4095
+ * rails, as they must on real silicon.  Nothing here clamps to a "usable
+ * window": clamping the plates to the target band 888..2961 is the bug that
+ * hid 42 % of the glass and ran the Y axis the wrong way.  A finger outside
+ * the calibrated span does drive the plate past it, and it is the *driver*
+ * that discards such a sample; the model reproduces the panel, never the
+ * driver's rejection.
  *
  * The panel's own array runs transversally to that frame: a picture column is
  * an array row, and a picture *row* is an array *column counted from the far
@@ -126,14 +139,6 @@
  * then reports y = 480 - clicked, which the UI reads as "taps do nothing"
  * because every finger lands on the mirrored row.  Naming them after the frame
  * they are evaluated in makes the two axes read alike.
- *
- * Both stay inside the converter's 0..4095 rails, as they must on real
- * silicon.  Nothing here clamps to a "usable window": clamping the plates to
- * 888..2961 is the bug that hid 42 % of the glass and ran the Y axis the
- * wrong way.  A finger outside the calibrated span does drive the plate past
- * it, and it is the *driver* that discards such a sample (its rectangle test
- * is x' - 0x50 > 0x2cf); the model reproduces the panel, never the driver's
- * rejection.
  */
 #define BRAIN_PLATE_X_AT_PIC0   160     /* X wiper at the left edge */
 #define BRAIN_PLATE_X_AT_PIC800 3712    /* and one pixel past the right edge */
@@ -235,15 +240,24 @@ static int clamp32(int v, int lo, int hi)
 }
 
 /*
- * Round to nearest: truncating here costs a systematic half pixel on every
- * sample.  Clamp only to the converter's rails, because a finger outside the
- * calibrated span really does drive the plate past it and the *driver* is the
- * thing that rejects such a sample (its rectangle test is x' - 0x50 > 0x2cf).
+ * Round to nearest, not towards zero: C integer division truncates, so the
+ * naive "+ span / 2" bias would push a negative-slope axis (the Y plate, whose
+ * count decreases down the glass) half a step in the wrong direction and make
+ * the last row report one count too many.  Clamp only to the converter's
+ * rails: a finger outside the calibrated span really does drive the plate
+ * past it and the *driver* is the thing that rejects such a sample (its
+ * rectangle test is x' - 0x50 > 0x2cf).
  */
 static int mxs_lradc_plate_count(int pos, int span, int at_first, int at_last)
 {
-    int64_t sgn = (int64_t)at_last - at_first;
-    int64_t v = at_first + (sgn * pos + span / 2) / span;
+    int64_t n = (int64_t)(at_last - at_first) * pos;
+    int64_t v;
+
+    if (n >= 0) {
+        v = at_first + (n + span / 2) / span;
+    } else {
+        v = at_first - (-n + span / 2) / span;
+    }
 
     return clamp32((int)v, 0, LRADC_MAX_VALUE);
 }
@@ -468,7 +482,24 @@ static void mxs_lradc_run_end(MXSLradcState *s)
 
 static void mxs_lradc_convert(MXSLradcState *s, uint32_t channels)
 {
+    uint32_t phys_channels = 0;
     int i;
+
+    /*
+     * The plate semantics in mxs_lradc_sample() are expressed in *physical*
+     * channels (CH2 = XPUL, CH3 = YPLL), while the DELAY trigger field
+     * enumerates *virtual* channels that HW_LRADC_CTRL4 maps onto physical
+     * ones.  Translate the trigger mask once and hand the sampler the
+     * physical view: with the identity map the two are identical (which is
+     * why the virtual mask used to be passed straight through), but a
+     * non-identity CTRL4 would otherwise compare physical channel numbers
+     * against a virtual mask and mis-classify the plate.
+     */
+    for (i = 0; i < LRADC_NCHANNELS; i++) {
+        if (channels & (1u << i)) {
+            phys_channels |= 1u << ((s->regs[LRADC_CTRL4] >> (i * 4)) & 0xf);
+        }
+    }
 
     for (i = 0; i < LRADC_NCHANNELS; i++) {
         int phys;
@@ -479,7 +510,7 @@ static void mxs_lradc_convert(MXSLradcState *s, uint32_t channels)
         }
         /* HW_LRADC_CTRL4 maps the virtual channel onto a physical one */
         phys = (s->regs[LRADC_CTRL4] >> (i * 4)) & 0xf;
-        sample = mxs_lradc_sample(s, phys, channels);
+        sample = mxs_lradc_sample(s, phys, phys_channels);
         s->regs[LRADC_CH0 + i] =
             (s->regs[LRADC_CH0 + i] & 0xfffc0000) | sample;
         s->regs[LRADC_CTRL1] |= 1u << i;
@@ -746,9 +777,10 @@ static void mxs_lradc_set_touch(DeviceState *dev, int x, int y, bool down)
      * Touchkey strip.  On the real Brain the capacitive touchkey pads sit
      * along the edge of the panel, in the band of glass the LCD does not
      * paint: the resistive plate's factory calibration ends at x' = 799
-     * (raw span 888..2961), so a touch beyond the calibrated columns is not
-     * plate input but a key for the EDNA2 MCU touchkey scanner, whose scan
-     * posts the pressed pad to mailbox +0x404 and raises the attention line.
+     * (raw counts 160..3708 across the glass, see the plate law above), so a
+     * touch beyond the calibrated columns is not plate input but a key for
+     * the EDNA2 MCU touchkey scanner, whose scan posts the pressed pad to
+     * mailbox +0x404 and raises the attention line.
      *
      * The boundary is therefore the *calibrated span*, which is a property
      * of the module, and not the width of whatever the guest happens to be

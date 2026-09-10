@@ -675,8 +675,9 @@ void hmp_brain_lilo(Monitor *mon, const QDict *qdict)
  * Analysis aids for the board codec (brain-i2c / brain-sgtl).
  *
  * brain_i2c drives the board codec over its I2C bus directly from the
- * monitor.  It is an explicit test aid (like brain_pwrite / brain_touch):
- * it performs real I2C transactions against the emulated codec, exactly
+ * monitor.  It is an explicit test aid (like the other brain_* monitor
+ * aids -- brain_micfill, brain_saifpump, brain_sgtl): it performs real
+ * I2C transactions against the emulated codec, exactly
  * as the WinCE audio driver would, so audio plumbing can be exercised
  * and measured without needing the guest to reach the pronunciation UI.
  * The transaction format follows the codec actually wired (BU26154:
@@ -3051,9 +3052,9 @@ static void brain_instance_init(Object *obj)
      * landscape display, so the glass is mounted turned.  90 degrees is the
      * direction that puts the guest's picture on the console the way the
      * device shows it -- measured as the date/time dialog reading left to
-     * right with the soft-key column down its left edge (runs/s89).  This used
-     * to
-     * be 270, which was compensating for the LCDIF ignoring MADCTL: the boot
+     * right with the soft-key column down its left edge (runs/s89).  This
+     * used to be 270, which was compensating for the LCDIF ignoring MADCTL:
+     * the boot
      * loader programs MADCTL = 0xd0 (MY|MX, a half turn of the scan order) and
      * the model now applies that itself, so the mount must not add the same
      * half turn again.  With both, the console came out upside down and every

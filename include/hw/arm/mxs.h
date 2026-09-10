@@ -158,8 +158,9 @@
 #define TYPE_MXS_AUDIOOUT   "mxs-audioout"
 /*
  * The panel's GRAM is what a finger is on top of: convert a normalised
- * absolute input axis into a GRAM coordinate.  Returns false if there is no
- * panel to ask.
+ * absolute input axis into a position relative to the guest's picture, which
+ * is the frame the plate law in mxs_lradc.c is expressed in.  Returns false
+ * if there is no panel to ask or no picture in it yet.
  */
 bool mxs_lcdif_touch_position(DeviceState *dev, int axis_x, int axis_y,
                               int *px, int *py);

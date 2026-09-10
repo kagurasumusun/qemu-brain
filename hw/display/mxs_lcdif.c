@@ -146,6 +146,13 @@ typedef struct MXSLcdifState {
      * glass.
      */
     uint16_t pic_x0, pic_y0, pic_x1, pic_y1;
+    /*
+     * Whether the corresponding picture extent above has been observed in a
+     * scan that can actually define it (a scan spanning the full other axis).
+     * Until then the box falls back to the whole panel, which is also what
+     * the touchscreen used before this state existed.
+     */
+    bool pic_x_valid, pic_y_valid;
     uint16_t write_x, write_y;          /* GRAM address pointer */
     bool writing;                       /* inside a RAMWR pixel stream */
 
@@ -465,35 +472,54 @@ static void mxs_lcdif_start_transfer(MXSLcdifState *s)
     trace_mxs_lcdif_push(words, lines, base, bpp);
 
     /*
-     * What the panel shows can only grow as far as this model is concerned:
-     * the module scans its whole array every frame, and a transfer that covers
-     * a band (the 480x54 and 480x48 refreshes WinCE does for one widget) is a
-     * damage window, not a new picture geometry.  Taking the box from the
-     * current window -- which is what "a push of the entire window defines the
+     * What the panel shows can only shrink this model's idea of the picture
+     * when the guest actually moves it, so the touch origin is taken from the
+     * widest full-axis scan observed, never from an arbitrary band refresh.
+     * A band (the 480x54 and 480x48 refreshes WinCE does for one widget) is a
+     * damage window, not a picture geometry: taking the box from the current
+     * window -- which is what "a push of the entire window defines the
      * picture" amounted to, since the comparison was against that same latched
      * window -- moved the origin used by the touchscreen to the middle of the
-     * last repaint: measured as every delivered coordinate sitting 54 px left
-     * of the finger after a 54-line push (runs/s89, mode ui: tap(252,130) came
-     * back as plate X 1039, i.e. logical 198).
+     * last repaint (measured as every delivered coordinate sitting 54 px left
+     * of the finger after a 54-line push; runs/s89, tap(252,130) came back as
+     * plate X 1039, i.e. logical 198).
      *
      * Growing the box from *every* push has the same defect in the other
-     * direction: a band refresh is a window of its own, so its column range
-     * widened the picture box towards the panel's overscan side and the
-     * touchscreen ended up measuring the finger from a corner the guest never
-     * drew in.  Only a push that spans the panel in the *other* axis carries
-     * information about where the picture sits: a full-height scan says where
-     * the picture starts and ends along the columns, a full-width one says the
-     * same about the rows -- and it is the rows that the touchkey strip band
-     * lies beyond, because the module is mounted turned.  Grow, never shrink,
-     * and only on a scan that can actually define an edge.
+     * direction: a band refresh is a window of its own, and the touchkey
+     * strip band is painted too, so a union over all pushes drifts towards
+     * the panel's overscan side and the touchscreen ends up measuring the
+     * finger from a corner the guest never drew its picture in.  Only a push
+     * that spans the panel in the *other* axis carries information about
+     * where the picture sits: a full-height scan says where the picture
+     * starts and ends along the columns, a full-width one says the same about
+     * the rows -- and it is the rows that the touchkey strip band lies
+     * beyond, because the module is mounted turned.  Among such scans the
+     * picture is the widest one (800 rows against the strip band's 54 and a
+     * widget band's 48), so the widest full-axis scan observed is the
+     * picture's extent; keep that, and keep the whole-panel fallback until
+     * one has been seen.
      */
     if (s->row_start == 0 && s->row_end == s->panel_h - 1) {
-        s->pic_x0 = MIN(s->pic_x0, s->col_start);
-        s->pic_x1 = MAX(s->pic_x1, s->col_end);
+        /* full-height scan: defines the picture's column extent */
+        uint32_t span = (uint32_t)s->col_end - s->col_start + 1;
+
+        if (!s->pic_x_valid ||
+            span > (uint32_t)s->pic_x1 - s->pic_x0 + 1) {
+            s->pic_x0 = s->col_start;
+            s->pic_x1 = s->col_end;
+            s->pic_x_valid = true;
+        }
     }
     if (s->col_start == 0 && s->col_end == s->panel_w - 1) {
-        s->pic_y0 = MIN(s->pic_y0, s->row_start);
-        s->pic_y1 = MAX(s->pic_y1, s->row_end);
+        /* full-width scan: defines the picture's row extent */
+        uint32_t span = (uint32_t)s->row_end - s->row_start + 1;
+
+        if (!s->pic_y_valid ||
+            span > (uint32_t)s->pic_y1 - s->pic_y0 + 1) {
+            s->pic_y0 = s->row_start;
+            s->pic_y1 = s->row_end;
+            s->pic_y_valid = true;
+        }
     }
 
     /*
@@ -605,6 +631,28 @@ static inline uint32_t mxs_lcdif_pix16(MXSLcdifState *s, uint16_t v)
     return rgb_to_pixel32(r | (r >> 5), g | (g >> 6), b | (b >> 5));
 }
 
+/*
+ * The fast update loop assumes the composed array -> console transform is
+ * exactly "console column = GRAM row, console row = (panel_w - 1) - GRAM
+ * column": the transpose-with-mirror the Brain's sideways-mounted panel
+ * produces.  That holds for more than one (MADCTL, rotate) pairing -- MADCTL
+ * 0xd0 with rotate 90, or MADCTL 0 with rotate 270 -- so probe the transform
+ * instead of hard-coding the rotation that happened to be current when the
+ * loop was written (the old test also had to be true before the boot loader's
+ * MADCTL was applied, which left the fast loop dead).
+ */
+static bool mxs_lcdif_fast_update_ok(const MXSLcdifState *s)
+{
+    int c0x, c0y, c1x, c1y, c2x, c2y;
+
+    mxs_lcdif_to_console(s, 0, 0, &c0x, &c0y);
+    mxs_lcdif_to_console(s, 1, 0, &c1x, &c1y);
+    mxs_lcdif_to_console(s, 0, 1, &c2x, &c2y);
+    return c0x == 0 && c0y == (int)s->panel_w - 1 &&
+           c1x == 0 && c1y == (int)s->panel_w - 2 &&
+           c2x == 1 && c2y == (int)s->panel_w - 1;
+}
+
 static void mxs_lcdif_update_display(void *opaque)
 {
     MXSLcdifState *s = opaque;
@@ -630,11 +678,11 @@ static void mxs_lcdif_update_display(void *opaque)
     mxs_lcdif_to_console(s, s->dmg_x1, s->dmg_y1, &cx1, &cy1);
     s->damaged = false;
 
-    if (!s->madctl && s->rotate == 270) {
+    if (mxs_lcdif_fast_update_ok(s)) {
         /*
-         * The case this hardware actually uses: console column = GRAM row,
-         * console row = last GRAM column minus the pixel index.  Worth a
-         * dedicated loop because a full screen push is 410k pixels.
+         * console column = GRAM row, console row = last GRAM column minus the
+         * pixel index.  Worth a dedicated loop because a full screen push is
+         * 410k pixels.
          */
         uint32_t *surf = (uint32_t *)surface_data(surface);
         int dstride = surface_stride(surface) / 4;
@@ -698,19 +746,27 @@ static const GraphicHwOps mxs_lcdif_gfx_ops = {
 static bool mxs_lcdif_box_at(const MXSLcdifState *s, int *bx0, int *by0,
                              int *cols, int *rows)
 {
+    int ex0, ey0, ex1, ey1;
     int gx, gy, x0, y0;
 
     if (s->cols < 1 || s->rows < 1) {
         return false;
     }
     /*
-     * Normalise locally and write out only what was asked for.  Passing the
-     * result straight through the caller's pointers was fatal for anyone who
-     * wanted just the row origin -- which is what mxs_lradc_set_touch() does,
-     * so the first mouse motion the guest received killed the emulator.
+     * Until a full-axis scan has observed each extent the whole panel is the
+     * only sensible answer (and what the touchscreen used before the extent
+     * state existed).  Normalise locally and write out only what was asked
+     * for: passing the result straight through the caller's pointers was
+     * fatal for anyone who wanted just the row origin -- which is what
+     * mxs_lradc_set_touch() does, so the first mouse motion the guest
+     * received killed the emulator.
      */
-    mxs_lcdif_to_console(s, s->pic_x0, s->pic_y0, &x0, &y0);
-    mxs_lcdif_to_console(s, s->pic_x1, s->pic_y1, &gx, &gy);
+    ex0 = s->pic_x_valid ? s->pic_x0 : 0;
+    ex1 = s->pic_x_valid ? s->pic_x1 : s->panel_w - 1;
+    ey0 = s->pic_y_valid ? s->pic_y0 : 0;
+    ey1 = s->pic_y_valid ? s->pic_y1 : s->panel_h - 1;
+    mxs_lcdif_to_console(s, ex0, ey0, &x0, &y0);
+    mxs_lcdif_to_console(s, ex1, ey1, &gx, &gy);
     x0 = MIN(x0, gx);
     y0 = MIN(y0, gy);
     if (bx0) {
@@ -739,8 +795,9 @@ bool mxs_lcdif_touch_box(DeviceState *dev, int *bx0, int *by0,
 
 /*
  * Geometry the touchscreen has to agree with.  A finger sits on the panel
- * array, so convert the front end's normalised absolute axis into a GRAM
- * coordinate and let the LRADC apply the plate law to it.  This function
+ * array, so convert the front end's normalised absolute axis into a console
+ * coordinate, offset it from the picture's own origin, and hand the LRADC a
+ * picture-relative position to apply the plate law to.  This function
  * deliberately knows nothing about the guest's display modes: the console
  * size and the mounting are all that is needed, which is why the touch
  * mapping stays correct from the boot loader through the desktop.
@@ -904,10 +961,16 @@ static void mxs_lcdif_reset(DeviceState *dev)
     s->row_end = s->panel_h - 1;
     s->write_x = 0;
     s->write_y = 0;
-    s->pic_x0 = 0;
-    s->pic_y0 = 0;
-    s->pic_x1 = s->panel_w - 1;
-    s->pic_y1 = s->panel_h - 1;
+    /*
+     * The picture's extent is empty until a full-axis scan observes it;
+     * box_at falls back to the whole panel while the flags are clear.
+     */
+    s->pic_x0 = s->panel_w;
+    s->pic_y0 = s->panel_h;
+    s->pic_x1 = 0;
+    s->pic_y1 = 0;
+    s->pic_x_valid = false;
+    s->pic_y_valid = false;
     if (s->gram) {
         memset(s->gram, 0, (size_t)s->panel_w * s->panel_h * sizeof(*s->gram));
     }
@@ -972,6 +1035,19 @@ static int mxs_lcdif_post_load(void *opaque, int version_id)
 {
     MXSLcdifState *s = opaque;
 
+    /*
+     * Streams older than version 3 carry the pre-fix picture box (always the
+     * whole panel, because the old tracking never moved it); treat that as
+     * "not observed yet" so the fallback reproduces the old behaviour exactly.
+     */
+    if (version_id < 3) {
+        s->pic_x0 = s->panel_w;
+        s->pic_y0 = s->panel_h;
+        s->pic_x1 = 0;
+        s->pic_y1 = 0;
+        s->pic_x_valid = false;
+        s->pic_y_valid = false;
+    }
     mxs_lcdif_console_size(s, &s->cols, &s->rows);
     s->damaged = false;
     s->need_resize = true;
@@ -981,7 +1057,7 @@ static int mxs_lcdif_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_mxs_lcdif = {
     .name = "mxs-lcdif",
-    .version_id = 2,
+    .version_id = 3,
     .minimum_version_id = 2,
     .post_load = mxs_lcdif_post_load,
     .fields = (const VMStateField[]) {
@@ -994,6 +1070,8 @@ static const VMStateDescription vmstate_mxs_lcdif = {
         VMSTATE_UINT16(pic_y0, MXSLcdifState),
         VMSTATE_UINT16(pic_x1, MXSLcdifState),
         VMSTATE_UINT16(pic_y1, MXSLcdifState),
+        VMSTATE_BOOL_V(pic_x_valid, MXSLcdifState, 3),
+        VMSTATE_BOOL_V(pic_y_valid, MXSLcdifState, 3),
         VMSTATE_UINT16(write_x, MXSLcdifState),
         VMSTATE_UINT16(write_y, MXSLcdifState),
         VMSTATE_UINT8(madctl, MXSLcdifState),
