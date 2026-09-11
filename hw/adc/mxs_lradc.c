@@ -629,8 +629,22 @@ static uint64_t mxs_lradc_read(void *opaque, hwaddr offset, unsigned size)
         val = 0x02000000;
         break;
     case LRADC_STATUS:
+        /*
+         * TOUCH_DETECT_RAW is the comparator's raw level, not a latched
+         * edge.  It stays high while the plate is pressed and through the
+         * release until the last conversion has been read -- exactly the
+         * level mxs_lradc_update_irq() derives from pen_state for the touch
+         * IRQ line.  Keying it off touch_down alone dropped the bit the
+         * instant the host delivered the pen-up, so a tap -- whose press and
+         * release arrive in one host input batch -- looked "already
+         * released" by the time the touchraw worker ran its validity check
+         * (report a sample only if TOUCH_DETECT_RAW is still asserted after
+         * the position measurement) and the sample was discarded.  A drag
+         * survived because touch_down stays set for the whole hold, which is
+         * why only quick taps were lost.
+         */
         val = s->regs[idx] & ~STATUS_TOUCH_DETECT_RAW;
-        if (s->touch_down) {
+        if (s->pen_state != MXS_LRADC_PEN_UP) {
             val |= STATUS_TOUCH_DETECT_RAW;
         }
         break;
