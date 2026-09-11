@@ -71,10 +71,22 @@
  * A pen release is reported as "still down at the release position" for
  * this many conversion bursts before the plate goes open.  The touchraw
  * worker (0xc06c1ef4) takes three DELAY-triggered phases per sample, so
- * three bursts cover one full read cycle; four leave headroom for a
- * release that lands in the middle of the burst the driver armed.
+ * three bursts are one read cycle, but a cycle is not enough to carry a
+ * tap: the worker's pressure test reads CH3 from the *previous* cycle's
+ * phase A (a read triggers CH2|CH5 and never CH3, so the value is stale),
+ * and a release leaves that stale value at the open plate (0), so the
+ * first read after a fresh press is discarded as Z == 0.  A tap whose
+ * press and release arrive in one host input batch (the common case) must
+ * therefore stay "down" for two read cycles -- one to clear the stale
+ * pressure, one to hand the driver a clean position whose three phases
+ * all agree -- plus one burst of headroom for a release that lands in the
+ * middle of the burst the driver armed: 3 + 3 + 1.  The old four bursts
+ * let the only clean cycle straddle the PEN_LIFTING -> PEN_UP edge, so
+ * the worker's jitter filter rejected it and the tap was swallowed
+ * entirely; a drag survived because the held pen is re-sampled every
+ * burst while PEN_DOWN.
  */
-#define LRADC_LIFT_BURSTS   4
+#define LRADC_LIFT_BURSTS   7
 
 /*
  * Plate counts the PW-SH6 resistive digitiser presents to the LRADC.
