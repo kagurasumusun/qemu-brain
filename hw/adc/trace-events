@@ -12,3 +12,4 @@ mxs_lradc_set_touch(int32_t axis_x, int32_t axis_y, bool down, uint32_t ctrl0, u
 mxs_lradc_touchkey_strip(int32_t px, int32_t py, int32_t row, int32_t rows, int32_t index, bool down) "touchkey pad from panel %d,%d row %d/%d -> key %d (down=%d)"
 mxs_lradc_convert(int32_t vch, int32_t phys, uint32_t value, bool down, int32_t axis_x, int32_t axis_y, int64_t vnow) "vch%d phys%d -> 0x%04x (down=%d axis %d,%d) vnow=%" PRId64
 mxs_lradc_kick(int32_t n, uint32_t loops, int32_t delay_us, uint32_t channels) "DELAY%d armed: %u extra, %d us, channels 0x%02x"
+mxs_lradc_irq(int line, int level, uint32_t ctrl1) "irq line %d -> %d (ctrl1 0x%08x)"

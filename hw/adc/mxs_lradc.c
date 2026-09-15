@@ -230,6 +230,8 @@ typedef struct MXSLradcState {
 
     uint32_t batt_value;
     uint32_t vddio_value;
+    bool irq_touch_level;
+    bool irq_ch_level[8];
 } MXSLradcState;
 
 OBJECT_DECLARE_SIMPLE_TYPE(MXSLradcState, MXS_LRADC)
@@ -297,12 +299,20 @@ static void mxs_lradc_update_irq(MXSLradcState *s)
     touch = ((c1 & CTRL1_TOUCH_DETECT_IRQ) ||
              s->pen_state != MXS_LRADC_PEN_UP) &&
             (c1 & CTRL1_TOUCH_DETECT_IRQ_EN);
+    if (touch != s->irq_touch_level) {
+        s->irq_touch_level = touch;
+        trace_mxs_lradc_irq(16, touch, c1);
+    }
     qemu_set_irq(s->irq_touch, touch);
 
     for (i = 0; i < LRADC_NCHANNELS; i++) {
         bool level = (c1 & (1u << i)) &&
                      (c1 & (1u << (CTRL1_IRQ_EN_SHIFT + i)));
 
+        if (level != s->irq_ch_level[i]) {
+            s->irq_ch_level[i] = level;
+            trace_mxs_lradc_irq(i, level, c1);
+        }
         qemu_set_irq(s->irq_ch[i], level);
     }
 }
@@ -657,20 +667,34 @@ static void mxs_lradc_write(void *opaque, hwaddr offset, uint64_t value,
         break;
     }
 
-    case LRADC_CTRL1:
+    case LRADC_CTRL1: {
         /*
          * The IRQ status bits [15:8] are write-1-to-clear on real
-         * silicon: a BSP that does the usual
-         *   HW_LRADC_CTRL1_CLR = TOUCH_DETECT_IRQ;
-         * sequence expects the bit to actually go back to zero.
-         * Without this the kernel sees the touch IRQ staying
-         * asserted across re-arming of the IST and complains
-         * with "InterruptHandle() already gated".
+         * silicon, so a plain write of the register must not clobber
+         * them from an interrupt context racing an IST.  That W1C
+         * override applies to *direct* register writes only: the set/
+         * clr/tog shadow aliases must honour the alias as-is, which is
+         * already what mxs_bank_apply() computed into @val.  The BSP's
+         * per-sample sequence depends on it (measured on brain runs:
+         * touchraw.dll 0xc06c1xxx writes HW_LRADC_CTRL1_SET = 0x40000
+         * before the DELAY kick and HW_LRADC_CTRL1_CLR = 0x40000 about
+         * 0.1 ms after the conversion to close the IRQ window; a model
+         * that ORs the first term back in never lets the pend or the
+         * enable bits drop, so the channel IRQ line latches high after
+         * exactly one conversion, the IST sleeps for the rest of the
+         * press, and every tap is invisible to GWES).
          */
-        s->regs[idx] = (s->regs[idx] & ~(val & 0x0000ff00u)) |
-                       (val & ~0x0000ff00u);
+        if (MXS_BANK_OP(offset) == MXS_OP_WRITE) {
+            uint32_t frame = mxs_bank_shift(offset, value) &
+                             mxs_bank_mask(offset, size);
+
+            val = (val & ~0x0000ff00u) |
+                  (s->regs[idx] & ~frame & 0x0000ff00u);
+        }
+        s->regs[idx] = val;
         mxs_lradc_update_irq(s);
         break;
+    }
 
     case LRADC_DELAY0:
     case LRADC_DELAY0 + 1:
