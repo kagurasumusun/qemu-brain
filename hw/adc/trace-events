@@ -13,3 +13,5 @@ mxs_lradc_touchkey_strip(int32_t px, int32_t py, int32_t row, int32_t rows, int3
 mxs_lradc_convert(int32_t vch, int32_t phys, uint32_t value, bool down, int32_t axis_x, int32_t axis_y, int64_t vnow) "vch%d phys%d -> 0x%04x (down=%d axis %d,%d) vnow=%" PRId64
 mxs_lradc_kick(int32_t n, uint32_t loops, int32_t delay_us, uint32_t channels) "DELAY%d armed: %u extra, %d us, channels 0x%02x"
 mxs_lradc_irq(int line, int level, uint32_t ctrl1) "irq line %d -> %d (ctrl1 0x%08x)"
+mxs_lradc_hwaccess(uint32_t offset, uint32_t value) "W off=0x%03x val=0x%08x"
+mxs_lradc_reads(uint32_t offset, uint32_t value) "R off=0x%03x val=0x%08x"

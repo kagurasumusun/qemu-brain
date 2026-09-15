@@ -141,6 +141,7 @@ typedef struct BrainMachineState {
     BlockBackend *sd_blk;
     char *boot_mode;
     char *reg_log;            /* 'reg-log=<file>', see the register log below */
+    char *tb_watch;           /* 'tb-watch=<VA ranges>' TB exec filter */
     uint32_t reg_log_tick;    /* 'reg-log-tick=<ms>' sampling period        */
     uint32_t reg_log_ring;    /* 'reg-log-ring=<n>' samples before and after
                                * a fault; 0 logs every sample instead       */
@@ -2946,6 +2947,87 @@ static void brain_set_boot_mode(Object *obj, const char *value, Error **errp)
  * 'reg-log=<file>': save the CPU register dumps to a file, the register-dump
  * equivalent of capturing the serial log with '-serial file=<file>'.
  */
+/*
+ * TB exec watch: dynamic-analysis aid for reverse-engineering guest driver
+ * flows (currently the WinCE touch stack).  The property takes a comma or
+ * semicolon separated list of inclusive virtual-address ranges; the first
+ * entry into every translation block whose entry PC falls inside a range is
+ * reported to stderr once (first hit per PC), tagged with a hit counter and
+ * the range index.  No guest-visible effect.
+ */
+#define BRAIN_TB_WATCH_MAX 8
+static uint32_t brain_tb_watch_lo[BRAIN_TB_WATCH_MAX];
+static uint32_t brain_tb_watch_hi[BRAIN_TB_WATCH_MAX];
+static unsigned brain_tb_watch_nr;
+int brain_tb_watch_active;
+static uint32_t brain_tb_seen[4096];
+static unsigned long brain_tb_hits;
+
+void brain_tb_watch_log(uint32_t pc);
+void brain_tb_watch_log(uint32_t pc)
+{
+    unsigned i, h = (pc >> 4) & 4095;
+
+    for (i = 0; i < brain_tb_watch_nr; i++) {
+        if (pc >= brain_tb_watch_lo[i] && pc <= brain_tb_watch_hi[i]) {
+            if (brain_tb_seen[h] != pc) {
+                brain_tb_seen[h] = pc;
+                fprintf(stderr,
+                        "[tbw] hit #%lu pc=0x%08x range=%u t=%lldms\n",
+                        ++brain_tb_hits, pc, i,
+                        (long long)(qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL)));
+            }
+            return;
+        }
+    }
+}
+
+static char *brain_get_tb_watch(Object *obj, Error **errp)
+{
+    BrainMachineState *bms = BRAIN_MACHINE(obj);
+
+    return g_strdup(bms->tb_watch ? bms->tb_watch : "");
+}
+
+static void brain_set_tb_watch(Object *obj, const char *value, Error **errp)
+{
+    BrainMachineState *bms = BRAIN_MACHINE(obj);
+    g_autofree char *copy = g_strdup(value);
+    char *p = copy, *tok;
+
+    g_free(bms->tb_watch);
+    bms->tb_watch = g_strdup(value);
+    brain_tb_watch_nr = 0;
+    memset(brain_tb_seen, 0, sizeof(brain_tb_seen));
+    brain_tb_hits = 0;
+    if (!*p) {
+        brain_tb_watch_active = 0;
+        return;
+    }
+    while ((tok = strsep(&p, ",;")) != NULL) {
+        char *sep = strchr(tok, '-');
+        uint32_t lo, hi;
+
+        if (!sep || !*tok || brain_tb_watch_nr >= BRAIN_TB_WATCH_MAX) {
+            error_setg(errp,
+                       "tb-watch wants '0xA-0xB;0xC-0xD' (max %d ranges)",
+                       BRAIN_TB_WATCH_MAX);
+            return;
+        }
+        *sep = '\0';
+        lo = (uint32_t)strtoul(tok, NULL, 0);
+        hi = (uint32_t)strtoul(sep + 1, NULL, 0);
+        if (hi < lo) {
+            error_setg(errp, "tb-watch range 0x%x-0x%x is empty", lo, hi);
+            return;
+        }
+        brain_tb_watch_lo[brain_tb_watch_nr] = lo;
+        brain_tb_watch_hi[brain_tb_watch_nr] = hi;
+        brain_tb_watch_nr++;
+    }
+    brain_tb_watch_active = 1;
+}
+
 static char *brain_get_reg_log(Object *obj, Error **errp)
 {
     BrainMachineState *bms = BRAIN_MACHINE(obj);
@@ -3096,6 +3178,14 @@ static void brain_instance_init(Object *obj)
     object_property_add_bool(obj, "rom-verbose", brain_get_verbose,
                              brain_set_verbose);
 
+    object_property_add_str(obj, "tb-watch", brain_get_tb_watch,
+                            brain_set_tb_watch);
+    object_property_set_description(obj, "tb-watch",
+        "Comma/semicolon separated inclusive VA ranges "
+        "('tb-watch=0x80625400-0x80625800;0xc06c0000-0xc06c6000'): first "
+        "entry into every TB whose PC is in-range is logged once to stderr. "
+        "Dynamic-analysis aid for guest driver flows; no guest-visible "
+        "effect.  Empty string disarms.");
     object_property_add_str(obj, "reg-log", brain_get_reg_log,
                             brain_set_reg_log);
     object_property_set_description(obj, "reg-log",

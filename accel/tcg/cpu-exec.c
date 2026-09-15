@@ -1011,6 +1011,15 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
 
             cpu_loop_exec_tb(cpu, tb, s.pc, &last_tb, &tb_exit);
 
+            {
+                extern int brain_tb_watch_active;
+                extern void brain_tb_watch_log(uint32_t pc);
+
+                if (unlikely(brain_tb_watch_active)) {
+                    brain_tb_watch_log(tb->pc);
+                }
+            }
+
             /* Try to align the host and virtual clocks
                if the guest is in advance */
             align_clocks(sc, cpu);

@@ -651,6 +651,7 @@ static uint64_t mxs_lradc_read(void *opaque, hwaddr offset, unsigned size)
         break;
     }
 
+    trace_mxs_lradc_reads((uint32_t)offset, val);
     return mxs_bank_extract(offset, size, val);
 }
 
@@ -666,6 +667,8 @@ static void mxs_lradc_write(void *opaque, hwaddr offset, uint64_t value,
     }
 
     val = mxs_bank_apply(s->regs[idx], offset, value, size);
+
+    trace_mxs_lradc_hwaccess((uint32_t)offset, val);
 
     switch (idx) {
     case LRADC_CTRL0: {
