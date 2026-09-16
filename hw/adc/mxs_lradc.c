@@ -57,10 +57,24 @@
 #define STATUS_TOUCH_DETECT_RAW     (1u << 0)
 
 #define DELAY_TRIGGER_LRADCS_SHIFT  24
+/*
+ * HW_LRADC_DELAYn field layout (i.MX28 RM and, directly, lradc.dll's own
+ * packing at 0xc0671e54 which ORs loop count, delay ticks and the trigger
+ * mask into one word):
+ *
+ *   [31:24] TRIGGER_LRADCS   [19:16] TRIGGER_DELAYS   [20] KICK
+ *   [15:11] DELAY (5 bits, ~2 kHz ticks)   [10:0] LOOP_COUNT (11 bits)
+ *
+ * A previous draft had LOOP_COUNT and DELAY swapped; the WinCE touch
+ * sampler's typical KICK word (trigger 0x24, DELAY=31, LOOP_COUNT=2047)
+ * decoded as 31 loops at one second each instead of 2047 loops at 15.5 ms,
+ * which is how a held press lost its re-sampling cadence.
+ */
 #define DELAY_KICK                  (1u << 20)
-#define DELAY_LOOP_COUNT_SHIFT      11
-#define DELAY_LOOP_COUNT_MASK       0x1f
-#define DELAY_DELAY_MASK            0x7ff
+#define DELAY_LOOP_COUNT_SHIFT      0
+#define DELAY_LOOP_COUNT_MASK       0x7ff
+#define DELAY_DELAY_SHIFT           11
+#define DELAY_DELAY_MASK            0x1f
 
 #define LRADC_NCHANNELS     8
 
@@ -230,6 +244,8 @@ typedef struct MXSLradcState {
 
     uint32_t batt_value;
     uint32_t vddio_value;
+    bool irq_touch_level;
+    bool irq_ch_level[8];
 } MXSLradcState;
 
 OBJECT_DECLARE_SIMPLE_TYPE(MXSLradcState, MXS_LRADC)
@@ -297,12 +313,20 @@ static void mxs_lradc_update_irq(MXSLradcState *s)
     touch = ((c1 & CTRL1_TOUCH_DETECT_IRQ) ||
              s->pen_state != MXS_LRADC_PEN_UP) &&
             (c1 & CTRL1_TOUCH_DETECT_IRQ_EN);
+    if (touch != s->irq_touch_level) {
+        s->irq_touch_level = touch;
+        trace_mxs_lradc_irq(16, touch, c1);
+    }
     qemu_set_irq(s->irq_touch, touch);
 
     for (i = 0; i < LRADC_NCHANNELS; i++) {
         bool level = (c1 & (1u << i)) &&
                      (c1 & (1u << (CTRL1_IRQ_EN_SHIFT + i)));
 
+        if (level != s->irq_ch_level[i]) {
+            s->irq_ch_level[i] = level;
+            trace_mxs_lradc_irq(i, level, c1);
+        }
         qemu_set_irq(s->irq_ch[i], level);
     }
 }
@@ -657,20 +681,34 @@ static void mxs_lradc_write(void *opaque, hwaddr offset, uint64_t value,
         break;
     }
 
-    case LRADC_CTRL1:
+    case LRADC_CTRL1: {
         /*
          * The IRQ status bits [15:8] are write-1-to-clear on real
-         * silicon: a BSP that does the usual
-         *   HW_LRADC_CTRL1_CLR = TOUCH_DETECT_IRQ;
-         * sequence expects the bit to actually go back to zero.
-         * Without this the kernel sees the touch IRQ staying
-         * asserted across re-arming of the IST and complains
-         * with "InterruptHandle() already gated".
+         * silicon, so a plain write of the register must not clobber
+         * them from an interrupt context racing an IST.  That W1C
+         * override applies to *direct* register writes only: the set/
+         * clr/tog shadow aliases must honour the alias as-is, which is
+         * already what mxs_bank_apply() computed into @val.  The BSP's
+         * per-sample sequence depends on it (measured on brain runs:
+         * touchraw.dll 0xc06c1xxx writes HW_LRADC_CTRL1_SET = 0x40000
+         * before the DELAY kick and HW_LRADC_CTRL1_CLR = 0x40000 about
+         * 0.1 ms after the conversion to close the IRQ window; a model
+         * that ORs the first term back in never lets the pend or the
+         * enable bits drop, so the channel IRQ line latches high after
+         * exactly one conversion, the IST sleeps for the rest of the
+         * press, and every tap is invisible to GWES).
          */
-        s->regs[idx] = (s->regs[idx] & ~(val & 0x0000ff00u)) |
-                       (val & ~0x0000ff00u);
+        if (MXS_BANK_OP(offset) == MXS_OP_WRITE) {
+            uint32_t frame = mxs_bank_shift(offset, value) &
+                             mxs_bank_mask(offset, size);
+
+            val = (val & ~0x0000ff00u) |
+                  (s->regs[idx] & ~frame & 0x0000ff00u);
+        }
+        s->regs[idx] = val;
         mxs_lradc_update_irq(s);
         break;
+    }
 
     case LRADC_DELAY0:
     case LRADC_DELAY0 + 1:
@@ -682,7 +720,8 @@ static void mxs_lradc_write(void *opaque, hwaddr offset, uint64_t value,
         if (val & DELAY_KICK) {
             uint32_t loops = (val >> DELAY_LOOP_COUNT_SHIFT) &
                              DELAY_LOOP_COUNT_MASK;
-            int64_t delay = (int64_t)(val & DELAY_DELAY_MASK) * 500000;
+            int64_t delay = (int64_t)((val >> DELAY_DELAY_SHIFT) &
+                            DELAY_DELAY_MASK) * 500000;
 
             /*
              * KICK starts LOOP_COUNT + 1 conversions and the bit is
